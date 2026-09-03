@@ -41,10 +41,21 @@ class Playlist {
   }
 
   factory Playlist.fromMap(Map<String, dynamic> map, {List<Track>? tracks}) {
+    final rawId = map['id'];
+    final id = rawId is String ? rawId : (rawId?.toString() ?? '');
+    if (id.isEmpty) {
+      throw FormatException('Playlist id missing: $map');
+    }
+    final rawName = map['name'];
+    final name = rawName is String
+        ? (rawName.trim().isEmpty ? '未命名歌单' : rawName)
+        : (rawName?.toString().trim().isEmpty ?? true ? '未命名歌单' : rawName.toString());
+    final rawCover = map['coverUrl'];
+    final coverUrl = rawCover is String ? rawCover : rawCover?.toString();
     return Playlist(
-      id: map['id'] ?? '',
-      name: map['name'] ?? '未命名歌单',
-      coverUrl: map['coverUrl'] as String?,
+      id: id,
+      name: name,
+      coverUrl: coverUrl,
       tracks: tracks ?? [],
     );
   }

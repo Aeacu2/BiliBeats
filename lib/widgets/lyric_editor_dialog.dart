@@ -222,15 +222,27 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
 
     // Only the newest search may commit.
     final combo = '$_searchArtist $_searchSong'.trim();
-    final netease = (query == combo && _searchSong.isNotEmpty)
+    final reverseCombo = '$_searchSong $_searchArtist'.trim();
+    final isStructuredQuery = _searchSong.isNotEmpty &&
+        (query == combo || query == reverseCombo);
+    final netease = isStructuredQuery
         ? await LyricsEngine.fetchFromNetEase(_searchSong,
             artist: _searchArtist.isEmpty ? null : _searchArtist)
         : await LyricsEngine.fetchFromNetEase(query);
+    // Fallback to LRCLIB if NetEase misses (prioritize NetEase)
+    LyricsResult? lrclib;
+    if (netease == null) {
+      lrclib = isStructuredQuery
+          ? await LyricsEngine.fetchFromLRCLIB(_searchSong,
+              artist: _searchArtist.isEmpty ? null : _searchArtist)
+          : await LyricsEngine.fetchFromLRCLIB(query);
+    }
 
     if (!mounted || token != _searchToken) return;
     final results = <LyricsResult>[
       ..._pinnedResults(),
       if (netease != null) netease,
+      if (lrclib != null) lrclib,
     ];
     setState(() {
       _searchResults = results;

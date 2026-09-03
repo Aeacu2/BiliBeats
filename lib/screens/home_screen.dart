@@ -197,7 +197,6 @@ class _HomeScreenState extends State<HomeScreen> {
     return GestureDetector(
       onTap: onTap,
       child: GlassCard(
-        borderRadius: 18,
         padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -206,7 +205,7 @@ class _HomeScreenState extends State<HomeScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(AppRadius.sm),
                   child: cover != null && cover.isNotEmpty
                       ? CachedCoverImage(url: cover, width: 40, height: 40)
                       : Container(
@@ -250,8 +249,8 @@ class _HomeScreenState extends State<HomeScreen> {
         widget.onPlayCollection?.call(list);
       },
       child: SizedBox(
-        width: 36,
-        height: 36,
+        width: 48,
+        height: 48,
         child: Center(
           child: Container(
             width: 30,
@@ -312,16 +311,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     pl.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: AppColors.textPrimary,
-                        fontSize: 15,
-                        height: 1.3,
-                        fontWeight: FontWeight.w600),
+                    style: AppTypography.body.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary,
+                    ),
                   ),
                   const SizedBox(height: 4),
-                  Text('${pl.tracks.length} 首',
-                      style: const TextStyle(
-                          color: AppColors.textMuted, fontSize: 13)),
+                  Text('${pl.tracks.length} 首', style: AppTypography.caption),
                 ],
               ),
             ),
@@ -360,11 +356,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: MarqueeText(
                       text: task.track.title,
                       phase: (index % 5) / 5,
-                      style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                          height: 1.3),
+                      style: AppTypography.body.copyWith(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                        color: AppColors.textPrimary,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 2),
@@ -372,8 +368,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     task.track.uploader,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: AppColors.textMuted, fontSize: 12),
+                    style: AppTypography.caption.copyWith(fontSize: 12),
                   ),
                 ],
               ),
@@ -533,7 +528,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   )
                 else
                   SizedBox(
-                    height: 180,
+                    height: 200,
                     child: ListView.builder(
                       scrollDirection: Axis.horizontal,
                       itemCount: widget.recentlyPlayed.length,
@@ -563,13 +558,17 @@ class _HomeScreenState extends State<HomeScreen> {
                                   track.title,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 14, fontWeight: FontWeight.w600),
+                                  style: AppTypography.body.copyWith(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.textPrimary,
+                                  ),
                                 ),
                                 Text(
                                   track.uploader,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+                                  style: AppTypography.caption.copyWith(fontSize: 12),
                                 ),
                               ],
                             ),

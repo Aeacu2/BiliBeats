@@ -289,8 +289,8 @@ class MiniPlayer extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onPressed,
       child: SizedBox(
-        width: 44,
-        height: 46,
+        width: 48,
+        height: 48,
         child: Center(
           child: Icon(icon, color: AppColors.textSecondary, size: 26),
         ),

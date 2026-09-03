@@ -76,12 +76,29 @@ class AudioDownloadService {
 
   /// Stable per-part key. Falls back to bvid only for the (rare) track built
   /// without a usable id.
-  static String _key(Track track) =>
-      track.id.isNotEmpty ? track.id : track.bvid;
+  static String _key(Track track) {
+    if (track.id.isNotEmpty) return track.id;
+    if (track.bvid.isNotEmpty) return track.bvid;
+    throw StateError('Track has empty id and bvid: $track');
+  }
 
   static String _audioPath(String dir, String key) => '$dir/audio_$key.m4a';
   static String _readyPath(String dir, String key) => '$dir/audio_$key.ready';
   static String _metaPath(String dir, String key) => '$dir/audio_$key.json';
+
+  static Future<void> _atomicWriteString(String path, String content) async {
+    final tmp = File('$path.${DateTime.now().microsecondsSinceEpoch}.tmp');
+    await tmp.writeAsString(content, flush: true);
+    final target = File(path);
+    if (await target.exists()) {
+      try {
+        await target.delete();
+      } catch (e) {
+        debugPrint('_atomicWriteString delete failed: $e');
+      }
+    }
+    await tmp.rename(path);
+  }
 
   /// Saves track metadata JSON next to the audio file (used for rediscovery).
   ///
@@ -94,13 +111,17 @@ class AudioDownloadService {
       {bool force = false}) async {
     try {
       final dir = await _dir();
-      final metaFile = File(_metaPath(dir, _key(track)));
+      final key = _key(track);
+      final metaPath = _metaPath(dir, key);
+      final metaFile = File(metaPath);
       if (!force && await metaFile.exists()) return;
       final encoded = jsonEncode(track.toMap());
-      if (await metaFile.exists() && await metaFile.readAsString() == encoded) {
-        return;
+      if (await metaFile.exists()) {
+        try {
+          if (await metaFile.readAsString() == encoded) return;
+        } catch (_) {}
       }
-      await metaFile.writeAsString(encoded);
+      await _atomicWriteString(metaPath, encoded);
     } catch (e) {
       debugPrint('saveTrackMetadata error: $e');
     }
@@ -148,8 +169,15 @@ class AudioDownloadService {
   /// Returns true when something was actually deleted.
   static Future<bool> delete(Track track) async {
     final dir = await _dir();
-    final id = _key(track);
+    String id;
+    try {
+      id = _key(track);
+    } catch (_) {
+      return false;
+    }
     var deleted = false;
+    // Delete in order: ready first so _statDownloaded immediately returns false,
+    // then audio, then meta, then part. This avoids stale ready->false but m4a orphan.
     for (final path in [
       _readyPath(dir, id),
       _audioPath(dir, id),
@@ -170,29 +198,42 @@ class AudioDownloadService {
     return deleted;
   }
 
+  /// Invalidate memo for an id whose file was externally removed or discovered missing.
+  static void invalidateMemo(String id) {
+    _downloadedMemo.remove(id);
+  }
+
   /// Ensures [track]'s audio is fully downloaded and returns the local path.
   ///
   /// Idempotent and concurrency-safe: a second call for the same track while a
   /// download is in flight awaits the same future instead of downloading twice.
   static Future<String> ensureDownloaded(Track track) async {
-    final dir = await _dir();
-    final id = _key(track);
-    final path = _audioPath(dir, id);
-    await saveTrackMetadata(track);
-    // Already on disk: no DB write either — registration happens at download
-    // time (below) and at library load, so replaying every track start would
-    // just be an O(n) scan over the library for nothing.
-    if (await isDownloadedById(id)) {
-      return path;
+    String id;
+    try {
+      id = _key(track);
+    } catch (e) {
+      debugPrint('ensureDownloaded invalid track: $e');
+      throw Exception('无效曲目id');
     }
-
     final existing = _inFlight[id];
     if (existing != null) return existing;
-
-    final future = _download(track, dir, path);
-    _inFlight[id] = future;
+    // Claim synchronously before any await to prevent parallel .part writes
+    final completer = Completer<String>();
+    _inFlight[id] = completer.future;
     try {
-      return await future;
+      final dir = await _dir();
+      final path = _audioPath(dir, id);
+      await saveTrackMetadata(track);
+      if (await isDownloadedById(id)) {
+        completer.complete(path);
+        return path;
+      }
+      final result = await _download(track, dir, path);
+      completer.complete(result);
+      return result;
+    } catch (e, st) {
+      completer.completeError(e, st);
+      rethrow;
     } finally {
       _inFlight.remove(id);
     }
@@ -227,7 +268,10 @@ class AudioDownloadService {
         req.headers.set('Range', 'bytes=$existing-');
       }
 
-      final res = await req.close();
+      final res = await req.close().timeout(
+        const Duration(seconds: 15),
+        onTimeout: () => throw TimeoutException('CDN close timeout'),
+      );
       // A .part that already covers the whole file (e.g. a crash between the
       // rename and the .ready marker) makes the CDN answer 416. The bytes on
       // disk are complete — finalize them instead of failing the download.
@@ -236,10 +280,32 @@ class AudioDownloadService {
         await res.drain<void>();
         final destination = File(path);
         if (await destination.exists()) {
-          await destination.delete();
+          try {
+            await destination.delete();
+          } catch (e) {
+            debugPrint('416 finalize delete failed: $e');
+          }
         }
-        await tmp.rename(path);
-        await File(_readyPath(dir, _key(track))).create();
+        // Atomic rename with Windows fallback.
+        try {
+          await tmp.rename(path);
+        } catch (e) {
+          // Windows: target exists or lock. Try copy+delete fallback.
+          debugPrint('416 rename failed, trying copy: $e');
+          await tmp.copy(path);
+          try {
+            await tmp.delete();
+          } catch (_) {}
+        }
+        // Ready marker: atomic create (empty file). Ensure after rename.
+        try {
+          final readyFile = File(_readyPath(dir, _key(track)));
+          if (!await readyFile.exists()) {
+            await readyFile.create(recursive: true);
+          }
+        } catch (e) {
+          debugPrint('416 ready create failed: $e');
+        }
         await saveTrackMetadata(track);
         _downloadedMemo[_key(track)] = true;
         _emit(DownloadProgress(track.id, existing, existing, true, null));
@@ -278,7 +344,13 @@ class AudioDownloadService {
         sink = tmp.openWrite();
       }
 
-      await for (final chunk in res) {
+      // Apply read timeout per chunk: stall >30s is failure. res itself has no
+      // idle timeout once headers arrived; chunk stream can hang forever.
+      final timeoutRes = res.timeout(
+        const Duration(seconds: 30),
+        onTimeout: (sink) => sink.addError(TimeoutException('CDN chunk timeout')),
+      );
+      await for (final chunk in timeoutRes) {
         sink.add(chunk);
         received += chunk.length;
         // Throttle progress events to ~every 64 KiB to avoid stream spam.
@@ -303,10 +375,34 @@ class AudioDownloadService {
 
       final destination = File(path);
       if (await destination.exists()) {
-        await destination.delete();
+        try {
+          await destination.delete();
+        } catch (e) {
+          debugPrint('finalize delete failed: $e');
+        }
       }
-      await tmp.rename(path);
-      await File(_readyPath(dir, _key(track))).create();
+      try {
+        await tmp.rename(path);
+      } catch (e) {
+        debugPrint('finalize rename failed, trying copy: $e');
+        try {
+          await tmp.copy(path);
+          try {
+            await tmp.delete();
+          } catch (_) {}
+        } catch (e2) {
+          debugPrint('finalize copy failed: $e2');
+          rethrow;
+        }
+      }
+      try {
+        final readyFile = File(_readyPath(dir, _key(track)));
+        if (!await readyFile.exists()) {
+          await readyFile.create(recursive: true);
+        }
+      } catch (e) {
+        debugPrint('ready create failed: $e');
+      }
       await saveTrackMetadata(track);
       _downloadedMemo[_key(track)] = true;
 

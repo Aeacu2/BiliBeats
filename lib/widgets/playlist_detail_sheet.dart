@@ -146,8 +146,9 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
     final dockedPlayerHeight = MiniPlayer.totalHeight(context);
 
     return GestureDetector(
+      behavior: HitTestBehavior.translucent,
       onVerticalDragEnd: (details) {
-        if ((details.primaryVelocity ?? 0) > 320) {
+        if ((details.primaryVelocity ?? 0) > 480) {
           Haptics.selection();
           if (widget.onClose != null) {
             widget.onClose!();
@@ -485,7 +486,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
               const SizedBox(width: 12),
             ],
             ClipRRect(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(AppRadius.sm),
               child: CachedCoverImage(
                 url: track.coverUrl,
                 width: 48,
@@ -498,22 +499,22 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                 crossAxisAlignment:
                     CrossAxisAlignment.start,
                 children: [
-                  RepaintBoundary(
+                    RepaintBoundary(
                     child: MarqueeText(
                       text: track.title,
                       phase: (index % 5) / 5,
-                      style: const TextStyle(
-                          color: AppColors.textPrimary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                          height: 1.3),
+                      style: AppTypography.body.copyWith(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textPrimary,
+                      ),
                     ),
                   ),
                   Text(
                     track.uploader,
-                    style: const TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 12),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTypography.caption.copyWith(fontSize: 12),
                   ),
                 ],
               ),
@@ -540,7 +541,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                 tooltip: '添加至歌单',
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(
-                    minWidth: 40, minHeight: 40),
+                    minWidth: 48, minHeight: 48),
                 onPressed: () {
                   TrackOptionsMenu.showAddToPlaylist(
                       context, track,
@@ -562,7 +563,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
       padding: const EdgeInsets.only(right: 20),
       decoration: BoxDecoration(
         color: AppColors.danger.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.md),
       ),
       child: Icon(
         _isVirtualDownloads
@@ -597,7 +598,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
       width: 72,
       height: 72,
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(AppRadius.md),
         child: cover != null && cover.isNotEmpty && !_isVirtualDownloads
             ? CachedCoverImage(url: cover, width: 72, height: 72)
             : DecoratedBox(

@@ -49,12 +49,14 @@ void showAppSnackBar(
     shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(16));
   }
 
-  messenger.showSnackBar(SnackBar(
-    content: content,
-    backgroundColor: backgroundColor,
-    behavior: behavior,
-    margin: margin,
-    shape: shape,
-    duration: duration,
-  ));
+  messenger
+    ..clearSnackBars()
+    ..showSnackBar(SnackBar(
+      content: content,
+      backgroundColor: backgroundColor,
+      behavior: behavior,
+      margin: margin,
+      shape: shape,
+      duration: duration,
+    ));
 }

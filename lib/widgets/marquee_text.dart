@@ -161,7 +161,11 @@ class _MarqueeTextState extends State<MarqueeText>
         }
 
         // Only overflowing text scrolls; text that fits is simply drawn.
-        final overflows = textSize.width > maxWidth + 0.5;
+        // Respect accessibility: when animations are disabled, never scroll.
+        final disableAnimations = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+        final accessibleNav = MediaQuery.maybeOf(context)?.accessibleNavigation ?? false;
+        final shouldAnimate = !disableAnimations && !accessibleNav;
+        final overflows = shouldAnimate && textSize.width > maxWidth + 0.5;
         if (!overflows) {
           _scheduleSync(shouldRun: false, cycle: Duration.zero);
           return SizedBox(
@@ -171,7 +175,7 @@ class _MarqueeTextState extends State<MarqueeText>
               widget.text,
               maxLines: 1,
               softWrap: false,
-              overflow: TextOverflow.clip,
+              overflow: TextOverflow.ellipsis,
               style: style,
               textAlign: widget.textAlign,
             ),
@@ -208,8 +212,10 @@ class _MarqueeTextState extends State<MarqueeText>
                   Text(widget.text,
                       maxLines: 1, softWrap: false, style: style),
                   SizedBox(width: widget.gap),
-                  Text(widget.text,
-                      maxLines: 1, softWrap: false, style: style),
+                  ExcludeSemantics(
+                    child: Text(widget.text,
+                        maxLines: 1, softWrap: false, style: style),
+                  ),
                 ],
               ),
             ),

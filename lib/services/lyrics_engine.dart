@@ -18,11 +18,16 @@ class LyricsEngine {
 
   static Future<String?> _httpGet(String urlStr, {Map<String, String>? headers}) async {
     try {
-      final req = await _client.getUrl(Uri.parse(urlStr));
+      final req = await _client
+          .getUrl(Uri.parse(urlStr))
+          .timeout(const Duration(seconds: 10));
       headers?.forEach((k, v) => req.headers.set(k, v));
-      final res = await req.close();
+      final res = await req.close().timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
-        return await res.transform(utf8.decoder).join();
+        return await res
+            .transform(utf8.decoder)
+            .join()
+            .timeout(const Duration(seconds: 10));
       }
       // Drain non-200 bodies so the connection returns to the pool; with
       // maxConnectionsPerHost = 4, a few un-drained 4xx/5xx responses would
@@ -92,6 +97,8 @@ class LyricsEngine {
   static final RegExp parenSubtitle = RegExp(r'\s*[\(（][^\)）]+[\)）]');
   static final RegExp separator =
       RegExp(r'^(.+?)\s*[-–—/︱|丨_]\s*(\S.*)$');
+  static final RegExp featSeparator =
+      RegExp(r'^(.+?)\s+(?:feat\.?|ft\.?|with|by)\s+(.+)$', caseSensitive: false);
 
   static String _preprocess(String raw) {
     return raw
@@ -134,8 +141,15 @@ class LyricsEngine {
           continue;
         }
         for (final sub in seg.replaceAll(glueNoise, ' ').split(RegExp(r'\s+'))) {
-          if (sub.isEmpty || sub.length < 2) continue;
+          if (sub.isEmpty) continue;
+          // Keep single-char CJK song names like 《爱》; ASCII single letters are noise
+          if (sub.length < 2) {
+            final isSingleCjk = RegExp(r'^[\u4e00-\u9fa5]$').hasMatch(sub);
+            if (!isSingleCjk) continue;
+          }
           if (tokenNoise.hasMatch(sub)) continue;
+          // tokenNoise residue like "品" after stripping "无损" is meaningless
+          if (sub.length == 1 && RegExp(r'^[\u4e00-\u9fa5]$').hasMatch(sub) && tokenNoise.hasMatch(sub)) continue;
           out.add(sub);
         }
       }
@@ -194,8 +208,8 @@ class LyricsEngine {
       Match? songPair;
       final unmarked = pairs.where((m) {
         final tail = title.substring(m.end);
-        final peek = tail.length > 10 ? tail.substring(0, 10) : tail;
-        return !showMarker.hasMatch(peek);
+        // Scan full tail, not just 10 chars: "《音乐缘计划》  第二季 EP09" flag at 12+ chars
+        return !showMarker.hasMatch(tail);
       }).toList();
       songPair = unmarked.isNotEmpty ? unmarked.last : pairs.last;
       song = songPair.group(1)!.trim();
@@ -301,7 +315,7 @@ class LyricsEngine {
       final s = song.trim();
       final hint = artistHint.trim();
       final norm = _normalize(s);
-      if (s.isEmpty || norm.isEmpty || norm.length > 24) return;
+      if (s.isEmpty || norm.isEmpty || norm.length > 30) return;
       if (tokenNoise.hasMatch(s)) return;
       if (candidates.any((c) => _normalize(c['song']!) == norm)) return;
       candidates.add({
@@ -315,8 +329,7 @@ class LyricsEngine {
     var bookIdx = 0;
     for (final m in bookBracket.allMatches(title)) {
       final tail = title.substring(m.end);
-      final peek = tail.length > 10 ? tail.substring(0, 10) : tail;
-      add(m.group(1)!, '', bookIdx++, showMarker.hasMatch(peek));
+      add(m.group(1)!, '', bookIdx++, showMarker.hasMatch(tail));
     }
     for (final m in bracketContent.allMatches(title)) {
       final content = m.group(1)!.trim();
@@ -328,7 +341,7 @@ class LyricsEngine {
         add(tokens.last, tokens.sublist(0, tokens.length - 1).join(' '));
       }
     }
-    final sep = separator.firstMatch(title);
+    final sep = separator.firstMatch(title) ?? featSeparator.firstMatch(title);
     if (sep != null) {
       // Drop show/channel metadata after the first bar: "…经典 | 音乐缘计划
       // | Melody Journey | iQIYI奇艺音悦台" — only the pre-bar part is a song.
@@ -449,8 +462,14 @@ class LyricsEngine {
       var score = 0;
       if (hasLyrics) score += 1;
       if (!isTitleEcho) {
-        if (songInRaw) score += 2;
-        if (songMatchesCandidate) score += 1;
+        // songInRaw and songMatchesCandidate are overlapping signals; taking
+        // both double-counts the same title evidence (e.g. 2-char song contained
+        // in raw and equal to candidate). Keep max only.
+        if (songInRaw) {
+          score += 2;
+        } else if (songMatchesCandidate) {
+          score += 1;
+        }
       }
       if (artistInRaw) score += 2;
 
@@ -488,6 +507,63 @@ class LyricsEngine {
               ? song
               : (cleanOfficialSong.isNotEmpty ? cleanOfficialSong : officialSong);
           bestArtist = hitArtist ?? fallback['artist']!;
+        }
+      }
+    }
+
+    // Strict priority: LRCLIB is only consulted if NetEase yields no valid
+    // candidate at all. This keeps Chinese titles firmly on NetEase (better
+    // segmentation/translation) while still letting Western/Japanese titles
+    // fall through to LRCLIB.
+    if (bestSong == null) {
+      for (final candidate in candidates) {
+        if (candidate['showLike'] == '1' && hasUnmarkedBook) continue;
+        final song = candidate['song']!;
+        final hint = candidate['artistHint'];
+        final artistQuery = (hint != null && hint.isNotEmpty) ? hint : null;
+
+        final result = await fetchFromLRCLIB(song, artist: artistQuery);
+        if (result == null) continue;
+
+        final officialSong = (result.songTitle ?? '').trim();
+        final officialArtist = (result.artistName ?? '').trim();
+        final cleanOfficialSong = officialSong.replaceAll(parenSubtitle, '').trim();
+        final offSongNorm = _normalize(cleanOfficialSong);
+        final offArtistNorm = _normalize(officialArtist);
+        final candNorm = _normalize(song);
+
+        if (!_isSaneOfficialTitle(cleanOfficialSong)) continue;
+        if (offSongNorm.isEmpty) continue;
+
+        final songInRaw = normRaw.contains(offSongNorm);
+        final songMatchesCandidate = offSongNorm == candNorm ||
+            candNorm.contains(offSongNorm) ||
+            offSongNorm.contains(candNorm);
+        final artistInRaw = offArtistNorm.isNotEmpty && normRaw.contains(offArtistNorm);
+        final hasLyrics = result.lines.isNotEmpty;
+        final isTitleEcho = offSongNorm.isNotEmpty && offSongNorm == normRaw;
+
+        var score = 0;
+        if (hasLyrics) score += 1;
+        if (!isTitleEcho) {
+          if (songInRaw) {
+            score += 1; // LRCLIB scores slightly lower than NetEase (+2→+1) to keep priority
+          } else if (songMatchesCandidate) {
+            score += 1;
+          }
+        }
+        if (artistInRaw) score += 1; // +1 instead of NetEase +2
+
+        if ((songInRaw || songMatchesCandidate) && score > 0) {
+          final bookIdx = int.tryParse(candidate['bookIdx'] ?? '') ?? -1;
+          final effective = score * 10 + bookIdx;
+          if (effective > bestEffective) {
+            bestEffective = effective;
+            bestSong = isTitleEcho ? song : (cleanOfficialSong.isNotEmpty ? cleanOfficialSong : officialSong);
+            // LRCLIB artist may be empty; keep fallback
+            bestArtist = artistInRaw ? officialArtist : (fallback['artist'] ?? officialArtist);
+            if (bestArtist.isEmpty) bestArtist = fallback['artist']!;
+          }
         }
       }
     }
@@ -550,7 +626,8 @@ class LyricsEngine {
     }
 
     for (final token in tokens.take(2)) {
-      if (_isCjkNameLike(token) && await _netEaseArtistExists(token)) {
+      if ((_isCjkNameLike(token) || _isAsciiNameLike(token)) &&
+          await _netEaseArtistExists(token)) {
         return _ArtistResolution(token, 1);
       }
     }
@@ -560,6 +637,12 @@ class LyricsEngine {
   /// A token that reads like one artist name, CJK only (2–7 name characters).
   static bool _isCjkNameLike(String t) =>
       RegExp(r'^[\u4e00-\u9fa5·]{2,7}$').hasMatch(t);
+
+  /// ASCII name-like (2–15 letters, allows space/dot): Taylor Swift, etc.
+  /// Weaker than CJK gate, but enables Western covers that previously never got +1
+  static bool _isAsciiNameLike(String t) =>
+      RegExp(r'^[A-Za-z][A-Za-z\s·\.]{1,14}$').hasMatch(t) &&
+      t.trim().split(RegExp(r'\s+')).every((w) => w.length >= 2);
 
   /// Name-like (2–7 CJK/ASCII chars) tokens surviving [rawTitle]'s noise
   /// cleanup, in title order. These are the plausible singer names.
@@ -645,7 +728,8 @@ class LyricsEngine {
 
   // Normalize string for candidate matching verification
   static String _normalize(String input) {
-    return input.replaceAll(RegExp(r'[^\u4e00-\u9fa5a-zA-Z0-9]'), '').toLowerCase();
+    // Keep · (middle dot) which is part of many artist names (陈奕迅·孤勇者)
+    return input.replaceAll(RegExp(r'[^\u4e00-\u9fa5a-zA-Z0-9·]'), '').toLowerCase();
   }
 
   /// Structural sanity gate for a DB-confirmed song name. NetEase hosts
@@ -662,11 +746,14 @@ class LyricsEngine {
     final cand = _normalize(candidateName);
     final target = _normalize(targetTitle);
     if (cand.isEmpty || target.isEmpty) return false;
-    // A 2-char target like "11" would substring-match "2011"/"11月…" and pull
-    // the wrong track's lyrics; exact equality is still trusted for short
-    // names, but contains-matching requires a longer (specific) name.
     if (cand == target) return true;
-    if (cand.length < 4 || target.length < 4) return false;
+    // CJK 2-char titles like 光亮/起风了 are specific; ASCII 2-char like 11 is not
+    final candIsCjk = RegExp(r'[\u4e00-\u9fa5]').hasMatch(cand);
+    final targetIsCjk = RegExp(r'[\u4e00-\u9fa5]').hasMatch(target);
+    final minLen = (candIsCjk && targetIsCjk) ? 2 : 4;
+    if (cand.length < minLen || target.length < minLen) return false;
+    // For ASCII short targets still guard 11 vs 2011: require exact for <4
+    if (!candIsCjk && !targetIsCjk && (cand.length < 4 || target.length < 4)) return false;
     return cand.contains(target) || target.contains(cand);
   }
 
@@ -734,10 +821,70 @@ class LyricsEngine {
     return sb.toString();
   }
 
+  // LRCLIB Provider (fallback, global coverage)
+  static Future<LyricsResult?> fetchFromLRCLIB(String title, {String? artist}) async {
+    final queries = [
+      if (artist != null && artist.isNotEmpty) '$artist $title',
+      if (artist != null && artist.isNotEmpty) '$title $artist',
+      title,
+    ];
+    for (final query in queries) {
+      final url = 'https://lrclib.net/api/search?q=${Uri.encodeComponent(query)}';
+      try {
+        final body = await _httpGet(url, headers: {'User-Agent': 'bilibeat/1.0.0'});
+        if (body != null) {
+          final items = jsonDecode(body) as List? ?? [];
+          for (final item in items) {
+            final trackName = (item['trackName'] ?? '') as String;
+            if (!isTitleMatching(trackName, title)) continue;
+            // Artist check when provided: prefer matching artist
+            if (artist != null && artist.isNotEmpty) {
+              final artistName = (item['artistName'] ?? '') as String;
+              final normArtist = _normalize(artist);
+              final normItemArtist = _normalize(artistName);
+              // If artist mismatch strongly, skip this item unless title is exact
+              if (normArtist.isNotEmpty && normItemArtist.isNotEmpty && normArtist != normItemArtist) {
+                // Allow if title matches exactly, otherwise require artist contains
+                if (_normalize(trackName) != _normalize(title)) {
+                  // Check if item artist contains query artist or vice versa
+                  if (!normItemArtist.contains(normArtist) && !normArtist.contains(normItemArtist)) {
+                    continue;
+                  }
+                }
+              }
+            }
+            final rawLrc = (item['syncedLyrics'] ?? item['plainLyrics'] ?? '') as String;
+            final lines = parseLrc(rawLrc);
+            if (lines.isNotEmpty) {
+              return LyricsResult(
+                source: 'lrclib',
+                songTitle: trackName.isNotEmpty ? trackName : title,
+                artistName: (item['artistName'] as String?) ?? artist,
+                lines: lines,
+              );
+            } else if (rawLrc.isNotEmpty) {
+              // Plain lyrics fallback as single block
+              return LyricsResult(
+                source: 'lrclib',
+                songTitle: trackName.isNotEmpty ? trackName : title,
+                artistName: (item['artistName'] as String?) ?? artist,
+                lines: [LyricLine(time: 0, text: rawLrc)],
+              );
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('LRCLIB fetch error: $e');
+      }
+    }
+    return null;
+  }
+
   // NetEase Cloud Music Provider (Best Chinese coverage)
   static Future<LyricsResult?> fetchFromNetEase(String title, {String? artist}) async {
     final queries = [
       if (artist != null && artist.isNotEmpty) '$artist $title',
+      if (artist != null && artist.isNotEmpty) '$title $artist',
       title,
     ];
 
@@ -855,10 +1002,20 @@ class LyricsEngine {
     final title = cleaned['songTitle']!;
     final artist = cleaned['artist'];
 
-    // Step 1: NetEase (best Chinese coverage)
+    // Step 1: NetEase (best Chinese coverage, prioritized)
     final neteaseResult = await fetchFromNetEase(title, artist: artist);
     if (neteaseResult != null && neteaseResult.lines.isNotEmpty) {
       return neteaseResult;
+    }
+
+    // Step 2: LRCLIB fallback (global coverage, e.g. Western/Japanese)
+    try {
+      final lrclibResult = await fetchFromLRCLIB(title, artist: artist);
+      if (lrclibResult != null && lrclibResult.lines.isNotEmpty) {
+        return lrclibResult;
+      }
+    } catch (e) {
+      debugPrint('LRCLIB fallback error: $e');
     }
 
     // No placeholder lines: the UI renders its own empty state with a real

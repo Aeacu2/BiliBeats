@@ -134,7 +134,7 @@ class MainLayout extends StatefulWidget {
   State<MainLayout> createState() => _MainLayoutState();
 }
 
-class _MainLayoutState extends State<MainLayout> {
+class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
   int _activeTabIndex = 0;
   late final BiliBeatAudioHandler _audioHandler = audioHandlerInstance;
 
@@ -168,12 +168,14 @@ class _MainLayoutState extends State<MainLayout> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initListeners();
     _loadHistory();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     for (final s in _subs) {
       s.cancel();
     }
@@ -186,6 +188,39 @@ class _MainLayoutState extends State<MainLayout> {
     _pageFraction.dispose();
     _pageController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // App was backgrounded: the native player may have advanced while the
+      // Flutter UI was throttled and currentIndexStream was delayed/dropped.
+      // Ask the handler to re-anchor its logical index to the player's actual
+      // position, then re-sync our notifier even if the stream was missed.
+      _audioHandler.syncOnResume();
+      final handlerTrack = _audioHandler.currentTrack;
+      if (handlerTrack != null && handlerTrack.id != _currentTrack.value?.id) {
+        // The handler healed internally but our notifier is still stale — push
+        // the authoritative track so MiniPlayer/AmbientBackground refresh.
+        _currentTrack.value = handlerTrack;
+      } else if (handlerTrack != null) {
+        // Even when ids match, the stream may have been missed entirely while
+        // backgrounded; re-emitting via syncOnResume's broadcast already did
+        // _currentTrackController.add, but our listener may have been paused.
+        // Ensure the notifier is at least refreshed to trigger rebuild.
+        if (_currentTrack.value?.id == handlerTrack.id) {
+          // TrackNotifier uses identity, so re-assigning a new instance with
+          // same id still notifies; use handler's instance directly.
+          // Only do this if we suspect a missed event: check handler's track
+          // against last notified value's runtime identity mismatch is tricky,
+          // so we just re-assign when handlerTrack is not identical to current
+          // value — cheap and idempotent.
+          if (!identical(_currentTrack.value, handlerTrack)) {
+            _currentTrack.value = handlerTrack;
+          }
+        }
+      }
+    }
   }
 
   void _initListeners() {

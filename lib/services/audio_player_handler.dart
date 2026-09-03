@@ -112,6 +112,8 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
     };
   }
 
+
+
   void updateCurrentTrackMetadata(Track updatedTrack) {
     var changed = false;
     for (final list in [_playlist, _naturalOrder]) {
@@ -165,11 +167,28 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
       // a different one: clearing and re-setting the audio source emits index
       // events, and the stale base index turned them into a bogus logical
       // position.
-      if (_isRebuilding) return;
+      if (_isRebuilding) {
+        debugPrint(
+            'currentIndexStream dropped during rebuild: playerIndex=$playerIndex base=$_queueBaseIndex logical=${_queueBaseIndex + playerIndex} current=$_currentIndex');
+        return;
+      }
       final logical = _queueBaseIndex + playerIndex;
       // Guard against echoes from rebuilds / no-op changes.
       if (logical == _currentIndex) return;
       if (logical < 0 || logical >= _playlist.length) return;
+      // Tag sanity: ensure the queued child's tag matches the logical track.
+      // Without this, a stale base index could announce a wrong track.
+      if (playerIndex >= 0 && playerIndex < _queueSource.length) {
+        final child = _queueSource.children[playerIndex];
+        if (child is ja.IndexedAudioSource && child.tag is Track) {
+          final tag = child.tag as Track;
+          if (tag.id != _playlist[logical].id) {
+            debugPrint(
+                'currentIndexStream tag mismatch: playerIndex=$playerIndex logical=$logical tag=${tag.id} vs playlist=${_playlist[logical].id} — dropping');
+            return;
+          }
+        }
+      }
       _currentIndex = logical;
       _onActiveTrackChanged(_playlist[logical]);
     });
@@ -178,7 +197,24 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
   /// Called whenever the actively-playing track changes (manual or auto).
   void _onActiveTrackChanged(Track track) {
     _announce(track);
+    _maybeTrimHead();
     _prefetchNext();
+  }
+
+  void _maybeTrimHead() {
+    // Sliding window: keep at most 3 items (prev, current, next) to avoid
+    // unbounded ConcatenatingAudioSource growth after many gapless advances.
+    if (_isRebuilding) return;
+    if (_queueSource.length <= 3) return;
+    final playerIndex = _player.currentIndex;
+    if (playerIndex == null || playerIndex <= 0) return;
+    // Remove oldest head; queue shrinks by 1, base increments.
+    try {
+      _queueSource.removeAt(0);
+      _queueBaseIndex++;
+    } catch (e) {
+      debugPrint('_maybeTrimHead failed: $e');
+    }
   }
 
   /// Re-syncs the announced track with the platform player's ACTUAL position.
@@ -206,12 +242,72 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
     if (logical < 0 || logical >= _playlist.length) return;
     if (logical == _currentIndex) return;
     final queuedChild = _queueSource.children[playerIndex];
-    if (queuedChild is! ja.IndexedAudioSource) return;
+    if (queuedChild is! ja.IndexedAudioSource) {
+      debugPrint(
+          '_reconcileActiveTrack: child at $playerIndex is not IndexedAudioSource');
+      return;
+    }
     final queuedTag = queuedChild.tag;
-    if (queuedTag is! Track) return;
-    if (queuedTag.id != _playlist[logical].id) return;
+    if (queuedTag is! Track) {
+      debugPrint('_reconcileActiveTrack: tag is not Track at $playerIndex');
+      return;
+    }
+    if (queuedTag.id != _playlist[logical].id) {
+      debugPrint(
+          '_reconcileActiveTrack tag mismatch: playerIndex=$playerIndex logical=$logical tag=${queuedTag.id} vs playlist=${_playlist[logical].id}');
+      // Fallback: search for the actually-playing id in the logical playlist.
+      // If the queue and playlist drifted (e.g. shuffle re-anchor miscalc or
+      // background-missed event), the strict base+index mapping is wrong but
+      // the tag tells us what is really playing. Finding it in the playlist
+      // lets us self-heal the card without announcing an unrelated track.
+      // If not found (playlist was replaced while old queue was playing),
+      // bail — announcing a track from an old queue into a new playlist would
+      // be a new desync.
+      final found = _playlist.indexWhere((t) => t.id == queuedTag.id);
+      if (found == -1) return;
+      debugPrint('_reconcileActiveTrack: fallback search found $found for ${queuedTag.id}');
+      _currentIndex = found;
+      // Re-anchor base so next prefetch & stream mapping are correct
+      _queueBaseIndex = found - playerIndex;
+      _onActiveTrackChanged(_playlist[found]);
+      return;
+    }
     _currentIndex = logical;
     _onActiveTrackChanged(_playlist[logical]);
+  }
+
+  /// Public entry for UI lifecycle (e.g. AppLifecycleState.resumed).
+  ///
+  /// Audio can advance while the Flutter UI is backgrounded/throttled and the
+  /// async `currentIndexStream` event is dropped or delayed. Call this when
+  /// the app comes back to the foreground to re-anchor the card to whatever
+  /// the native player is actually playing.
+  void syncOnResume() {
+    // If we are mid-rebuild, the queue is intentionally inconsistent — the
+    // rebuild's own finally/reconcile will fix it. A resume in that window
+    // should not force a second announce.
+    if (_isRebuilding) {
+      debugPrint('syncOnResume skipped: _isRebuilding=true');
+      return;
+    }
+    final before = _currentIndex;
+    _reconcileActiveTrack();
+    if (_currentIndex != before) {
+      debugPrint('syncOnResume healed: $before -> $_currentIndex');
+      // _reconcileActiveTrack already called _onActiveTrackChanged -> _announce.
+      return;
+    }
+    // No index drift, but the UI may still have missed the last announce while
+    // backgrounded (stream throttled). Refresh the system session so the
+    // notification is fresh; the Flutter UI self-heals via its own
+    // didChangeAppLifecycleState direct assignment (MainLayout/NowPlayingSheet),
+    // avoiding a duplicate currentTrackStream emission that would re-trigger
+    // lyrics fetching for the same track.
+    final track = currentTrack;
+    if (track != null) {
+      _updateMediaItem(track);
+      _broadcastState();
+    }
   }
 
   /// Announce the newly active track to every observer: the UI stream, the
@@ -304,6 +400,37 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
     // mainstream player. Repeat-one only governs *automatic* advance.
     if (_player.hasNext && _loopMode != LoopMode.one) {
       // Gapless: the next file is already queued in the native player.
+      // Optimistically announce the next track *before* awaiting seekToNext:
+      // the native gapless transition is immediate, but currentIndexStream is
+      // async and can be delayed/throttled when the app is backgrounded. Without
+      // this, the card stays on the previous track while the audio has already
+      // moved on — the exact "actual next / display previous" bug.
+      final nextLogical = _currentIndex + 1;
+      if (nextLogical >= 0 && nextLogical < _playlist.length) {
+        final playerIndex = _player.currentIndex;
+        final expectedPlayerIndex =
+            playerIndex != null ? playerIndex + 1 : -1;
+        var tagMismatch = false;
+        if (expectedPlayerIndex >= 0 &&
+            expectedPlayerIndex < _queueSource.length) {
+          final child = _queueSource.children[expectedPlayerIndex];
+          if (child is ja.IndexedAudioSource && child.tag is Track) {
+            final tag = child.tag as Track;
+            if (tag.id != _playlist[nextLogical].id) {
+              debugPrint(
+                  'skipToNext tag mismatch: expected ${_playlist[nextLogical].id} but queue has ${tag.id} — skipping optimistic');
+              tagMismatch = true;
+            }
+          }
+        }
+        if (!tagMismatch) {
+          // Optimistic: announce before the async platform seek so the card never
+          // waits for currentIndexStream (which can be delayed when backgrounded).
+          _currentIndex = nextLogical;
+          _positionController.add(Duration.zero);
+          _onActiveTrackChanged(_playlist[nextLogical]);
+        }
+      }
       await _player.seekToNext();
       return;
     }
@@ -444,7 +571,19 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
   /// Drops every queued item after the one the player is currently on, so the
   /// prefetch window can be rebuilt without interrupting playback.
   Future<void> _trimQueueAfterCurrent() async {
-    final playerIndex = _player.currentIndex ?? 0;
+    final playerIndex = _player.currentIndex;
+    // If the player has no source (null), there is nothing to trim. Using 0
+    // as fallback would incorrectly keep a stale child.
+    if (playerIndex == null) {
+      if (_queueSource.length > 1) {
+        // Defensive: clear stray queued items when no active index.
+        try {
+          await _queueSource.clear();
+        } catch (_) {}
+      }
+      _prefetchingId = null;
+      return;
+    }
     if (_queueSource.length > playerIndex + 1) {
       await _queueSource.removeRange(playerIndex + 1, _queueSource.length);
     }
@@ -533,6 +672,7 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
   /// queue's last child. This keeps the window gapless-ready without ever
   /// streaming bytes through Dart.
   Future<void> _prefetchNext() async {
+    if (_isRebuilding) return;
     if (_loopMode == LoopMode.one || autoAdvanceHeld) return;
     if (_playlist.isEmpty || _currentIndex < 0) return;
 
@@ -555,6 +695,10 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
       // Re-validate after the download: the user may have navigated, or the
       // playlist may have been replaced while we were fetching — the index
       // guard alone can pass for a *new* window and append a stale track.
+      // Also re-check hold & loop: a hold may have been acquired while we were
+      // downloading, and appending now would defeat the hold (gapless would
+      // start the next track without ever hitting _handleQueueCompleted).
+      if (_loopMode == LoopMode.one || autoAdvanceHeld) return;
       final succIndex = _currentIndex + 1;
       if (_currentIndex == _queueBaseIndex + _queueSource.length - 1 &&
           succIndex < _playlist.length &&

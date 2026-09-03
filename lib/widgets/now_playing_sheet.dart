@@ -47,7 +47,8 @@ class NowPlayingSheet extends StatefulWidget {
   State<NowPlayingSheet> createState() => _NowPlayingSheetState();
 }
 
-class _NowPlayingSheetState extends State<NowPlayingSheet> {
+class _NowPlayingSheetState extends State<NowPlayingSheet>
+    with WidgetsBindingObserver {
   final List<StreamSubscription> _subs = [];
 
   late Track _displayTrack;
@@ -68,6 +69,7 @@ class _NowPlayingSheetState extends State<NowPlayingSheet> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final h = widget.handler;
     _displayTrack = widget.focusedTrack;
     _followHandler =
@@ -125,11 +127,39 @@ class _NowPlayingSheetState extends State<NowPlayingSheet> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _editorRelease?.call();
     for (final s in _subs) {
       s.cancel();
     }
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Mirror MainLayout's resume heal: the sheet may have missed the
+      // currentTrackStream event while backgrounded.
+      widget.handler.syncOnResume();
+      final handlerTrack = widget.handler.currentTrack;
+      if (handlerTrack != null && mounted) {
+        if (_followHandler && handlerTrack.id != _displayTrack.id) {
+          setState(() {
+            _displayTrack = handlerTrack;
+            _downloadTask = _liveTaskFor(handlerTrack.id);
+          });
+          _refreshTrackState();
+        } else if (handlerTrack.id == _displayTrack.id) {
+          // Metadata may have been updated while away; refresh display.
+          setState(() => _displayTrack = handlerTrack);
+        }
+        // Keep play/pause in sync even if playerStateStream was throttled.
+        final playing = widget.handler.isPlaying;
+        if (playing != _isPlaying) {
+          setState(() => _isPlaying = playing);
+        }
+      }
+    }
   }
 
   /// One combined refresh so switching tracks costs a single rebuild.
@@ -227,9 +257,13 @@ class _NowPlayingSheetState extends State<NowPlayingSheet> {
               child: AmbientBackground(coverUrl: _displayTrack.coverUrl),
             ),
             GestureDetector(
-              // Swipe down anywhere on the chrome to dismiss, like the system sheets.
+              // Swipe down to dismiss — threshold lifted 320→480 and
+              // effectively top-chrome only: the inner SyncedLyricsView ListView
+              // now wins the arena for scrolls, so a lyric flick no longer
+              // dismisses the sheet.
+              behavior: HitTestBehavior.translucent,
               onVerticalDragEnd: (details) {
-                if ((details.primaryVelocity ?? 0) > 320) {
+                if ((details.primaryVelocity ?? 0) > 480) {
                   Haptics.selection();
                   if (_showEditor) {
                     _closeEditor();
@@ -411,8 +445,13 @@ class _NowPlayingSheetState extends State<NowPlayingSheet> {
       key: const ValueKey('art'),
       builder: (context, constraints) {
         final maxHeight = constraints.maxHeight;
+        // Avoid overflow when parent is short (keyboard, landscape): clamp
+        // upper bound to min(maxHeight, maxWidth) and floor to min(120, upper)
+        final available = maxHeight > 0 ? maxHeight : constraints.maxWidth;
+        final upper = available < constraints.maxWidth ? available : constraints.maxWidth;
+        final lower = upper < 120 ? upper : 120.0;
         final size = maxHeight > 0
-            ? (maxHeight * 0.82).clamp(160.0, constraints.maxWidth)
+            ? (maxHeight * 0.82).clamp(lower, upper)
             : 240.0;
         return Center(
           child: AnimatedScale(

@@ -181,10 +181,17 @@ class _SearchScreenState extends State<SearchScreen> {
     await DatabaseService.clearSearchHistory();
     if (!mounted) return;
     // Search history feeds the taste profile, so dropping it must drop its
-    // influence too — not just the chips.
+    // influence too — not just the chips. Also reset dedup sets so a later
+    // fresh pass doesn't consider old ids as seen.
     setState(() {
       _searchHistory = const [];
       _recommendedTracks = const [];
+      _seenRecIds.clear();
+      _seenSearchIds.clear();
+      _recReachedEnd = false;
+      _searchReachedEnd = false;
+      _recPage = 0;
+      _searchPage = 1;
       _recommendationsStale = true;
     });
   }
@@ -232,7 +239,11 @@ class _SearchScreenState extends State<SearchScreen> {
       debugPrint('Search error: $e');
       // Without this the skeleton spinner would stay up forever.
       if (mounted && token == _searchToken) {
-        setState(() => _isLoading = false);
+        setState(() {
+          _isLoading = false;
+          _searchLoadFailed = true;
+          _lastSearchFail = DateTime.now();
+        });
       }
     }
   }
@@ -330,7 +341,17 @@ class _SearchScreenState extends State<SearchScreen> {
       }
       return;
     }
-    if (!mounted || pass != _recPass) return;
+    if (!mounted || pass != _recPass) {
+      if (mounted && pass == _recPass) {
+        // Defensive: ensure stuck loading flag is cleared on stale pass.
+        // pass != _recPass case already abandoned; original caller will handle.
+      }
+      // Always clear isLoadingMore on abandon to avoid infinite spinner.
+      if (mounted) {
+        setState(() => _isLoadingMore = false);
+      }
+      return;
+    }
     final fresh = <Track>[];
     for (final t in tracks) {
       if (_seenRecIds.add(t.id)) fresh.add(t);
@@ -450,12 +471,15 @@ class _SearchScreenState extends State<SearchScreen> {
                 ),
               ),
               if (_searchController.text.isNotEmpty)
-                GestureDetector(
+                IconButton(
                   // Clearing the query returns to the recommendation view and
                   // resets search pagination, so a later scroll cannot re-fetch
                   // the old query's next page.
-                  onTap: _showRecommendations,
-                  child: const Icon(Icons.clear, color: AppColors.textMuted, size: 18),
+                  onPressed: _showRecommendations,
+                  icon: const Icon(Icons.clear, color: AppColors.textMuted, size: 18),
+                  tooltip: '清空',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 ),
             ],
           ),
@@ -472,9 +496,13 @@ class _SearchScreenState extends State<SearchScreen> {
                 style: TextStyle(color: AppColors.textMuted, fontSize: 13, fontWeight: FontWeight.bold),
               ),
               if (_searchHistory.isNotEmpty)
-                GestureDetector(
+                InkWell(
                   onTap: _clearSearchHistory,
-                  child: const Text('清空历史', style: TextStyle(color: AppColors.textFaint, fontSize: 12)),
+                  borderRadius: BorderRadius.circular(4),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                    child: Text('清空历史', style: TextStyle(color: AppColors.textFaint, fontSize: 12)),
+                  ),
                 ),
             ],
           ),
@@ -537,6 +565,9 @@ class _SearchScreenState extends State<SearchScreen> {
                 Text(
                   '未找到「$_lastQuery」',
                   style: const TextStyle(color: AppColors.textSecondary, fontSize: 14),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 6),
                 const Text(
@@ -619,11 +650,9 @@ class _SearchScreenState extends State<SearchScreen> {
                       RepaintBoundary(
                         child: MarqueeText(
                           text: track.title,
-                          style: const TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 15,
-                            height: 1.3,
+                          style: AppTypography.body.copyWith(
                             fontWeight: FontWeight.w600,
+                            color: AppColors.textPrimary,
                           ),
                           // Desynchronise rows so a screenful of titles does
                           // not slide in lockstep.
@@ -633,7 +662,9 @@ class _SearchScreenState extends State<SearchScreen> {
                       const SizedBox(height: 4),
                       Text(
                         '${track.uploader} • ${formatDuration(Duration(seconds: track.duration))}',
-                        style: const TextStyle(color: AppColors.textMuted, fontSize: 13),
+                        style: AppTypography.caption.copyWith(fontSize: 13),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ],
                   ),
@@ -660,7 +691,7 @@ class _SearchScreenState extends State<SearchScreen> {
                   icon: const Icon(Icons.add, color: AppColors.textSecondary, size: 22),
                   tooltip: '添加至歌单',
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                   onPressed: () {
                     TrackOptionsMenu.showAddToPlaylist(context, track, onTrackChanged: () {
                       if (mounted) setState(() {});

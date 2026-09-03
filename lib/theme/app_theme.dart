@@ -51,7 +51,7 @@ class AppColors {
   static const Color textPrimary = Color(0xFFFFFFFF);
   static const Color textSecondary = Color(0xB3FFFFFF); // 70%
   static const Color textMuted = Color(0x8CFFFFFF); // 55%
-  static const Color textFaint = Color(0x59FFFFFF); // 35%
+  static const Color textFaint = Color(0x78FFFFFF); // 47% — was 35% (0x59) →45% (0x73) still 4.47:1, now 4.71:1 for WCAG AA
 
   // Semantic
   static const Color success = Color(0xFF34C77B);

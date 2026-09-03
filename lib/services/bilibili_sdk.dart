@@ -20,15 +20,20 @@ class BilibiliSdk {
 
   static Future<String?> _httpGet(String rawUrl, {String? cookies}) async {
     try {
-      final req = await _httpClient.getUrl(Uri.parse(rawUrl));
+      final req = await _httpClient
+          .getUrl(Uri.parse(rawUrl))
+          .timeout(const Duration(seconds: 10));
       req.headers.set('Referer', 'https://www.bilibili.com');
       req.headers.set('User-Agent', kBiliUserAgent);
       if (cookies != null && cookies.isNotEmpty) {
         req.headers.set('Cookie', cookies);
       }
-      final res = await req.close();
+      final res = await req.close().timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
-        return await res.transform(utf8.decoder).join();
+        return await res
+            .transform(utf8.decoder)
+            .join()
+            .timeout(const Duration(seconds: 10));
       } else {
         await res.drain<void>();
         debugPrint('Bilibili HTTP ${res.statusCode}');
@@ -43,12 +48,71 @@ class BilibiliSdk {
   static String? extractBvOrAvId(String input) {
     final trimmed = input.trim();
     final bvMatch = RegExp(r'(BV[a-zA-Z0-9]{10})', caseSensitive: false).firstMatch(trimmed);
-    if (bvMatch != null) return bvMatch.group(1);
+    if (bvMatch != null) {
+      final raw = bvMatch.group(1)!;
+      // Normalize prefix to upper-case BV, keep the 10-char suffix case-sensitive
+      if (raw.length == 12) return 'BV${raw.substring(2)}';
+      return raw;
+    }
 
     final avMatch = RegExp(r'av(\d+)', caseSensitive: false).firstMatch(trimmed);
     // The API's `aid` parameter expects bare digits, not the "av" prefix.
     if (avMatch != null) return avMatch.group(1);
 
+    return null;
+  }
+
+  /// Resolve Bilibili short links (b23.tv / bili2233.cn / acg.tv) that do not
+  /// contain a BV directly. Returns the resolved URL or extracted id, or null.
+  static Future<String?> _resolveShortLink(String input) async {
+    // Find first URL in the input (share text often is `【标题】 https://b23.tv/xxx`)
+    // Also handle bare domain without scheme: `b23.tv/xxx`
+    final urlMatch = RegExp(r'(?:https?://)?(?:www\.)?(?:b23\.tv|bili2233\.cn|acg\.tv)/[^\s]+', caseSensitive: false)
+            .firstMatch(input) ??
+        RegExp(r'https?://[^\s]+').firstMatch(input);
+    if (urlMatch == null) return null;
+    var urlStr = urlMatch.group(0)!;
+    if (!urlStr.startsWith('http')) urlStr = 'https://$urlStr';
+    // Strip trailing punctuation that is not part of URL
+    urlStr = urlStr.replaceAll(RegExp(r'[\)\]】」』）.,;!]+$'), '');
+    if (!urlStr.contains('b23.tv') &&
+        !urlStr.contains('bili2233.cn') &&
+        !urlStr.contains('acg.tv')) {
+      return null;
+    }
+    try {
+      final uri = Uri.parse(urlStr);
+      final req = await _httpClient
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 5));
+      req.headers.set('User-Agent', kBiliUserAgent);
+      req.headers.set('Referer', 'https://www.bilibili.com/');
+      // Let HttpClient follow redirects automatically; we inspect redirects
+      final res = await req.close().timeout(const Duration(seconds: 5));
+      // Drain body to reuse connection
+      final body = await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 5)).catchError((_) => '');
+      // Check redirect history
+      if (res.redirects.isNotEmpty) {
+        final finalLoc = res.redirects.last.location.toString();
+        final bv = extractBvOrAvId(finalLoc);
+        if (bv != null) return bv;
+        // Also try body regex in case redirect landed on HTML
+        final bvInBody = RegExp(r'(BV[a-zA-Z0-9]{10})', caseSensitive: false).firstMatch(finalLoc);
+        if (bvInBody != null) return bvInBody.group(1);
+        return finalLoc;
+      }
+      // Some short links return 200 with HTML containing canonical BV
+      final bvInBody = RegExp(r'(BV[a-zA-Z0-9]{10})', caseSensitive: false).firstMatch(body);
+      if (bvInBody != null) return bvInBody.group(1);
+      // Fallback: Location header even when not in redirects list
+      final loc = res.headers.value(HttpHeaders.locationHeader);
+      if (loc != null) {
+        final bv = extractBvOrAvId(loc);
+        if (bv != null) return bv;
+      }
+    } catch (e) {
+      debugPrint('Resolve short link failed: $e');
+    }
     return null;
   }
 
@@ -194,6 +258,23 @@ class BilibiliSdk {
     final directId = extractBvOrAvId(query);
     if (directId != null) {
       return await fetchVideoInfo(directId);
+    }
+    // Handle Bilibili short share links (b23.tv / bili2233.cn) that hide the BV
+    // behind a redirect. The pasted share text is often `【标题】 https://b23.tv/xxx`
+    if (query.contains('b23.tv') || query.contains('bili2233.cn') || query.contains('acg.tv')) {
+      try {
+        final resolved = await _resolveShortLink(query).timeout(const Duration(seconds: 6));
+        if (resolved != null) {
+          final resolvedId = extractBvOrAvId(resolved) ?? resolved;
+          // Avoid infinite loop if resolved is same as original
+          if (resolvedId != query.trim()) {
+            final viaResolved = await fetchVideoInfo(resolvedId);
+            if (viaResolved.isNotEmpty) return viaResolved;
+          }
+        }
+      } catch (e) {
+        debugPrint('Short link resolve error: $e');
+      }
     }
 
     // Music zone first. If that comes back empty — no matches there, or an API

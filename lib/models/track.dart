@@ -56,16 +56,55 @@ class Track {
   /// Tolerates both older files carrying extra keys and newer ones missing
   /// them, so a version change never orphans a library.
   factory Track.fromMap(Map<String, dynamic> map) {
+    final rawId = map['id'];
+    final id = rawId is String ? rawId : (rawId?.toString() ?? '');
+    if (id.isEmpty) {
+      throw FormatException('Track id missing or empty: $map');
+    }
+    final rawBvid = map['bvid'];
+    final bvid = rawBvid is String ? rawBvid : (rawBvid?.toString() ?? '');
+    final rawCid = map['cid'];
+    int cid;
+    if (rawCid is int) {
+      cid = rawCid;
+    } else if (rawCid is num) {
+      cid = rawCid.toInt();
+    } else if (rawCid is String) {
+      cid = int.tryParse(rawCid) ?? 0;
+    } else {
+      cid = 0;
+    }
+    final rawTitle = map['title'];
+    final title = rawTitle is String ? rawTitle : (rawTitle?.toString() ?? '未知曲目');
+    final rawRawTitle = map['rawTitle'];
+    final rawTitleStr = rawRawTitle is String ? rawRawTitle : (rawRawTitle?.toString() ?? title);
+    final rawUploader = map['uploader'];
+    final uploader = rawUploader is String ? rawUploader : (rawUploader?.toString() ?? '未知UP主');
+    final rawCover = map['coverUrl'];
+    final coverUrl = rawCover is String ? rawCover : (rawCover?.toString() ?? '');
+    final rawDuration = map['duration'];
+    int duration;
+    if (rawDuration is int) {
+      duration = rawDuration;
+    } else if (rawDuration is num) {
+      duration = rawDuration.toInt();
+    } else if (rawDuration is String) {
+      duration = int.tryParse(rawDuration) ?? 0;
+    } else {
+      duration = 0;
+    }
+    final rawAudioUrl = map['audioUrl'];
+    final audioUrl = rawAudioUrl is String ? rawAudioUrl : rawAudioUrl?.toString();
     return Track(
-      id: map['id'] ?? '',
-      bvid: map['bvid'] ?? '',
-      cid: map['cid'] ?? 0,
-      title: map['title'] ?? '未知曲目',
-      rawTitle: map['rawTitle'] as String? ?? map['title'] as String? ?? '',
-      uploader: map['uploader'] ?? '未知UP主',
-      coverUrl: map['coverUrl'] ?? '',
-      duration: map['duration'] ?? 0,
-      audioUrl: map['audioUrl'],
+      id: id,
+      bvid: bvid,
+      cid: cid,
+      title: title,
+      rawTitle: rawTitleStr,
+      uploader: uploader,
+      coverUrl: coverUrl,
+      duration: duration,
+      audioUrl: audioUrl,
     );
   }
 

@@ -179,7 +179,10 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
     final clamped =
         target.clamp(0.0, _scrollController.position.maxScrollExtent);
 
-    if (!animate) {
+    // Respect reduced motion: jump instead of animating.
+    final reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations == true ||
+        MediaQuery.maybeOf(context)?.accessibleNavigation == true;
+    if (!animate || reduceMotion) {
       _scrollController.jumpTo(clamped);
       return;
     }

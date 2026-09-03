@@ -56,16 +56,28 @@ class DownloadManager {
 
   bool isDownloading(String trackId) => _tasks.containsKey(trackId);
 
+  // Guards double-tap while isDownloaded check is in flight.
+  final Set<String> _pendingIsDownloadedCheck = {};
+
   /// Starts downloading [track] (idempotent). Observe progress via [updates].
   Future<void> startDownload(Track track) async {
-    // Claim the slot synchronously, before any await. Checking `isDownloaded`
-    // first meant two rapid taps could both clear the guard during that await
-    // and start the same download twice.
     if (_tasks.containsKey(track.id)) return;
+    if (_pendingIsDownloadedCheck.contains(track.id)) return;
+    _pendingIsDownloadedCheck.add(track.id);
+    bool alreadyDownloaded = false;
+    try {
+      alreadyDownloaded = await AudioDownloadService.isDownloaded(track);
+    } catch (_) {
+      alreadyDownloaded = false;
+    }
+    _pendingIsDownloadedCheck.remove(track.id);
+    // If another call claimed the slot while we checked, bail.
+    if (_tasks.containsKey(track.id)) return;
+    if (alreadyDownloaded) return;
+    // Claim the slot synchronously after the check, before any further await.
     _tasks[track.id] = DownloadTask(track: track);
     _notify(track.id);
     try {
-      // ensureDownloaded is itself a no-op when the file is already on disk.
       await AudioDownloadService.ensureDownloaded(track);
     } catch (e) {
       debugPrint('Download failed: $e');

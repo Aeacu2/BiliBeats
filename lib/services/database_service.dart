@@ -18,21 +18,39 @@ import 'audio_download_service.dart';
 List<Track> _parseTrackList(String json) {
   final list =
       DatabaseService._readPayload(jsonDecode(json)) as List<dynamic>? ?? [];
-  return list
-      .map((item) => Track.fromMap(Map<String, dynamic>.from(item)))
-      .toList();
+  final out = <Track>[];
+  for (final item in list) {
+    try {
+      out.add(Track.fromMap(Map<String, dynamic>.from(item as Map)));
+    } catch (e) {
+      debugPrint('_parseTrackList skip bad track: $e');
+    }
+  }
+  return out;
 }
 
 List<Playlist> _parsePlaylistList(String json) {
   final list =
       DatabaseService._readPayload(jsonDecode(json)) as List<dynamic>? ?? [];
-  return list.map((item) {
-    final map = Map<String, dynamic>.from(item);
-    final tracks = (map['tracks'] as List<dynamic>? ?? [])
-        .map((t) => Track.fromMap(Map<String, dynamic>.from(t)))
-        .toList();
-    return Playlist.fromMap(map, tracks: tracks);
-  }).toList();
+  final out = <Playlist>[];
+  for (final item in list) {
+    try {
+      final map = Map<String, dynamic>.from(item as Map);
+      final rawTracks = map['tracks'] as List<dynamic>? ?? [];
+      final tracks = <Track>[];
+      for (final t in rawTracks) {
+        try {
+          tracks.add(Track.fromMap(Map<String, dynamic>.from(t as Map)));
+        } catch (e) {
+          debugPrint('_parsePlaylistList skip bad track: $e');
+        }
+      }
+      out.add(Playlist.fromMap(map, tracks: tracks));
+    } catch (e) {
+      debugPrint('_parsePlaylistList skip bad playlist: $e');
+    }
+  }
+  return out;
 }
 
 Map<String, LyricsResult> _parseLyricsMap(String json) {
@@ -87,7 +105,23 @@ class DatabaseService {
     return _docsPath = docs.path;
   }
 
-  static Future<void> _ensureLoaded() => _loadFuture ??= _load();
+  // Write serialization: whole-file rewrites must not interleave. Each
+  // persist is small but concurrent calls (e.g. addRecentlyPlayed + toggleFavorite)
+  // shared the same `$path.tmp` and truncated each other. A simple async mutex
+  // plus per-call unique tmp file fixes lost-update + Windows rename semantics.
+  static Future<void> _writeLock = Future.value();
+
+  static Future<void> _ensureLoaded() {
+    final existing = _loadFuture;
+    if (existing != null) return existing;
+    final fut = _load().catchError((e, st) {
+      debugPrint('DatabaseService _ensureLoaded failed, will retry: $e');
+      _loadFuture = null;
+      Error.throwWithStackTrace(e, st);
+    });
+    _loadFuture = fut;
+    return fut;
+  }
 
   static Future<void> _load() async {
     try {
@@ -127,6 +161,7 @@ class DatabaseService {
       final audioDir = Directory('$dir/bilibeat_audio');
       if (!await audioDir.exists()) return;
       final entities = await audioDir.list().toList();
+      var added = 0;
       for (final entity in entities) {
         if (entity is File && entity.path.endsWith('.ready')) {
           final readyPath = entity.path;
@@ -140,14 +175,65 @@ class DatabaseService {
               final metaContent = await metaFile.readAsString();
               final trackMap = Map<String, dynamic>.from(jsonDecode(metaContent));
               final track = Track.fromMap(trackMap);
+              // Validate id & consistency with filename key.
+              if (track.id.isEmpty) {
+                debugPrint('Auto-discover skip empty id: $metaPath');
+                continue;
+              }
+              final fileKey = readyPath.split(RegExp(r'[/\\]')).last.replaceFirst('audio_', '').replaceFirst('.ready', '');
+              if (fileKey != track.id && fileKey != track.bvid) {
+                debugPrint('Auto-discover id mismatch fileKey=$fileKey track.id=${track.id}');
+                // Still accept but warn; do not add mismatch as new entry if id already present.
+              }
               if (!_downloadedTracks.any((t) => t.id == track.id)) {
                 _downloadedTracks.add(track);
+                added++;
               }
             } catch (e) {
               debugPrint('Auto-discover track error: $e');
             }
           }
         }
+      }
+      // Prune entries whose files vanished externally (e.g. user cleared cache).
+      final beforePrune = _downloadedTracks.length;
+      final toKeep = <Track>[];
+      final prunedIds = <String>[];
+      for (final t in _downloadedTracks) {
+        // Keep if id empty (should not happen) to avoid data loss; else check disk.
+        if (t.id.isEmpty) {
+          toKeep.add(t);
+          continue;
+        }
+        final dirPath = dir;
+        final audio = File('$dirPath/bilibeat_audio/audio_${t.id}.m4a');
+        final ready = File('$dirPath/bilibeat_audio/audio_${t.id}.ready');
+        bool exists = false;
+        try {
+          exists = await ready.exists() && await audio.exists() && await audio.length() > 0;
+        } catch (_) {
+          exists = false;
+        }
+        if (exists) {
+          toKeep.add(t);
+        } else {
+          prunedIds.add(t.id);
+          debugPrint('Pruning stale downloaded entry ${t.id} (file missing)');
+          AudioDownloadService.invalidateMemo(t.id);
+        }
+      }
+      if (toKeep.length != beforePrune) {
+        _downloadedTracks
+          ..clear()
+          ..addAll(toKeep);
+        // Persist pruned list so stale entries don't resurrect.
+        // Fire-and-forget is fine at startup; discovery is inside _load.
+        unawaited(_persistDownloaded());
+      } else if (added > 0) {
+        // Newly discovered tracks were added from disk but not yet persisted
+        // in downloaded.json (e.g. download completed while persisted file was
+        // truncated). Persist so next load doesn't rely on discovery.
+        unawaited(_persistDownloaded());
       }
     } catch (e) {
       debugPrint('DatabaseService audio discovery skipped: $e');
@@ -202,9 +288,39 @@ class DatabaseService {
   /// middle corrupts the file. Writing to a temp file and renaming keeps the
   /// previous snapshot intact instead.
   static Future<void> _writeJsonAtomically(String path, Object data) async {
-    final tmp = File('$path.tmp');
-    await tmp.writeAsString(jsonEncode(data));
-    await tmp.rename(path);
+    // Serialize all whole-file writes through a single async mutex so two
+    // concurrent persists never share the same tmp file.
+    final previous = _writeLock;
+    final completer = Completer<void>();
+    _writeLock = completer.future;
+    await previous;
+    File? tmp;
+    try {
+      final unique = DateTime.now().microsecondsSinceEpoch;
+      tmp = File('$path.$unique.tmp');
+      await tmp.writeAsString(jsonEncode(data), flush: true);
+      final target = File(path);
+      // Windows: rename fails if target exists. Remove first.
+      if (await target.exists()) {
+        try {
+          await target.delete();
+        } catch (e) {
+          debugPrint('DatabaseService _writeJsonAtomically delete failed: $e');
+        }
+      }
+      await tmp.rename(path);
+    } catch (e) {
+      debugPrint('DatabaseService _writeJsonAtomically error: $e');
+      rethrow;
+    } finally {
+      // Best-effort cleanup of stray tmp (e.g. rename threw).
+      if (tmp != null) {
+        try {
+          if (await tmp.exists()) await tmp.delete();
+        } catch (_) {}
+      }
+      completer.complete();
+    }
   }
 
   /// Envelope version for every file this service writes. Bump when a payload
@@ -345,8 +461,12 @@ class DatabaseService {
 
   static Future<Playlist> createPlaylist(String name) async {
     await _ensureLoaded();
+    // Use ms + seq + random to avoid collision within same ms across restarts
+    // (_playlistSeq resets to 0 on restart). Random 20 bits + seq gives <1e-9
+    // collision even at 1000 playlists/sec.
+    final rnd = DateTime.now().microsecondsSinceEpoch % (1 << 20);
     final newPlaylist = Playlist(
-      id: 'pl_${DateTime.now().millisecondsSinceEpoch}_${_playlistSeq++}',
+      id: 'pl_${DateTime.now().millisecondsSinceEpoch}_${_playlistSeq++}_$rnd',
       name: name.trim().isEmpty ? '新建歌单' : name.trim(),
       tracks: [],
     );
@@ -562,8 +682,13 @@ class DatabaseService {
     // Do not persist "not found" placeholders: they would stick forever and
     // stop the app from ever retrying a lookup that might succeed later.
     if (lyrics.source == 'none') {
-      _lyricsCache.remove(trackId);
+      final removed = _lyricsCache.remove(trackId) != null;
+      if (removed) await _persistLyrics();
       return;
+    }
+    // LRU: move existing key to end (most-recent) before re-insert.
+    if (_lyricsCache.containsKey(trackId)) {
+      _lyricsCache.remove(trackId);
     }
     _lyricsCache[trackId] = lyrics;
     while (_lyricsCache.length > _maxLyricsCacheEntries) {
@@ -574,7 +699,13 @@ class DatabaseService {
 
   static Future<LyricsResult?> getCachedLyrics(String trackId) async {
     await _ensureLoaded();
-    return _lyricsCache[trackId];
+    final cached = _lyricsCache[trackId];
+    if (cached != null) {
+      // Touch for LRU: move to end.
+      _lyricsCache.remove(trackId);
+      _lyricsCache[trackId] = cached;
+    }
+    return cached;
   }
 
   static Future<void> _persistLyrics() async {

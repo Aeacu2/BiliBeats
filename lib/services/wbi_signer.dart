@@ -56,13 +56,21 @@ class WbiSigner {
     }
 
     try {
-      final req = await _client.getUrl(Uri.parse('https://api.bilibili.com/x/web-interface/nav'));
+      final req = await _client
+          .getUrl(Uri.parse('https://api.bilibili.com/x/web-interface/nav'))
+          .timeout(const Duration(seconds: 10));
       req.headers.set('User-Agent',
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36');
       req.headers.set('Referer', 'https://www.bilibili.com/');
-      final res = await req.close();
-      if (res.statusCode == 200) {
-        final body = await res.transform(utf8.decoder).join();
+      final res = await req.close().timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) {
+        await res.drain<void>();
+        throw Exception('WBI HTTP ${res.statusCode}');
+      }
+      final body = await res
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 10));
         final json = jsonDecode(body);
         final wbiImg = json['data']?['wbi_img'];
         if (wbiImg != null) {
@@ -75,7 +83,6 @@ class WbiSigner {
 
           return {'imgKey': _cachedImgKey, 'subKey': _cachedSubKey};
         }
-      }
     } catch (e) {
       debugPrint('Failed to fetch WBI keys: $e');
     }

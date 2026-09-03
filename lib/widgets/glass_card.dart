@@ -18,7 +18,7 @@ class GlassCard extends StatelessWidget {
     super.key,
     required this.child,
     this.padding,
-    this.borderRadius = 16.0,
+    this.borderRadius = AppRadius.md,
   });
 
   @override
@@ -30,7 +30,7 @@ class GlassCard extends StatelessWidget {
         gradient: const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [AppColors.white12, AppColors.surfaceCard],
+          colors: [AppColors.white06, AppColors.surfaceCard],
         ),
         border: Border.all(color: AppColors.hairline),
       ),

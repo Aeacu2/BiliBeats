@@ -46,15 +46,16 @@ class _PlayerSeekBarState extends State<PlayerSeekBar> {
       animation:
           Listenable.merge([widget.durationNotifier, widget.positionNotifier]),
       builder: (context, _) {
-        final streamed = widget.durationNotifier.value.inSeconds.toDouble();
+        final streamedMs = widget.durationNotifier.value.inMilliseconds.toDouble();
+        final streamedSec = streamedMs / 1000.0;
         final double maxSec =
-            widget.isActive && streamed > 0 ? streamed : widget.fallbackSeconds;
+            widget.isActive && streamedSec > 0 ? streamedSec : widget.fallbackSeconds;
         final double posSec = widget.isActive
             ? (_dragValue ??
-                    widget.positionNotifier.value.inSeconds.toDouble())
+                    widget.positionNotifier.value.inMilliseconds.toDouble() / 1000.0)
                 .clamp(0.0, maxSec)
             : 0.0;
-        var remaining = Duration(seconds: (maxSec - posSec).round());
+        var remaining = Duration(milliseconds: ((maxSec - posSec) * 1000).round());
         if (remaining < Duration.zero) remaining = Duration.zero;
 
         return Column(
@@ -77,14 +78,14 @@ class _PlayerSeekBarState extends State<PlayerSeekBar> {
               child: Slider(
                 value: posSec,
                 max: maxSec,
-                label: formatDuration(Duration(seconds: posSec.round())),
+                label: formatDuration(Duration(milliseconds: (posSec * 1000).round())),
                 onChanged: widget.isActive
                     ? (v) => setState(() => _dragValue = v)
                     : null,
                 onChangeStart: (v) => setState(() => _dragValue = v),
                 onChangeEnd: (v) {
                   Haptics.light();
-                  widget.onSeek(Duration(seconds: v.toInt()));
+                  widget.onSeek(Duration(milliseconds: (v * 1000).round()));
                   setState(() => _dragValue = null);
                 },
               ),
@@ -94,7 +95,7 @@ class _PlayerSeekBarState extends State<PlayerSeekBar> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(formatDuration(Duration(seconds: posSec.round())),
+                  Text(formatDuration(Duration(milliseconds: (posSec * 1000).round())),
                       style: timeStyle),
                   Text('-${formatDuration(remaining)}', style: timeStyle),
                 ],
