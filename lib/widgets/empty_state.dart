@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
-/// A polished empty-state placeholder: an icon medallion over a soft accent
-/// glow, plus a title and optional subtitle. Used wherever a list can be empty.
+/// A quiet empty-state placeholder: a flat medallion with a muted icon,
+/// plus a title and optional subtitle. Used wherever a list can be empty.
+/// Accent is reserved for interaction, so empty states do not glow.
 class EmptyState extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -31,18 +32,13 @@ class EmptyState extends StatelessWidget {
             height: _medallion,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              gradient: const RadialGradient(
-                colors: [
-                  AppColors.accent22,
-                  AppColors.accent04,
-                ],
-              ),
+              color: AppColors.white06,
               border: Border.all(color: AppColors.hairline),
             ),
             child: Icon(
               icon,
               size: _medallion * 0.42,
-              color: AppColors.accent,
+              color: AppColors.textMuted,
             ),
           ),
           const SizedBox(height: 18),

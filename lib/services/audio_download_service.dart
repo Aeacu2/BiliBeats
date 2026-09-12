@@ -165,6 +165,36 @@ class AudioDownloadService {
     return await audio.length() > 0;
   }
 
+  /// Per-track on-disk audio sizes in one directory listing: track id to
+  /// bytes of the verified `.m4a` file. Only files with a sibling `.ready`
+  /// marker count, matching [isDownloaded] semantics; partials and orphans
+  /// are excluded. Used by download management for per-track and aggregate
+  /// storage display without N stat calls.
+  static Future<Map<String, int>> storageBreakdown() async {
+    final result = <String, int>{};
+    try {
+      final dir = await _dir();
+      await for (final entity in Directory(dir).list()) {
+        if (entity is! File) continue;
+        // URI segments always use `/`, unlike platform paths.
+        final segments = entity.uri.pathSegments;
+        if (segments.isEmpty) continue;
+        final name = segments.last;
+        if (!name.startsWith('audio_') || !name.endsWith('.m4a')) continue;
+        final id = name.substring('audio_'.length, name.length - '.m4a'.length);
+        if (id.isEmpty) continue;
+        final ready = File('$dir/audio_$id.ready');
+        if (!await ready.exists()) continue;
+        try {
+          result[id] = await entity.length();
+        } catch (_) {}
+      }
+    } catch (e) {
+      debugPrint('storageBreakdown error: $e');
+    }
+    return result;
+  }
+
   /// Removes a track's audio, ready-marker and metadata from disk.
   /// Returns true when something was actually deleted.
   static Future<bool> delete(Track track) async {
@@ -233,6 +263,11 @@ class AudioDownloadService {
       return result;
     } catch (e, st) {
       completer.completeError(e, st);
+      // The dedup future may have no listener yet (or anymore): without
+      // this, a failed download reports an unhandled async error even
+      // though every path through here rethrows into a guarded caller.
+      // Existing listeners still receive the error normally.
+      completer.future.ignore();
       rethrow;
     } finally {
       _inFlight.remove(id);

@@ -9,12 +9,12 @@ import 'models/playlist.dart';
 import 'models/lyric_line.dart';
 import 'services/lyrics_engine.dart';
 import 'services/database_service.dart';
+import 'services/download_manager.dart';
 import 'services/audio_player_handler.dart';
 import 'services/audio_download_service.dart';
+import 'utils/snack.dart';
 import 'theme/app_theme.dart';
-import 'theme/haptics.dart';
 import 'theme/motion.dart';
-import 'widgets/ambient_background.dart';
 import 'widgets/expand_from_card.dart';
 import 'widgets/mini_player.dart';
 import 'widgets/now_playing_sheet.dart';
@@ -152,12 +152,18 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
   final ValueNotifier<Duration> _durationNotifier =
       ValueNotifier(Duration.zero);
   final ValueNotifier<List<LyricLine>> _lyricsNotifier = ValueNotifier([]);
+
   /// Also a notifier, and for the same reason as the player state above: the
   /// handler writes a history entry on *every* track change, and holding this
   /// in `setState` state rebuilt both page subtrees each time a song started —
   /// for a change only the 最近播放 rail cares about.
   final ValueNotifier<List<Track>> _recentlyPlayed = ValueNotifier(const []);
   Playlist? _activePlaylistSheet;
+
+  /// UI load generation for lyrics: every current-track event invalidates
+  /// earlier lyric work, including A→B→A.
+  int _lyricsLoadGeneration = 0;
+  String? _lyricsTrackId;
 
   late final PageController _pageController = PageController();
 
@@ -175,6 +181,7 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    ++_lyricsLoadGeneration;
     WidgetsBinding.instance.removeObserver(this);
     for (final s in _subs) {
       s.cancel();
@@ -224,51 +231,35 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
   }
 
   void _initListeners() {
-    _subs.add(_audioHandler.currentTrackStream.listen((track) async {
-      if (track != null) {
+    _subs.add(
+      _audioHandler.currentTrackStream.listen((track) {
+        final generation = ++_lyricsLoadGeneration;
+
+        if (!mounted) return;
+
         _currentTrack.value = track;
 
-        // Fetch lyrics with stale cache validation.
-        //
-        // Every await below needs a `mounted` guard: cancelling the
-        // subscription in dispose() stops *new* events, but an event already
-        // being handled resumes after its await regardless — and writing to a
-        // disposed ValueNotifier throws.
-        final cleanSongTitle =
-            LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ?? '';
-        final cached = await DatabaseService.getCachedLyrics(track.id);
-        if (!mounted || _currentTrack.value?.id != track.id) return;
-
-        bool isCacheValid = false;
-        if (cached != null && cached.lines.isNotEmpty && cached.source != 'none') {
-          // 'user' (pasted/edited LRC) and 'current' (re-applied with an
-          // offset) are deliberate user choices. Title-validating them fails
-          // — a paste is cached as 「自定义歌词」 — and the refetch below then
-          // silently overwrote the user's lyrics with the provider's.
-          if (cached.source == 'user' || cached.source == 'current') {
-            isCacheValid = true;
-          } else {
-            final cachedTitle = cached.songTitle ?? '';
-            if (cachedTitle.isNotEmpty && LyricsEngine.isTitleMatching(cachedTitle, cleanSongTitle)) {
-              isCacheValid = true;
-            }
-          }
-        }
-
-        if (isCacheValid) {
-          _lyricsNotifier.value = cached!.lines;
-        } else {
+        if (track == null) {
+          _lyricsTrackId = null;
           _lyricsNotifier.value = const [];
-          final freshLyrics = await LyricsEngine.autoFetchLyrics(track.rawTitle);
-          if (!mounted || _currentTrack.value?.id != track.id) return;
-          // A "not found" result carries placeholder lines; showing an empty
-          // list instead lets the lyrics view offer its search/paste action.
-          _lyricsNotifier.value =
-              freshLyrics.source == 'none' ? const [] : freshLyrics.lines;
-          await DatabaseService.cacheLyrics(track.id, freshLyrics);
+          return;
         }
-      }
-    }));
+
+        if (_lyricsTrackId != track.id) {
+          _lyricsTrackId = track.id;
+
+          // Never leave the previous song's lyrics visible while loading.
+          _lyricsNotifier.value = const [];
+        }
+
+        unawaited(
+          _loadLyricsForTrack(
+            track,
+            generation: generation,
+          ),
+        );
+      }),
+    );
 
     _subs.add(_audioHandler.playerStateStream.listen((playing) {
       _isPlaying.value = playing;
@@ -284,7 +275,153 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
 
     // The handler writes history itself when it auto-advances, so the rail has
     // to follow the store rather than the UI actions that happen to reach it.
-    _subs.add(DatabaseService.historyUpdateStream.listen((_) => _loadHistory()));
+    _subs
+        .add(DatabaseService.historyUpdateStream.listen((_) => _loadHistory()));
+
+    // User-initiated download failures otherwise vanish silently (the ring
+    // just disappears). Neutral copy: never raw exception strings.
+    _subs.add(
+      DownloadManager.instance.errors.listen((_) {
+        if (!mounted) return;
+
+        showAppSnackBar(
+          ScaffoldMessenger.of(context),
+          message: '下载未完成，请重试',
+          backgroundColor: AppColors.backgroundElevated,
+          duration: const Duration(seconds: 4),
+        );
+      }),
+    );
+  }
+
+  bool _ownsLyricsLoad(
+    Track track,
+    int generation,
+  ) {
+    // Check the handler directly: avoids relying exclusively on an
+    // optimistic UI assignment or synchronous resume healing.
+    return mounted &&
+        generation == _lyricsLoadGeneration &&
+        _lyricsTrackId == track.id &&
+        _currentTrack.value?.id == track.id &&
+        _audioHandler.currentTrack?.id == track.id;
+  }
+
+  Future<void> _loadLyricsForTrack(
+    Track track, {
+    required int generation,
+  }) async {
+    final revision = DatabaseService.lyricsRevisionFor(track.id);
+
+    bool ownsRequest() {
+      return _ownsLyricsLoad(track, generation) &&
+          DatabaseService.lyricsRevisionFor(track.id) == revision;
+    }
+
+    void publishManualIfCurrent() {
+      if (!_ownsLyricsLoad(track, generation)) return;
+
+      final manual = DatabaseService.manualLyricsFor(track.id);
+      if (manual == null) return;
+
+      _lyricsNotifier.value = manual.source == 'none' ? const [] : manual.lines;
+    }
+
+    // The helper catches its own failures.
+    try {
+      // The user may already have chosen lyrics in this session.
+      final manual = DatabaseService.manualLyricsFor(track.id);
+
+      if (manual != null) {
+        if (_ownsLyricsLoad(track, generation)) {
+          _lyricsNotifier.value =
+              manual.source == 'none' ? const [] : manual.lines;
+        }
+        return;
+      }
+
+      final cached = await DatabaseService.getCachedLyrics(track.id);
+
+      if (!ownsRequest()) {
+        publishManualIfCurrent();
+        return;
+      }
+
+      // A deliberate provider selection should bypass automatic title
+      // validation just like pasted/current lyrics.
+      final latestManual = DatabaseService.manualLyricsFor(track.id);
+
+      if (latestManual != null) {
+        _lyricsNotifier.value =
+            latestManual.source == 'none' ? const [] : latestManual.lines;
+        return;
+      }
+
+      final cleanSongTitle =
+          LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ?? '';
+
+      var cacheValid = false;
+
+      if (cached != null &&
+          cached.lines.isNotEmpty &&
+          cached.source != 'none') {
+        // 'user' (pasted/edited LRC) and 'current' (re-applied with an
+        // offset) are deliberate user choices. Title-validating them fails
+        // — a paste is cached as 「自定义歌词」.
+        if (cached.source == 'user' || cached.source == 'current') {
+          cacheValid = true;
+        } else {
+          final cachedTitle = cached.songTitle ?? '';
+
+          cacheValid = cachedTitle.isNotEmpty &&
+              LyricsEngine.isTitleMatching(
+                cachedTitle,
+                cleanSongTitle,
+              );
+        }
+      }
+
+      if (cacheValid) {
+        if (ownsRequest()) {
+          _lyricsNotifier.value = cached!.lines;
+        }
+        return;
+      }
+
+      if (!ownsRequest()) {
+        publishManualIfCurrent();
+        return;
+      }
+
+      _lyricsNotifier.value = const [];
+
+      final fresh = await LyricsEngine.autoFetchLyrics(track.rawTitle);
+
+      if (!ownsRequest()) {
+        publishManualIfCurrent();
+        return;
+      }
+
+      final accepted = await DatabaseService.cacheAutomaticLyrics(
+        track.id,
+        fresh,
+        expectedRevision: revision,
+      );
+
+      if (!accepted || !ownsRequest()) {
+        publishManualIfCurrent();
+        return;
+      }
+
+      // A "not found" result carries placeholder lines; showing an empty
+      // list instead lets the lyrics view offer its search/paste action.
+      _lyricsNotifier.value = fresh.source == 'none' ? const [] : fresh.lines;
+    } catch (error, stack) {
+      debugPrint('Lyrics load failed for ${track.id}: $error\n$stack');
+
+      // Do not clear a newer or manually applied value on failure.
+      publishManualIfCurrent();
+    }
   }
 
   Future<void> _loadHistory() async {
@@ -328,10 +465,11 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
     _audioHandler.playTrack(track, newQueue: q.isNotEmpty ? q : null);
   }
 
-  /// Search tap: preview an undownloaded track in the player sheet without
-  /// auto-downloading; play straight away (looping the downloaded library) if
-  /// it's already local.
-  void _onSearchSelectTrack(Track track, {List<Track>? queue}) async {
+  /// Honest row-tap contract, shared by search, library rail and playlist
+  /// rows: a downloaded track plays in place; a nonlocal track opens
+  /// clearly labeled track details without changing playback. No silent
+  /// download-then-play on a row tap.
+  void _onBrowseSelectTrack(Track track, {List<Track>? queue}) async {
     final downloaded = await AudioDownloadService.isDownloaded(track);
     if (!mounted) return;
     if (downloaded) {
@@ -361,225 +499,241 @@ class _MainLayoutState extends State<MainLayout> with WidgetsBindingObserver {
     if (_nowPlayingOpen) return;
     _nowPlayingOpen = true;
 
-    final from = _miniPlayerRect();
+    final from =
+        focused.id == _audioHandler.currentTrack?.id ? _miniPlayerRect() : null;
 
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        transitionDuration: AppMotion.slow,
-        reverseTransitionDuration: AppMotion.base,
-        pageBuilder: (context, animation, secondaryAnimation) {
-          return NowPlayingSheet(
-            handler: _audioHandler,
-            focusedTrack: focused,
-            positionNotifier: _positionNotifier,
-            durationNotifier: _durationNotifier,
-            lyricsNotifier: _lyricsNotifier,
-            followHandler: follow,
-          );
-        },
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          // The docked card *becomes* the page: its rectangle grows to fill
-          // the screen and its corner radius unrolls, and on the way back it
-          // folds down onto the card again. Falling back to a slide-up keeps
-          // the entry sane when there is no card to grow from (opened straight
-          // from a search result before anything is docked).
-          if (from == null) {
-            return SlideTransition(
-              position: Tween<Offset>(
-                begin: const Offset(0, 1),
-                end: Offset.zero,
-              ).animate(CurvedAnimation(
-                parent: animation,
-                curve: AppMotion.standard,
-                reverseCurve: AppMotion.standardReverse,
-              )),
-              child: child,
-            );
-          }
-          return ExpandFromCard(animation: animation, from: from, child: child);
-        },
-      ),
-    ).whenComplete(() => _nowPlayingOpen = false);
+    final media = MediaQuery.of(context);
+    final reduceMotion = media.disableAnimations || media.accessibleNavigation;
+
+    Navigator.of(context)
+        .push(
+          PageRouteBuilder(
+            transitionDuration: reduceMotion ? Duration.zero : AppMotion.slow,
+            reverseTransitionDuration:
+                reduceMotion ? Duration.zero : AppMotion.base,
+            pageBuilder: (context, animation, secondaryAnimation) {
+              return NowPlayingSheet(
+                handler: _audioHandler,
+                focusedTrack: focused,
+                positionNotifier: _positionNotifier,
+                durationNotifier: _durationNotifier,
+                lyricsNotifier: _lyricsNotifier,
+                followHandler: follow,
+              );
+            },
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+              if (reduceMotion) return child;
+              // The docked card *becomes* the page: its rectangle grows to fill
+              // the screen and its corner radius unrolls, and on the way back it
+              // folds down onto the card again. Falling back to a slide-up keeps
+              // the entry sane when there is no card to grow from (opened straight
+              // from a search result before anything is docked).
+              if (from == null) {
+                return SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 1),
+                    end: Offset.zero,
+                  ).animate(CurvedAnimation(
+                    parent: animation,
+                    curve: AppMotion.standard,
+                    reverseCurve: AppMotion.standardReverse,
+                  )),
+                  child: child,
+                );
+              }
+              return ExpandFromCard(
+                  animation: animation, from: from, child: child);
+            },
+          ),
+        )
+        .whenComplete(() => _nowPlayingOpen = false);
   }
-
-
-
 
   void _onTabTap(int index) {
     if (index == _activeTabIndex) return;
-    Haptics.selection();
-    setState(() => _activeTabIndex = index);
-    _pageController.animateToPage(
-      index,
-      duration: AppMotion.base,
-      curve: AppMotion.emphasized,
-    );
-  }
 
+    final media = MediaQuery.of(context);
+    final reduceMotion = media.disableAnimations || media.accessibleNavigation;
+
+    setState(() => _activeTabIndex = index);
+
+    if (reduceMotion) {
+      _pageController.jumpToPage(index);
+    } else {
+      _pageController.animateToPage(
+        index,
+        duration: AppMotion.fast,
+        curve: AppMotion.standard,
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final reduceMotion = media.disableAnimations || media.accessibleNavigation;
     final dockedHeight = MiniPlayer.totalHeight(context);
+    final activePlaylist = _activePlaylistSheet;
 
-    return Scaffold(
-      body: Stack(
-        children: [
-          // Layer 0: ambient backdrop. A sibling behind the content rather
-          // than its parent, so a cover change repaints only this layer
-          // instead of rebuilding both pages.
-          Positioned.fill(
-            child: ValueListenableBuilder<Track?>(
-              valueListenable: _currentTrack,
-              builder: (context, track, _) =>
-                  AmbientBackground(coverUrl: track?.coverUrl),
-            ),
-          ),
-          Stack(
+    return PopScope(
+      canPop: activePlaylist == null,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop || _activePlaylistSheet == null) return;
+        setState(() => _activePlaylistSheet = null);
+      },
+      child: Scaffold(
+        backgroundColor: AppColors.background,
+        body: Stack(
           children: [
-            // Layer 1: Content Pages
+            // Main browsing surface.
             Column(
               children: [
-                // Top Tab Header Selector ("聆听" | "搜索") — sliding pill
                 SafeArea(
                   bottom: false,
-                  minimum: const EdgeInsets.only(top: 12),
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: SegmentTabs(
-                            labels: const ['聆听', '搜索'],
-                            animation: _pageFraction,
-                            onTap: _onTabTap,
-                          ),
-                        ),
-                        // The right-hand end of this row was dead space. The
-                        // mark closes it off and gives the header a shape,
-                        // which is what a header is for.
-                        Padding(
-                          padding: const EdgeInsets.only(left: 12, right: 14),
-                          child: Image.asset('assets/logo.png', height: 36),
-                        ),
-                      ],
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: SegmentTabs(
+                        labels: const ['聆听', '搜索'],
+                        animation: _pageFraction,
+                        onTap: _onTabTap,
+                      ),
                     ),
                   ),
                 ),
 
-                // Swipeable PageView (聆听 & 搜索)
                 Expanded(
                   child: PageView(
                     controller: _pageController,
                     onPageChanged: (index) {
-                      Haptics.selection();
-                      setState(() {
-                        _activeTabIndex = index;
-                      });
+                      if (_activeTabIndex == index) return;
+                      setState(() => _activeTabIndex = index);
                     },
                     children: [
                       RepaintBoundary(
                         child: ValueListenableBuilder<List<Track>>(
                           valueListenable: _recentlyPlayed,
-                          builder: (context, recent, _) => HomeScreen(
-                            recentlyPlayed: recent,
-                            onSelectTrack: _onPlayTrackAndExpand,
-                            onPlayOnly: _onPlayTrackOnly,
-                            onPlayCollection: _playCollection,
-                            onOpenPlaylist: (pl) {
-                              setState(() => _activePlaylistSheet = pl);
-                            },
-                          ),
+                          builder: (context, recent, _) {
+                            return HomeScreen(
+                              recentlyPlayed: recent,
+                              onSelectTrack: _onBrowseSelectTrack,
+                              onPlayOnly: _onPlayTrackOnly,
+                              onPlayCollection: _playCollection,
+                              onOpenPlaylist: (playlist) {
+                                FocusManager.instance.primaryFocus?.unfocus();
+                                setState(
+                                  () => _activePlaylistSheet = playlist,
+                                );
+                              },
+                            );
+                          },
                         ),
                       ),
                       RepaintBoundary(
                         child: SearchScreen(
-                          onSelectTrack: _onSearchSelectTrack,
+                          onSelectTrack: _onBrowseSelectTrack,
                           onPlayOnly: _onPlayTrackOnly,
                         ),
                       ),
                     ],
                   ),
                 ),
+
+                // The shell owns mini-player clearance.
                 SizedBox(height: dockedHeight),
               ],
             ),
 
-            // Layer 2: Active Playlist Overlay (Stops strictly above MiniPlayer)
-            if (_activePlaylistSheet != null)
+            // Playlist surface. The mini-player stays accessible below it.
+            if (activePlaylist != null)
               Positioned(
                 left: 0,
                 right: 0,
                 top: 0,
                 bottom: dockedHeight,
-                child: TweenAnimationBuilder<double>(
-                  key: ValueKey(_activePlaylistSheet!.id),
-                  tween: Tween(begin: 0.0, end: 1.0),
-                  duration: AppMotion.fast,
-                  curve: AppMotion.standard,
-                  builder: (context, t, child) => Opacity(
-                    opacity: t,
-                    child: Transform.translate(
-                      offset: Offset(0, (1 - t) * 40),
-                      child: child,
+                child: BlockSemantics(
+                  child: TweenAnimationBuilder<double>(
+                    key: ValueKey(activePlaylist.id),
+                    tween: Tween(begin: 0.0, end: 1.0),
+                    duration: reduceMotion ? Duration.zero : AppMotion.fast,
+                    curve: AppMotion.standard,
+                    builder: (context, value, child) {
+                      return Opacity(
+                        opacity: value,
+                        child: Transform.translate(
+                          offset: Offset(0, (1 - value) * 20),
+                          child: child,
+                        ),
+                      );
+                    },
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () {
+                              setState(() => _activePlaylistSheet = null);
+                            },
+                            child: const ColoredBox(
+                              color: AppColors.black45,
+                            ),
+                          ),
+                        ),
+                        Align(
+                          alignment: Alignment.bottomCenter,
+                          child: PlaylistDetailSheet(
+                            playlist: activePlaylist,
+                            onSelectTrack: _onBrowseSelectTrack,
+                            onPlayOnly: _onPlayTrackOnly,
+                            onPlayCollection: _playCollection,
+                            onPlaylistUpdated: _loadHistory,
+                            onClose: () {
+                              setState(() => _activePlaylistSheet = null);
+                            },
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: GestureDetector(
-                          onTap: () =>
-                              setState(() => _activePlaylistSheet = null),
-                          child: const ColoredBox(color: AppColors.black45),
-                        ),
-                      ),
-                      Align(
-                        alignment: Alignment.bottomCenter,
-                        child: PlaylistDetailSheet(
-                          playlist: _activePlaylistSheet!,
-                          onSelectTrack: _onPlayTrackAndExpand,
-                          onPlayOnly: _onPlayTrackOnly,
-                          onPlayCollection: _playCollection,
-                          onPlaylistUpdated: _loadHistory,
-                          onClose: () =>
-                              setState(() => _activePlaylistSheet = null),
-                        ),
-                      ),
-                    ],
                   ),
                 ),
               ),
 
-
-            // Layer 3: Permanent Docked MiniPlayer (Top of Z-index, ALWAYS interactive!)
+            // One persistent listening surface.
             Positioned(
               left: 0,
               right: 0,
               bottom: 0,
               child: ListenableBuilder(
                 key: _miniPlayerKey,
-                listenable: Listenable.merge([_currentTrack, _isPlaying]),
-                builder: (context, _) => MiniPlayer(
-                currentTrack: _currentTrack.value,
-                isPlaying: _isPlaying.value,
-                positionNotifier: _positionNotifier,
-                durationNotifier: _durationNotifier,
-                onPlayPause: () {
-                  if (_isPlaying.value) {
-                    _audioHandler.pause();
-                  } else {
-                    _audioHandler.play();
-                  }
+                listenable: Listenable.merge([
+                  _currentTrack,
+                  _isPlaying,
+                ]),
+                builder: (context, _) {
+                  return MiniPlayer(
+                    currentTrack: _currentTrack.value,
+                    isPlaying: _isPlaying.value,
+                    positionNotifier: _positionNotifier,
+                    durationNotifier: _durationNotifier,
+                    onPlayPause: () {
+                      if (_isPlaying.value) {
+                        _audioHandler.pause();
+                      } else {
+                        _audioHandler.play();
+                      }
+                    },
+                    onNext: _audioHandler.skipToNext,
+                    onPrevious: _audioHandler.skipToPrevious,
+                    onSeek: _audioHandler.seek,
+                    onTap: _openNowPlaying,
+                  );
                 },
-                onNext: _audioHandler.skipToNext,
-                onPrevious: _audioHandler.skipToPrevious,
-                onSeek: _audioHandler.seek,
-                onTap: _openNowPlaying,
-              ),
               ),
             ),
           ],
-          ),
-        ],
+        ),
       ),
     );
   }

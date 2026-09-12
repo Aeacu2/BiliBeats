@@ -10,9 +10,9 @@ import '../widgets/track_options_menu.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
 import '../widgets/cached_cover_image.dart';
+import '../widgets/download_management_sheet.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/marquee_text.dart';
-import '../widgets/mini_player.dart';
 import '../widgets/track_download_button.dart';
 import '../widgets/track_row.dart';
 
@@ -47,6 +47,7 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription<void>? _downloadManagerSub;
   List<DownloadTask> _downloadingTasks = [];
   Set<String> _downloadingIds = {};
+  bool _hasFailedDownloads = false;
 
   @override
   void initState() {
@@ -59,7 +60,9 @@ class _HomeScreenState extends State<HomeScreen> {
     _downloadManagerSub = DownloadManager.instance.updates.listen((_) {
       final ids =
           DownloadManager.instance.activeTasks.map((t) => t.track.id).toSet();
-      if (!setEquals(ids, _downloadingIds)) {
+      final hasFailed = DownloadManager.instance.failedTasks.isNotEmpty;
+      if (!setEquals(ids, _downloadingIds) ||
+          hasFailed != _hasFailedDownloads) {
         _downloadingIds = ids;
         _refreshDownloading();
       }
@@ -88,7 +91,12 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     setState(() {
       _downloadingTasks = DownloadManager.instance.activeTasks;
+      _hasFailedDownloads = DownloadManager.instance.failedTasks.isNotEmpty;
     });
+  }
+
+  void _openDownloadManagement() {
+    DownloadManagementSheet.show(context);
   }
 
   void _openCreatePlaylistDialog() async {
@@ -97,7 +105,8 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.backgroundElevated,
-        title: const Text('新建歌单', style: TextStyle(color: AppColors.textPrimary)),
+        title:
+            const Text('新建歌单', style: TextStyle(color: AppColors.textPrimary)),
         content: TextField(
           controller: controller,
           style: const TextStyle(color: AppColors.textPrimary),
@@ -136,8 +145,8 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.backgroundElevated,
-        title: const Text('删除歌单',
-            style: TextStyle(color: AppColors.textPrimary)),
+        title:
+            const Text('删除歌单', style: TextStyle(color: AppColors.textPrimary)),
         content: Text(
           '「${pl.name}」将被删除，本地音频保留。',
           style: const TextStyle(color: AppColors.textSecondary),
@@ -174,20 +183,18 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  List<Track> get _localTracks =>
-      [..._downloadingTasks.map((t) => t.track), ..._downloadedTracks];
-
+  /// Completed downloads only. Active (unfinished) downloads are shown in
+  /// their own section and must never enter an offline playback queue.
   void _openDownloadedPlaylist() {
     _openPlaylist(Playlist(
       id: 'downloaded',
       name: '本地',
-      tracks: _localTracks,
+      tracks: List<Track>.of(_downloadedTracks),
     ));
   }
 
   Widget _quickCard({
     required IconData icon,
-    required List<Color> gradient,
     required String title,
     required String subtitle,
     required VoidCallback onTap,
@@ -212,10 +219,16 @@ class _HomeScreenState extends State<HomeScreen> {
                           width: 40,
                           height: 40,
                           decoration: BoxDecoration(
-                            gradient: LinearGradient(colors: gradient),
+                            color: AppColors.white06,
+                            borderRadius: BorderRadius.circular(AppRadius.sm),
                           ),
-                          child:
-                              Icon(icon, color: AppColors.textPrimary, size: 22),
+                          child: Icon(
+                            icon,
+                            color: icon == Icons.favorite_rounded
+                                ? AppColors.accent
+                                : AppColors.textSecondary,
+                            size: 22,
+                          ),
                         ),
                 ),
                 const Spacer(),
@@ -240,37 +253,37 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Start-this-collection control. Loop-all, in order — the shuffled variant
   /// lives inside the collection, where 随机播放 is the header button.
   Widget _playCollectionButton(List<Track> Function() tracks) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        final list = tracks();
-        if (list.isEmpty) return;
-        Haptics.medium();
-        widget.onPlayCollection?.call(list);
-      },
-      child: SizedBox(
-        width: 48,
-        height: 48,
-        child: Center(
-          child: Container(
-            width: 30,
-            height: 30,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: AppColors.primaryGradient,
-              boxShadow: [
-                BoxShadow(
-                    color: AppColors.accent30,
-                    blurRadius: 10,
-                    offset: Offset(0, 3)),
-              ],
-            ),
-            child: const Icon(Icons.play_arrow_rounded,
-                color: AppColors.textPrimary, size: 20),
-          ),
+    final enabled = widget.onPlayCollection != null && tracks().isNotEmpty;
+
+    return SizedBox(
+      width: 48,
+      height: 48,
+      child: IconButton(
+        tooltip: '播放全部',
+        onPressed: !enabled
+            ? null
+            : () {
+                final queue = List<Track>.of(tracks());
+                if (queue.isEmpty) return;
+
+                Haptics.light();
+                widget.onPlayCollection?.call(queue);
+              },
+        icon: Icon(
+          Icons.play_arrow_rounded,
+          size: 28,
+          color: enabled ? AppColors.textPrimary : AppColors.textFaint,
         ),
       ),
     );
+  }
+
+  /// Completed-download subset of [tracks]. Collection playback and
+  /// automatic advance never silently download missing items.
+  List<Track> _playableOf(List<Track> tracks) {
+    if (tracks.isEmpty) return const [];
+    final ids = _downloadedTracks.map((t) => t.id).toSet();
+    return tracks.where((t) => ids.contains(t.id)).toList();
   }
 
   /// A playlist reads as a row, exactly like a song in the search results.
@@ -290,16 +303,16 @@ class _HomeScreenState extends State<HomeScreen> {
               borderRadius: BorderRadius.circular(AppRadius.sm),
               child: pl.coverUrl != null && pl.coverUrl!.isNotEmpty
                   ? CachedCoverImage(url: pl.coverUrl!, width: 54, height: 54)
-                  : Container(
+                  : const SizedBox(
                       width: 54,
                       height: 54,
-                      decoration: const BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [AppColors.surfaceNeutral, AppColors.surfaceNeutralDeep],
+                      child: ColoredBox(
+                        color: AppColors.white06,
+                        child: Center(
+                          child: Icon(Icons.queue_music_rounded,
+                              color: AppColors.textSecondary, size: 26),
                         ),
                       ),
-                      child: const Icon(Icons.queue_music_rounded,
-                          color: AppColors.textPrimary, size: 26),
                     ),
             ),
             const SizedBox(width: 12),
@@ -323,7 +336,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             Padding(
               padding: const EdgeInsets.only(right: 8),
-              child: _playCollectionButton(() => pl.tracks),
+              child: _playCollectionButton(() => _playableOf(pl.tracks)),
             ),
           ],
         ),
@@ -419,6 +432,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final otherPlaylists =
         _playlists.where((p) => p.id != Playlist.favoritesId).toList();
 
+    // Collection queues are completed downloads only: automatic advance
+    // must not silently download missing items.
+    final downloadedIds = _downloadedTracks.map((t) => t.id).toSet();
+    final favTracks = _favorites?.tracks ?? const [];
+    final favPlayable =
+        favTracks.where((t) => downloadedIds.contains(t.id)).toList();
+
     // Slivers instead of one eager ListView(children:): long playlists and
     // an active download list only pay for the rows actually on screen. The
     // static headers stay in a fixed child-list delegate (cheap, count known).
@@ -431,50 +451,60 @@ class _HomeScreenState extends State<HomeScreen> {
               // No "聆听" heading: the tab bar above already names the page, and
               // repeating it one line below was the same word twice.
               // Quick Access Cards: Downloaded Tracks & Favorites
-        Row(
-          children: [
-            Expanded(
-              child: _quickCard(
-                icon: Icons.download_done_rounded,
-                gradient: const [AppColors.success, Color(0xFF059669)],
-                title: '本地',
-                subtitle: _downloadingTasks.isEmpty
-                    ? '${_downloadedTracks.length} 首'
-                    : '${_downloadingTasks.length} 首下载中',
-                onTap: _openDownloadedPlaylist,
-                tracks: () => _localTracks,
+              Row(
+                children: [
+                  Expanded(
+                    child: _quickCard(
+                      icon: Icons.download_done_rounded,
+                      title: '本地',
+                      subtitle: _downloadingTasks.isEmpty
+                          ? '${_downloadedTracks.length} 首可播放'
+                          : '${_downloadedTracks.length} 首可播放 · '
+                              '${_downloadingTasks.length} 首下载中',
+                      onTap: _openDownloadedPlaylist,
+                      tracks: () => List<Track>.of(_downloadedTracks),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _quickCard(
+                      icon: Icons.favorite_rounded,
+                      title: '收藏',
+                      subtitle: favPlayable.length == favTracks.length
+                          ? '${favTracks.length} 首'
+                          : '${favTracks.length} 首 · '
+                              '${favPlayable.length} 首可播放',
+                      onTap: () {
+                        final fav = _favorites;
+                        if (fav != null) _openPlaylist(fav);
+                      },
+                      tracks: () => List<Track>.of(favPlayable),
+                      cover: _favorites?.coverUrl,
+                    ),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _quickCard(
-                icon: Icons.favorite_rounded,
-                gradient: const [AppColors.pinkStart, AppColors.accent],
-                title: '收藏',
-                subtitle: '${_favorites?.tracks.length ?? 0} 首',
-                onTap: () {
-                  final fav = _favorites;
-                  if (fav != null) _openPlaylist(fav);
-                },
-                tracks: () => _favorites?.tracks ?? const [],
-                cover: _favorites?.coverUrl,
-              ),
-            ),
-          ],
-        ),
 
-        if (_downloadingTasks.isNotEmpty) ...[
+              if (_downloadingTasks.isNotEmpty || _hasFailedDownloads) ...[
                 const SizedBox(height: 24),
-                const Text('下载中', style: AppTypography.title),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _downloadingTasks.isNotEmpty ? '下载中' : '下载',
+                        style: AppTypography.title,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: _openDownloadManagement,
+                      child: const Text('管理',
+                          style: TextStyle(
+                              color: AppColors.textSecondary, fontSize: 13)),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 12),
               ],
-
-              const SizedBox(height: 24),
-
-              // Playlists Section Header
-              const Text('我的歌单', style: AppTypography.title),
-
-              const SizedBox(height: 12),
             ]),
           ),
         ),
@@ -487,6 +517,19 @@ class _HomeScreenState extends State<HomeScreen> {
               itemBuilder: (context, index) => _downloadingTaskTile(index),
             ),
           ),
+
+        // The playlist header belongs to the playlist rows: it must come
+        // after the download rows, not before them.
+        SliverPadding(
+          padding: EdgeInsets.fromLTRB(
+              20,
+              (_downloadingTasks.isEmpty && !_hasFailedDownloads) ? 24 : 28,
+              20,
+              12),
+          sliver: const SliverToBoxAdapter(
+            child: Text('我的歌单', style: AppTypography.title),
+          ),
+        ),
 
         // Playlists: a plain vertical stack of bars, laid out by the page's
         // own scroll view. A horizontal rail hid every playlist past the
@@ -507,8 +550,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
 
         SliverPadding(
-          padding: EdgeInsets.fromLTRB(
-              20, 0, 20, MiniPlayer.totalHeight(context) + 24),
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
           sliver: SliverToBoxAdapter(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -520,7 +562,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                 const SizedBox(height: 14),
 
-        if (widget.recentlyPlayed.isEmpty)
+                if (widget.recentlyPlayed.isEmpty)
                   const EmptyState(
                     icon: Icons.history_rounded,
                     title: '暂无播放记录',
@@ -537,7 +579,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         return GestureDetector(
                           onTap: () => widget.onSelectTrack(track),
                           onLongPress: () {
-                            TrackOptionsMenu.show(context, track, onTrackChanged: _loadData);
+                            TrackOptionsMenu.show(context, track,
+                                onTrackChanged: _loadData);
                           },
                           child: Container(
                             width: 130,
@@ -554,10 +597,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ),
                                 ),
                                 const SizedBox(height: 8),
-                                Text(
-                                  track.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                                MarqueeText(
+                                  text: track.title,
+                                  phase: (index % 5) / 5,
                                   style: AppTypography.body.copyWith(
                                     fontSize: 14,
                                     fontWeight: FontWeight.w600,
@@ -568,7 +610,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                   track.uploader,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: AppTypography.caption.copyWith(fontSize: 12),
+                                  style: AppTypography.caption
+                                      .copyWith(fontSize: 12),
                                 ),
                               ],
                             ),

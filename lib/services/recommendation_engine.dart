@@ -179,15 +179,23 @@ class RecommendationEngine {
     final candidates = <String, Track>{};
     // Seeds are independent searches; run them concurrently so a refresh
     // costs one network round-trip instead of one per seed. Each seed keeps
-    // its own error handling so one failure never sinks the batch.
+    // its own error handling so one failure never sinks the batch — but if
+    // every seed failed, that is a transport failure, not an empty batch.
+    Object? firstError;
+    var failedSeeds = 0;
     final batches = await Future.wait(seeds.map((seed) async {
       try {
         return await BilibiliSdk.search(seed, page: page);
       } catch (e) {
         debugPrint('Recommendation seed "$seed" failed: $e');
+        failedSeeds++;
+        firstError ??= e;
         return const <Track>[];
       }
     }));
+    if (failedSeeds == seeds.length) {
+      throw firstError ?? const BiliApiException('all seeds failed');
+    }
     for (final tracks in batches) {
       for (final track in tracks) {
         if (!isSongLength(track)) continue;

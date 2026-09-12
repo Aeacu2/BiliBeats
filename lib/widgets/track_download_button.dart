@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/track.dart';
 import '../services/audio_download_service.dart';
+import '../services/database_service.dart';
 import '../services/download_manager.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
@@ -31,6 +32,7 @@ class TrackDownloadButton extends StatefulWidget {
 
 class _TrackDownloadButtonState extends State<TrackDownloadButton> {
   StreamSubscription<String>? _sub;
+  StreamSubscription<void>? _libSub;
   bool _isDownloaded = false;
   bool _wasDownloading = false;
   double _fraction = 0.0;
@@ -61,6 +63,13 @@ class _TrackDownloadButtonState extends State<TrackDownloadButton> {
       _fraction = fraction;
       setState(() {});
     });
+    // Library changes (e.g. removing a download elsewhere) bypass the
+    // download manager, so a preserved row would keep showing Play after
+    // its file is gone. Re-stat on library updates; the stat is cheap and
+    // these events are rare.
+    _libSub = DatabaseService.libraryUpdateStream.listen((_) {
+      if (mounted) _refresh();
+    });
   }
 
   @override
@@ -79,6 +88,7 @@ class _TrackDownloadButtonState extends State<TrackDownloadButton> {
   @override
   void dispose() {
     _sub?.cancel();
+    _libSub?.cancel();
     super.dispose();
   }
 
@@ -102,7 +112,7 @@ class _TrackDownloadButtonState extends State<TrackDownloadButton> {
   /// arrow on the way. Same footprint, same glyph, always: starting a download
   /// only draws a ring around it, exactly as the player page's primary control
   /// does.
-  static const double _box = 44.0;
+  static const double _box = 48.0;
 
   @override
   Widget build(BuildContext context) {
@@ -117,13 +127,22 @@ class _TrackDownloadButtonState extends State<TrackDownloadButton> {
       onTap = null;
       tooltip = '下载中';
     } else if (_isDownloaded) {
-      glyph = Icon(Icons.play_circle_fill,
-          color: AppColors.accent, size: widget.size + 4);
-      onTap = () {
-        Haptics.light();
-        widget.onPlay?.call();
-      };
-      tooltip = '播放';
+      // A completed download without a play callback (e.g. a downloading
+      // row) must not look like an enabled Play button that does nothing.
+      final canPlay = widget.onPlay != null;
+
+      glyph = Icon(
+        canPlay ? Icons.play_circle_fill : Icons.download_done_rounded,
+        color: canPlay ? AppColors.accent : AppColors.textMuted,
+        size: canPlay ? widget.size + 4 : widget.size,
+      );
+      onTap = canPlay
+          ? () {
+              Haptics.light();
+              widget.onPlay!();
+            }
+          : null;
+      tooltip = canPlay ? '播放' : '已下载';
     } else {
       glyph = Icon(Icons.download_rounded,
           color: AppColors.textSecondary, size: widget.size);

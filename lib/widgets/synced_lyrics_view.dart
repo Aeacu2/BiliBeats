@@ -172,16 +172,15 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
     }
 
     final activeHeight = _itemHeight(widget.lines[_activeIndex], true);
-    final target = _topPadding +
-        accumulated -
-        (_viewportHeight / 2) +
-        (activeHeight / 2);
+    final target =
+        _topPadding + accumulated - (_viewportHeight / 2) + (activeHeight / 2);
     final clamped =
         target.clamp(0.0, _scrollController.position.maxScrollExtent);
 
     // Respect reduced motion: jump instead of animating.
-    final reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations == true ||
-        MediaQuery.maybeOf(context)?.accessibleNavigation == true;
+    final reduceMotion =
+        MediaQuery.maybeOf(context)?.disableAnimations == true ||
+            MediaQuery.maybeOf(context)?.accessibleNavigation == true;
     if (!animate || reduceMotion) {
       _scrollController.jumpTo(clamped);
       return;
@@ -198,7 +197,9 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
   // ---------------------------------------------------------------------------
 
   bool get _canCalibrate =>
-      widget.calibrating && widget.onCalibrateTap != null && widget.lines.isNotEmpty;
+      widget.calibrating &&
+      widget.onCalibrateTap != null &&
+      widget.lines.isNotEmpty;
 
   void _handleCalibrationTap(int index) {
     final posSec = widget.positionNotifier.value.inMilliseconds / 1000.0;
@@ -228,8 +229,8 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
         isActive ? FontWeight.w700 : FontWeight.w600);
     if (line.translation != null && line.translation!.isNotEmpty) {
       height += 4.0;
-      height += _measureText(line.translation!, isActive ? 16.0 : 14.0,
-          FontWeight.w500);
+      height += _measureText(
+          line.translation!, isActive ? 16.0 : 14.0, FontWeight.w500);
     }
 
     if (_heightCache.length > 400) _heightCache.clear();
@@ -316,9 +317,10 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
     final line = widget.lines[index];
     final isActive = index == _activeIndex;
     final distance = (index - _activeIndex).abs();
-    final opacity = isActive
-        ? 1.0
-        : (distance == 1 ? 0.5 : (distance == 2 ? 0.34 : 0.24));
+    // Readable inactive text: the floor used to be 0.24 over already-muted
+    // translations. Hierarchy comes from weight/color, not near-invisibility.
+    final opacity =
+        isActive ? 1.0 : (distance == 1 ? 0.6 : (distance == 2 ? 0.5 : 0.4));
 
     return InkWell(
       borderRadius: BorderRadius.circular(AppRadius.md),
@@ -343,15 +345,14 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
               AnimatedDefaultTextStyle(
                 duration: AppMotion.slow,
                 curve: AppMotion.standard,
+                // Stable size in both states: emphasis comes from weight
+                // and color, which keeps centering steady. No glow.
                 style: TextStyle(
                   color: AppColors.textPrimary,
-                  fontSize: isActive ? 24 : 20,
+                  fontSize: 22,
                   height: 1.35,
                   fontWeight: isActive ? FontWeight.w700 : FontWeight.w600,
                   letterSpacing: isActive ? -0.4 : -0.2,
-                  shadows: isActive
-                      ? const [Shadow(color: AppColors.accent50, blurRadius: 18)]
-                      : null,
                 ),
                 child: Text(line.text),
               ),
@@ -362,7 +363,7 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
                   curve: AppMotion.standard,
                   style: TextStyle(
                     color: isActive ? AppColors.accent : AppColors.textMuted,
-                    fontSize: isActive ? 16 : 14,
+                    fontSize: 14,
                     height: 1.35,
                     fontWeight: FontWeight.w500,
                   ),
@@ -384,7 +385,8 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
         borderRadius: BorderRadius.circular(AppRadius.pill),
         border: Border.all(color: AppColors.accent30),
         boxShadow: const [
-          BoxShadow(color: AppColors.black45, blurRadius: 16, offset: Offset(0, 4)),
+          BoxShadow(
+              color: AppColors.black45, blurRadius: 16, offset: Offset(0, 4)),
         ],
       ),
       child: const Row(
@@ -418,7 +420,8 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
           borderRadius: BorderRadius.circular(AppRadius.pill),
           border: Border.all(color: AppColors.accent30),
           boxShadow: const [
-            BoxShadow(color: AppColors.black45, blurRadius: 16, offset: Offset(0, 4)),
+            BoxShadow(
+                color: AppColors.black45, blurRadius: 16, offset: Offset(0, 4)),
           ],
         ),
         child: const Row(
@@ -442,7 +445,8 @@ class _SyncedLyricsViewState extends State<SyncedLyricsView> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.lyrics_outlined, color: AppColors.textFaint, size: 40),
+          const Icon(Icons.lyrics_outlined,
+              color: AppColors.textFaint, size: 40),
           const SizedBox(height: 12),
           const Text(
             '暂无同步歌词',

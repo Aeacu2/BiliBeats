@@ -3,6 +3,7 @@ import '../models/track.dart';
 import '../services/database_service.dart';
 import '../theme/app_theme.dart';
 import 'cached_cover_image.dart';
+import 'marquee_text.dart';
 
 /// Bottom sheet for adding already-downloaded (本地) tracks to a playlist.
 /// Tracks already present in the target playlist are shown disabled with a
@@ -56,9 +57,8 @@ class _AddLocalTracksSheetState extends State<AddLocalTracksSheet> {
   final Set<String> _selectedIds = {};
 
   Future<void> _addSelected() async {
-    final tracksToAdd = widget.downloaded
-        .where((t) => _selectedIds.contains(t.id))
-        .toList();
+    final tracksToAdd =
+        widget.downloaded.where((t) => _selectedIds.contains(t.id)).toList();
     // One persist for the whole batch — the per-track call rewrote the
     // entire playlists file once per selected song.
     await DatabaseService.addTracksToPlaylist(widget.playlistId, tracksToAdd);
@@ -108,9 +108,9 @@ class _AddLocalTracksSheetState extends State<AddLocalTracksSheet> {
                     child: CachedCoverImage(
                         url: t.coverUrl, width: 40, height: 40),
                   ),
-                  title: Text(t.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                  title: MarqueeText(
+                      text: t.title,
+                      phase: (idx % 5) / 5,
                       style: TextStyle(
                           color: isAlreadyInPlaylist
                               ? AppColors.textMuted

@@ -10,48 +10,42 @@ class AppColors {
   static const Color accent = Color(0xFFFF3366);
   static const Color pinkStart = Color(0xFFFF6699);
   static const Color pinkEnd = Color(0xFFFF3366);
-  static const LinearGradient primaryGradient = LinearGradient(
-    colors: [pinkStart, pinkEnd],
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-  );
 
   // Precomputed opacity colors (avoids runtime Color allocations)
-  static const Color accent14 = Color(0x24FF3366);   // accent 14%
-  static const Color accent30 = Color(0x4DFF3366);   // accent 30%
-  static const Color accent22 = Color(0x38FF3366);   // accent 22%
-  static const Color accent04 = Color(0x0AFF3366);   // accent 4%
-  static const Color accent12 = Color(0x1FFF3366);   // accent 12%
-  static const Color accent50 = Color(0x80FF3366);   // accent 50%
-  static const Color success12 = Color(0x1F34C77B);  // success 12%
-  static const Color success50 = Color(0x8034C77B);  // success 50%
-  static const Color black45 = Color(0x73000000);     // black 45%
-  static const Color black50 = Color(0x80000000);     // black 50%
-  static const Color black55 = Color(0x8C000000);     // black 55%
-  static const Color white05 = Color(0x0DFFFFFF);     // white 5%
-  static const Color white06 = Color(0x0FFFFFFF);     // white 6%
-  static const Color white10 = Color(0x1AFFFFFF);     // white 10%
-  static const Color white12 = Color(0x1FFFFFFF);     // white 12%
-  static const Color white24 = Color(0x3DFFFFFF);     // white 24%
+  static const Color accent14 = Color(0x24FF3366); // accent 14%
+  static const Color accent30 = Color(0x4DFF3366); // accent 30%
+  static const Color accent22 = Color(0x38FF3366); // accent 22%
+  static const Color accent04 = Color(0x0AFF3366); // accent 4%
+  static const Color accent12 = Color(0x1FFF3366); // accent 12%
+  static const Color accent50 = Color(0x80FF3366); // accent 50%
+  static const Color success12 = Color(0x1F34C77B); // success 12%
+  static const Color success50 = Color(0x8034C77B); // success 50%
+  static const Color black45 = Color(0x73000000); // black 45%
+  static const Color black50 = Color(0x80000000); // black 50%
+  static const Color black55 = Color(0x8C000000); // black 55%
+  static const Color white05 = Color(0x0DFFFFFF); // white 5%
+  static const Color white06 = Color(0x0FFFFFFF); // white 6%
+  static const Color white10 = Color(0x1AFFFFFF); // white 10%
+  static const Color white12 = Color(0x1FFFFFFF); // white 12%
+  static const Color white24 = Color(0x3DFFFFFF); // white 24%
 
   // Neutral ramp (cool near-black, not pure #000 — reads more refined).
   static const Color background = Color(0xFF08080A);
   static const Color backgroundElevated = Color(0xFF101014);
+
   /// One step deeper than [backgroundElevated]: nested surfaces and the cover
   /// placeholder read as "card on card" instead of fighting for the same tone.
   static const Color surfaceDeep = Color(0xFF141416);
   static const Color surfaceCard = Color(0x0AFFFFFF); // ~4% white
   static const Color hairline = Color(0x14FFFFFF); // subtle borders
   static const Color hairlineStrong = Color(0x26FFFFFF);
-  /// Neutral pair for muted two-stop gradients (track-placeholder art, etc.).
-  static const Color surfaceNeutral = Color(0xFF3A3A40);
-  static const Color surfaceNeutralDeep = Color(0xFF232327);
 
   // Text
   static const Color textPrimary = Color(0xFFFFFFFF);
   static const Color textSecondary = Color(0xB3FFFFFF); // 70%
   static const Color textMuted = Color(0x8CFFFFFF); // 55%
-  static const Color textFaint = Color(0x78FFFFFF); // 47% — was 35% (0x59) →45% (0x73) still 4.47:1, now 4.71:1 for WCAG AA
+  static const Color textFaint = Color(
+      0x78FFFFFF); // 47% — was 35% (0x59) →45% (0x73) still 4.47:1, now 4.71:1 for WCAG AA
 
   // Semantic
   static const Color success = Color(0xFF34C77B);

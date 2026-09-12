@@ -1,10 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 /// A single-line text that scrolls continuously when — and only when — it is
 /// too wide for the space it was given, with soft fade-outs at both edges.
 ///
-/// The motion is unbroken: constant velocity, no dwell at either end, and a
-/// second copy of the text trailing exactly one cycle behind so the wrap point
+/// Motion holds the static start for [dwell] first (a reading pause), then
+/// scrolls at constant velocity with no dwell at either end, and a second
+/// copy of the text trailing exactly one cycle behind so the wrap point
 /// is invisible. Text that fits is drawn statically and costs nothing.
 ///
 /// ## Why this is written the way it is
@@ -45,6 +48,10 @@ class MarqueeText extends StatefulWidget {
   /// Soft alpha fade at the leading/trailing edges while scrolling.
   final bool fade;
 
+  /// How long the static start is held before scrolling begins, per text.
+  /// Gives the eye a chance to read the beginning before it moves.
+  final Duration dwell;
+
   const MarqueeText({
     super.key,
     required this.text,
@@ -54,6 +61,7 @@ class MarqueeText extends StatefulWidget {
     this.phase = 0.0,
     this.textAlign = TextAlign.start,
     this.fade = true,
+    this.dwell = const Duration(milliseconds: 1400),
   });
 
   @override
@@ -78,6 +86,7 @@ class _MarqueeTextState extends State<MarqueeText>
 
   @override
   void dispose() {
+    _dwellTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
@@ -162,8 +171,10 @@ class _MarqueeTextState extends State<MarqueeText>
 
         // Only overflowing text scrolls; text that fits is simply drawn.
         // Respect accessibility: when animations are disabled, never scroll.
-        final disableAnimations = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-        final accessibleNav = MediaQuery.maybeOf(context)?.accessibleNavigation ?? false;
+        final disableAnimations =
+            MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+        final accessibleNav =
+            MediaQuery.maybeOf(context)?.accessibleNavigation ?? false;
         final shouldAnimate = !disableAnimations && !accessibleNav;
         final overflows = shouldAnimate && textSize.width > maxWidth + 0.5;
         if (!overflows) {
@@ -209,8 +220,7 @@ class _MarqueeTextState extends State<MarqueeText>
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(widget.text,
-                      maxLines: 1, softWrap: false, style: style),
+                  Text(widget.text, maxLines: 1, softWrap: false, style: style),
                   SizedBox(width: widget.gap),
                   ExcludeSemantics(
                     child: Text(widget.text,
@@ -248,6 +258,8 @@ class _MarqueeTextState extends State<MarqueeText>
 
   bool? _syncedRun;
   Duration? _syncedCycle;
+  Timer? _dwellTimer;
+  String? _dwelledText;
 
   /// Only queues a post-frame callback when the desired animation state has
   /// actually changed. The mini player rebuilds on every play/pause and track
@@ -256,6 +268,29 @@ class _MarqueeTextState extends State<MarqueeText>
     if (_syncedRun == shouldRun && _syncedCycle == cycle) return;
     _syncedRun = shouldRun;
     _syncedCycle = cycle;
+    _dwellTimer?.cancel();
+    _dwellTimer = null;
+    if (!shouldRun) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _syncController(shouldRun: false, cycle: Duration.zero);
+      });
+      return;
+    }
+    // First sight of this text: hold the readable start for [dwell]
+    // before scrolling. Geometry tweaks for the same text skip the pause.
+    if (_dwelledText != widget.text) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _dwellTimer?.cancel();
+        _dwellTimer = Timer(widget.dwell, () {
+          if (!mounted) return;
+          _dwelledText = widget.text;
+          _syncController(
+              shouldRun: true, cycle: _syncedCycle ?? Duration.zero);
+        });
+      });
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _syncController(shouldRun: shouldRun, cycle: cycle);
     });

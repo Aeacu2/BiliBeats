@@ -17,8 +17,7 @@ class Shimmer extends StatefulWidget {
   State<Shimmer> createState() => _ShimmerState();
 }
 
-class _ShimmerState extends State<Shimmer>
-    with SingleTickerProviderStateMixin {
+class _ShimmerState extends State<Shimmer> with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
 
   @override
@@ -27,7 +26,12 @@ class _ShimmerState extends State<Shimmer>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1300),
-    )..repeat();
+    );
+    // Respect reduced motion: a static placeholder instead of a sweep.
+    final media = MediaQueryData.fromView(View.of(context));
+    if (!(media.disableAnimations || media.accessibleNavigation)) {
+      _controller.repeat();
+    }
   }
 
   @override
@@ -99,4 +103,3 @@ class SkeletonTrackTile extends StatelessWidget {
     );
   }
 }
-

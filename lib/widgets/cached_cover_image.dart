@@ -61,9 +61,8 @@ class CachedCoverImage extends StatefulWidget {
 enum _CoverStatus { loading, ready, failed }
 
 class _CachedCoverImageState extends State<CachedCoverImage> {
-  static final HttpClient _client =
-      biliHttpClient(connectionTimeout: const Duration(seconds: 15),
-          maxConnectionsPerHost: 8);
+  static final HttpClient _client = biliHttpClient(
+      connectionTimeout: const Duration(seconds: 15), maxConnectionsPerHost: 8);
 
   // Avoid requesting absurdly large thumbnails.
   static const int _maxEdge = 1080;
@@ -289,26 +288,19 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   }
 
   Widget _buildFallback() {
+    // Same quiet treatment as the loading placeholder: missing artwork
+    // never invents color that competes with real covers.
     return Container(
-          width: widget.width,
-          height: widget.height,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [
-                AppColors.accent.withValues(alpha: 0.35),
-                AppColors.surfaceNeutralDeep,
-              ],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-          child: Center(
-            child: Icon(
-              Icons.music_note_rounded,
-              color: AppColors.accent,
-              size: (widget.width * 0.4).clamp(24.0, 80.0),
-            ),
-          ),
-        );
+      width: widget.width,
+      height: widget.height,
+      color: AppColors.surfaceDeep,
+      child: Center(
+        child: Icon(
+          Icons.music_note_rounded,
+          color: AppColors.textFaint,
+          size: (widget.width * 0.28).clamp(14.0, 40.0),
+        ),
+      ),
+    );
   }
 }

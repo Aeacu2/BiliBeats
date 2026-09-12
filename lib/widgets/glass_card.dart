@@ -2,13 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
-/// An elegant translucent surface.
+/// A restrained grouping surface.
 ///
-/// Instead of an expensive [BackdropFilter] on every card (which looks muddy
-/// when many are on screen, costs a full GPU layer pass, and on Android was the
-/// cause of the foreground-erasure bug), this uses a subtle top-lit sheen — a
-/// faint vertical white gradient — plus a hairline border. That is the quiet,
-/// refined look premium apps actually ship.
+/// Keep this for grouped controls and collection shortcuts.
+/// Track lists should continue using TrackRow.
 class GlassCard extends StatelessWidget {
   final Widget child;
   final EdgeInsetsGeometry? padding;
@@ -26,12 +23,8 @@ class GlassCard extends StatelessWidget {
     return Container(
       padding: padding ?? const EdgeInsets.all(12),
       decoration: BoxDecoration(
+        color: AppColors.surfaceCard,
         borderRadius: BorderRadius.circular(borderRadius),
-        gradient: const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [AppColors.white06, AppColors.surfaceCard],
-        ),
         border: Border.all(color: AppColors.hairline),
       ),
       child: child,

@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -17,7 +16,7 @@ const _style = TextStyle(fontSize: 14, height: 1.25);
 
 /// Mirrors how the mini player and the now-playing panel use the marquee: a
 /// width-constrained Column whose siblings must not be pushed around.
-Widget _host(String text, {double width = 160}) {
+Widget _host(String text, {double width = 160, Duration? dwell}) {
   return MaterialApp(
     home: Scaffold(
       body: Center(
@@ -27,7 +26,10 @@ Widget _host(String text, {double width = 160}) {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              MarqueeText(text: text, style: _style),
+              MarqueeText(
+                  text: text,
+                  style: _style,
+                  dwell: dwell ?? const Duration(milliseconds: 1400)),
               const Text('sibling'),
             ],
           ),
@@ -45,8 +47,14 @@ void main() {
       final pl = Playlist(id: 'favorites', name: '收藏', tracks: const []);
       expect(
         () => pl.tracks.add(const Track(
-            id: 'a', bvid: 'a', cid: 1, title: 't', rawTitle: 't', uploader: 'u',
-            coverUrl: '', duration: 1)),
+            id: 'a',
+            bvid: 'a',
+            cid: 1,
+            title: 't',
+            rawTitle: 't',
+            uploader: 'u',
+            coverUrl: '',
+            duration: 1)),
         returnsNormally,
       );
       expect(pl.tracks, hasLength(1));
@@ -56,8 +64,14 @@ void main() {
       final source = <Track>[];
       final pl = Playlist(id: 'p', name: 'n', tracks: source);
       pl.tracks.add(const Track(
-          id: 'a', bvid: 'a', cid: 1, title: 't', rawTitle: 't', uploader: 'u',
-          coverUrl: '', duration: 1));
+          id: 'a',
+          bvid: 'a',
+          cid: 1,
+          title: 't',
+          rawTitle: 't',
+          uploader: 'u',
+          coverUrl: '',
+          duration: 1));
       expect(source, isEmpty);
     });
   });
@@ -65,8 +79,14 @@ void main() {
   group('Track', () {
     test('copyWith preserves identity and only changes what is passed', () {
       const original = Track(
-          id: 'BV1_2', bvid: 'BV1', cid: 2, title: '旧标题',
-          rawTitle: '旧标题', uploader: '旧UP', coverUrl: 'c', duration: 100);
+          id: 'BV1_2',
+          bvid: 'BV1',
+          cid: 2,
+          title: '旧标题',
+          rawTitle: '旧标题',
+          uploader: '旧UP',
+          coverUrl: 'c',
+          duration: 100);
       final edited = original.copyWith(title: '新标题', uploader: '新UP');
 
       expect(edited.id, original.id);
@@ -82,8 +102,14 @@ void main() {
 
     test('survives a round trip through fromMap/toMap', () {
       const t = Track(
-          id: 'BV1_2', bvid: 'BV1', cid: 2, title: '标题',
-          rawTitle: '标题', uploader: 'UP', coverUrl: 'http://x', duration: 42);
+          id: 'BV1_2',
+          bvid: 'BV1',
+          cid: 2,
+          title: '标题',
+          rawTitle: '标题',
+          uploader: 'UP',
+          coverUrl: 'http://x',
+          duration: 42);
       final back = Track.fromMap(t.toMap());
       expect(back.title, t.title);
       expect(back.uploader, t.uploader);
@@ -138,31 +164,31 @@ void main() {
 
     test('weights a favourite above a mere play', () {
       final fav = TasteProfile.build(
-        favourites: [t('a', '大鱼', '周深')], history: [], searches: []);
+          favourites: [t('a', '大鱼', '周深')], history: [], searches: []);
       final played = TasteProfile.build(
-        favourites: [], history: [t('a', '大鱼', '周深')], searches: []);
+          favourites: [], history: [t('a', '大鱼', '周深')], searches: []);
       expect(fav.score(t('b', '其他', '周深')),
           greaterThan(played.score(t('b', '其他', '周深'))));
     });
 
     test('matches Chinese titles without a segmenter', () {
       final profile = TasteProfile.build(
-        favourites: [t('a', '大鱼海棠', 'UP1')], history: [], searches: []);
+          favourites: [t('a', '大鱼海棠', 'UP1')], history: [], searches: []);
       // Shares the 海棠 bigram despite a different uploader.
       expect(profile.score(t('b', '海棠依旧', 'UP2')), greaterThan(0));
       expect(profile.score(t('c', '完全无关', 'UP3')), 0);
     });
 
     test('search history alone can drive the profile', () {
-      final profile = TasteProfile.build(
-        favourites: [], history: [], searches: ['周深 大鱼']);
+      final profile =
+          TasteProfile.build(favourites: [], history: [], searches: ['周深 大鱼']);
       expect(profile.isEmpty, isFalse);
       expect(profile.score(t('b', '大鱼', 'someone')), greaterThan(0));
     });
 
     test('dropping search history drops its influence', () {
-      final withHistory = TasteProfile.build(
-        favourites: [], history: [], searches: ['古风']);
+      final withHistory =
+          TasteProfile.build(favourites: [], history: [], searches: ['古风']);
       final cleared =
           TasteProfile.build(favourites: [], history: [], searches: []);
       expect(withHistory.score(t('x', '古风翻唱', 'UP')), greaterThan(0));
@@ -171,7 +197,7 @@ void main() {
 
     test('knows what the user already has', () {
       final profile = TasteProfile.build(
-        favourites: [t('owned', '大鱼', '周深')], history: [], searches: []);
+          favourites: [t('owned', '大鱼', '周深')], history: [], searches: []);
       expect(profile.knownIds, contains('owned'));
     });
 
@@ -187,8 +213,14 @@ void main() {
 
   group('RecommendationEngine.isSongLength', () {
     Track withDuration(int d) => Track(
-        id: 'x', bvid: 'x', cid: 1, title: 't', rawTitle: 't', uploader: 'u',
-        coverUrl: '', duration: d);
+        id: 'x',
+        bvid: 'x',
+        cid: 1,
+        title: 't',
+        rawTitle: 't',
+        uploader: 'u',
+        coverUrl: '',
+        duration: d);
 
     test('keeps song-length uploads and drops long-form ones', () {
       expect(RecommendationEngine.isSongLength(withDuration(200)), isTrue);
@@ -260,8 +292,14 @@ void main() {
 
   group('TrackNotifier', () {
     Track track({String title = 't', String cover = ''}) => Track(
-        id: 'a', bvid: 'a', cid: 1, title: title, rawTitle: title, uploader: 'u',
-        coverUrl: cover, duration: 1);
+        id: 'a',
+        bvid: 'a',
+        cid: 1,
+        title: title,
+        rawTitle: title,
+        uploader: 'u',
+        coverUrl: cover,
+        duration: 1);
 
     test('notifies when only the metadata of the same track changes', () {
       // Track equality is id-only, so a plain ValueNotifier swallowed this and
@@ -329,7 +367,9 @@ void main() {
     testWidgets('scrolls at a constant velocity, with no dwell at the wrap',
         (tester) async {
       const title = 'a title far too long to ever fit here';
-      await tester.pumpWidget(_host(title));
+      // No initial pause here: dwell has its own test; this one measures
+      // constancy across the wrap point.
+      await tester.pumpWidget(_host(title, dwell: Duration.zero));
       await tester.pump(); // post-frame callback starts the controller
 
       // One cycle is the text plus the gap; the second copy trails exactly one
@@ -344,6 +384,10 @@ void main() {
           .x;
 
       const step = Duration(milliseconds: 200);
+      // Wait out controller start so sampling begins mid-motion.
+      for (var i = 0; i < 50 && offsetX() == 0.0; i++) {
+        await tester.pump(step);
+      }
       final deltas = <double>[];
       var previous = offsetX();
       for (var i = 0; i < 150; i++) {
@@ -377,8 +421,8 @@ void main() {
   });
 
   group('SyncedLyricsView', () {
-    List<LyricLine> lines() => List.generate(
-        30, (i) => LyricLine(time: i * 4.0, text: '第 $i 行歌词内容'));
+    List<LyricLine> lines() =>
+        List.generate(30, (i) => LyricLine(time: i * 4.0, text: '第 $i 行歌词内容'));
 
     Widget host({
       required List<LyricLine> data,
@@ -422,8 +466,7 @@ void main() {
     testWidgets('tapping a line seeks to its timestamp when not calibrating',
         (tester) async {
       double? sought;
-      await tester
-          .pumpWidget(host(data: lines(), onSeek: (s) => sought = s));
+      await tester.pumpWidget(host(data: lines(), onSeek: (s) => sought = s));
       await tester.pump();
 
       await tester.tap(find.text('第 2 行歌词内容'));
@@ -559,7 +602,7 @@ void main() {
         onTap: () {},
       )));
 
-      expect(find.text('选一首歌开始播放'), findsOneWidget);
+      expect(find.text('选择一首，开始聆听'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
@@ -599,7 +642,7 @@ void main() {
       expect(track_.width, closeTo(lane.width * 0.25, 1.0));
     });
 
-    testWidgets('dragging the progress bar seeks', (tester) async {
+    testWidgets('progress is display-only and does not seek', (tester) async {
       Duration? sought;
       await tester.pumpWidget(wrap(MiniPlayer(
         currentTrack: track,
@@ -613,19 +656,21 @@ void main() {
       )));
       await tester.pump(const Duration(milliseconds: 300));
 
+      // Seeking lives in the full player; the docked bar only displays.
+      expect(find.byType(IgnorePointer), findsWidgets);
+
       final bar = tester.getRect(find.byType(FractionallySizedBox));
       final lane = tester.getRect(find.ancestor(
           of: find.byType(FractionallySizedBox),
           matching: find.byType(ClipRRect).last));
-      final gesture = await tester.startGesture(
-          Offset(lane.left + 4, bar.center.dy));
+      final gesture =
+          await tester.startGesture(Offset(lane.left + 4, bar.center.dy));
       await gesture.moveBy(Offset(lane.width / 2, 0));
       await tester.pump();
       await gesture.up();
       await tester.pumpAndSettle();
 
-      expect(sought, isNotNull);
-      expect(sought!.inSeconds, closeTo(100, 6));
+      expect(sought, isNull);
     });
 
     testWidgets('shows the track and toggles play', (tester) async {
@@ -658,7 +703,9 @@ void main() {
   });
 
   group('PlaylistDetailSheet', () {
-    testWidgets('renders empty state title as 暂无曲目 without subtitle and cover button on right', (tester) async {
+    testWidgets(
+        'renders empty state title as 暂无曲目 without subtitle and cover button on right',
+        (tester) async {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: PlaylistDetailSheet(

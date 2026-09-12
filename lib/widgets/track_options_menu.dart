@@ -20,7 +20,8 @@ class TrackOptionsMenu extends StatefulWidget {
     this.onTrackChanged,
   });
 
-  static Future<void> show(BuildContext context, Track track, {VoidCallback? onTrackChanged}) {
+  static Future<void> show(BuildContext context, Track track,
+      {VoidCallback? onTrackChanged}) {
     return showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -32,18 +33,24 @@ class TrackOptionsMenu extends StatefulWidget {
     );
   }
 
-  static Future<void> showAddToPlaylist(BuildContext context, Track track, {VoidCallback? onTrackChanged}) {
-    return showAddToPlaylistForTracks(context, [track], onTrackChanged: onTrackChanged);
+  static Future<void> showAddToPlaylist(BuildContext context, Track track,
+      {VoidCallback? onTrackChanged}) {
+    return showAddToPlaylistForTracks(context, [track],
+        onTrackChanged: onTrackChanged);
   }
 
-  static Future<void> showAddToPlaylistForTracks(BuildContext context, List<Track> tracks, {VoidCallback? onTrackChanged}) async {
+  static Future<void> showAddToPlaylistForTracks(
+      BuildContext context, List<Track> tracks,
+      {VoidCallback? onTrackChanged}) async {
     if (tracks.isEmpty) return;
     final List<Playlist> playlists = await DatabaseService.getPlaylists();
 
     if (!context.mounted) return;
     final parentMessenger = ScaffoldMessenger.of(context);
 
-    showModalBottomSheet(
+    // Awaited: the returned future completes when the sheet dismisses, so
+    // callers can order UI transitions after it.
+    await showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppColors.backgroundElevated,
       shape: const RoundedRectangleBorder(
@@ -62,25 +69,36 @@ class TrackOptionsMenu extends StatefulWidget {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        tracks.length == 1 ? '加入歌单' : '批量加入歌单 (${tracks.length} 首)',
-                        style: const TextStyle(color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold),
+                        tracks.length == 1
+                            ? '加入歌单'
+                            : '批量加入歌单 (${tracks.length} 首)',
+                        style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold),
                       ),
                       TextButton.icon(
-                        icon: const Icon(Icons.add, color: AppColors.accent, size: 20),
-                        label: const Text('新建歌单', style: TextStyle(color: AppColors.accent)),
+                        icon: const Icon(Icons.add,
+                            color: AppColors.accent, size: 20),
+                        label: const Text('新建歌单',
+                            style: TextStyle(color: AppColors.accent)),
                         onPressed: () async {
                           final controller = TextEditingController();
                           final newPlName = await showDialog<String>(
                             context: ctx,
                             builder: (dCtx) => AlertDialog(
                               backgroundColor: AppColors.backgroundElevated,
-                              title: const Text('新建歌单', style: TextStyle(color: AppColors.textPrimary)),
+                              title: const Text('新建歌单',
+                                  style:
+                                      TextStyle(color: AppColors.textPrimary)),
                               content: TextField(
                                 controller: controller,
-                                style: const TextStyle(color: AppColors.textPrimary),
+                                style: const TextStyle(
+                                    color: AppColors.textPrimary),
                                 decoration: const InputDecoration(
                                   hintText: '歌单名称',
-                                  hintStyle: TextStyle(color: AppColors.textFaint),
+                                  hintStyle:
+                                      TextStyle(color: AppColors.textFaint),
                                 ),
                               ),
                               actions: [
@@ -89,8 +107,11 @@ class TrackOptionsMenu extends StatefulWidget {
                                   onPressed: () => Navigator.pop(dCtx),
                                 ),
                                 TextButton(
-                                  child: const Text('创建', style: TextStyle(color: AppColors.accent)),
-                                  onPressed: () => Navigator.pop(dCtx, controller.text),
+                                  child: const Text('创建',
+                                      style:
+                                          TextStyle(color: AppColors.accent)),
+                                  onPressed: () =>
+                                      Navigator.pop(dCtx, controller.text),
                                 ),
                               ],
                             ),
@@ -98,14 +119,15 @@ class TrackOptionsMenu extends StatefulWidget {
 
                           controller.dispose();
 
-                          if (newPlName != null && newPlName.trim().isNotEmpty) {
-                            final created = await DatabaseService.createPlaylist(newPlName);
+                          if (newPlName != null &&
+                              newPlName.trim().isNotEmpty) {
+                            final created =
+                                await DatabaseService.createPlaylist(newPlName);
                             // One persist for the whole batch, not a full-file
-                            // rewrite per track.
-                            await DatabaseService.addTracksToPlaylist(created.id, tracks);
-                            for (final t in tracks) {
-                              DownloadManager.instance.startDownload(t);
-                            }
+                            // rewrite per track. Saving membership never
+                            // downloads: offline availability is explicit.
+                            await DatabaseService.addTracksToPlaylist(
+                                created.id, tracks);
                             if (ctx.mounted) Navigator.pop(ctx);
                             onTrackChanged?.call();
                             showAppSnackBar(parentMessenger,
@@ -125,16 +147,22 @@ class TrackOptionsMenu extends StatefulWidget {
                         final pl = playlists[index];
                         return ListTile(
                           leading: Icon(
-                            pl.id == Playlist.favoritesId ? Icons.favorite : Icons.queue_music,
-                            color: pl.id == Playlist.favoritesId ? AppColors.accent : AppColors.textSecondary,
+                            pl.id == Playlist.favoritesId
+                                ? Icons.favorite
+                                : Icons.queue_music,
+                            color: pl.id == Playlist.favoritesId
+                                ? AppColors.accent
+                                : AppColors.textSecondary,
                           ),
-                          title: Text(pl.name, style: const TextStyle(color: AppColors.textPrimary)),
-                          subtitle: Text('${pl.tracks.length} 首', style: const TextStyle(color: AppColors.textMuted, fontSize: 12)),
+                          title: Text(pl.name,
+                              style: const TextStyle(
+                                  color: AppColors.textPrimary)),
+                          subtitle: Text('${pl.tracks.length} 首',
+                              style: const TextStyle(
+                                  color: AppColors.textMuted, fontSize: 12)),
                           onTap: () async {
-                            await DatabaseService.addTracksToPlaylist(pl.id, tracks);
-                            for (final t in tracks) {
-                              DownloadManager.instance.startDownload(t);
-                            }
+                            await DatabaseService.addTracksToPlaylist(
+                                pl.id, tracks);
                             if (ctx.mounted) Navigator.pop(ctx);
                             onTrackChanged?.call();
                             showAppSnackBar(parentMessenger,
@@ -189,8 +217,7 @@ class _TrackOptionsMenuState extends State<TrackOptionsMenu> {
       await DatabaseService.removeDownloadedTrack(track);
       widget.onTrackChanged?.call();
       showAppSnackBar(messenger,
-          message: '已删除本地音频',
-          backgroundColor: AppColors.backgroundElevated);
+          message: '已删除本地音频', backgroundColor: AppColors.backgroundElevated);
       return;
     }
 
@@ -206,15 +233,12 @@ class _TrackOptionsMenuState extends State<TrackOptionsMenu> {
   Future<void> _handleFavorite() async {
     final messenger = ScaffoldMessenger.of(context);
     Navigator.pop(context);
+    // Favorite only: making a track available offline is a separate,
+    // explicit download action.
     final nowFav = await DatabaseService.toggleFavorite(widget.track);
-    if (nowFav && !_isDownloaded) {
-      DownloadManager.instance.startDownload(widget.track);
-    }
     widget.onTrackChanged?.call();
 
-    final msg = nowFav
-        ? '已收藏'
-        : '已取消收藏';
+    final msg = nowFav ? '已收藏' : '已取消收藏';
     showAppSnackBar(
       messenger,
       message: msg,
@@ -223,10 +247,46 @@ class _TrackOptionsMenuState extends State<TrackOptionsMenu> {
     );
   }
 
+  Future<void> _handleRemoveFromLibrary() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final track = widget.track;
+    Navigator.pop(context);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.backgroundElevated,
+        title: const Text('从资料库中移除',
+            style: TextStyle(color: AppColors.textPrimary)),
+        content: const Text(
+          '将删除本地音频，并将该曲目从所有歌单、收藏与最近播放中移除。此操作不可撤销。',
+          style: TextStyle(color: AppColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('移除', style: TextStyle(color: AppColors.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    await DatabaseService.removeFromLibrary(track);
+    widget.onTrackChanged?.call();
+    showAppSnackBar(messenger,
+        message: '已从资料库中移除', backgroundColor: AppColors.backgroundElevated);
+  }
+
   Future<void> _handleAddToPlaylist() async {
     Navigator.pop(context);
     if (!mounted) return;
-    TrackOptionsMenu.showAddToPlaylist(context, widget.track, onTrackChanged: widget.onTrackChanged);
+    TrackOptionsMenu.showAddToPlaylist(context, widget.track,
+        onTrackChanged: widget.onTrackChanged);
   }
 
   @override
@@ -303,21 +363,30 @@ class _TrackOptionsMenuState extends State<TrackOptionsMenu> {
           // Action Items
           ListTile(
             leading: Icon(
-              _isDownloaded ? Icons.delete_outline_rounded : Icons.download_rounded,
+              _isDownloaded
+                  ? Icons.delete_outline_rounded
+                  : Icons.download_rounded,
               color: _isDownloaded ? AppColors.danger : AppColors.textPrimary,
             ),
             title: Text(
               _isDownloaded ? '删除本地音频' : '下载到本地',
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 15, fontWeight: FontWeight.w500),
+              style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500),
             ),
             onTap: _handleDownload,
           ),
 
           ListTile(
-            leading: const Icon(Icons.playlist_add, color: AppColors.textPrimary),
+            leading:
+                const Icon(Icons.playlist_add, color: AppColors.textPrimary),
             title: const Text(
               '加入歌单',
-              style: TextStyle(color: AppColors.textPrimary, fontSize: 15, fontWeight: FontWeight.w500),
+              style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500),
             ),
             onTap: _handleAddToPlaylist,
           ),
@@ -329,9 +398,29 @@ class _TrackOptionsMenuState extends State<TrackOptionsMenu> {
             ),
             title: Text(
               _isFav ? '取消收藏' : '添加至收藏',
-              style: const TextStyle(color: AppColors.textPrimary, fontSize: 15, fontWeight: FontWeight.w500),
+              style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500),
             ),
             onTap: _handleFavorite,
+          ),
+
+          ListTile(
+            leading: const Icon(Icons.delete_forever_outlined,
+                color: AppColors.danger),
+            title: const Text(
+              '从资料库中移除',
+              style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500),
+            ),
+            subtitle: const Text(
+              '删除本地音频，并移出所有歌单与收藏',
+              style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+            ),
+            onTap: _handleRemoveFromLibrary,
           ),
         ],
       ),

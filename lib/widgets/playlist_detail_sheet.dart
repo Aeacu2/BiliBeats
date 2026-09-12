@@ -74,11 +74,13 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
   bool _isEditMode = false;
   final Set<String> _selectedTrackIds = {};
 
-  /// Playback queue for this view: the playlist's tracks minus any still
-  /// downloading (not yet playable).
+  /// Playback queue for this view: completed local files only. Automatic
+  /// advance must not silently download missing items; nonlocal rows open
+  /// track details through the shell's select router instead.
   List<Track> get _playableQueue => _currentPlaylist.tracks
-      .where((t) => !DownloadManager.instance.isDownloading(t.id))
+      .where((t) => _downloadedIds.contains(t.id))
       .toList();
+  Set<String> _downloadedIds = {};
   Set<String> _dlIds = {};
 
   @override
@@ -87,6 +89,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
     _currentPlaylist = _detached(widget.playlist);
     _dlIds =
         DownloadManager.instance.activeTasks.map((t) => t.track.id).toSet();
+    _refreshDownloadedIds();
     // Metadata can be edited from the now-playing page stacked on top of this
     // sheet; without this the sheet kept rendering the pre-edit title.
     _libSub = DatabaseService.libraryUpdateStream.listen((_) => _refresh());
@@ -119,6 +122,12 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
         tracks: pl.tracks,
       );
 
+  Future<void> _refreshDownloadedIds() async {
+    final ids =
+        (await DatabaseService.getDownloadedTracks()).map((t) => t.id).toSet();
+    if (mounted) setState(() => _downloadedIds = ids);
+  }
+
   Future<void> _refresh() async {
     // 本地 is a virtual playlist with no database row, so it is rebuilt from
     // the download library rather than looked up by id.
@@ -137,6 +146,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
       ));
     }
     if (mounted) setState(() => _currentPlaylist = updated);
+    _refreshDownloadedIds();
     widget.onPlaylistUpdated?.call();
   }
 
@@ -207,8 +217,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                       icon: const Icon(Icons.keyboard_arrow_down_rounded,
                           color: AppColors.textSecondary, size: 28),
                       tooltip: '收起',
-                      onPressed:
-                          widget.onClose ?? () => Navigator.pop(context),
+                      onPressed: widget.onClose ?? () => Navigator.pop(context),
                     ),
                   Expanded(
                     child: Center(
@@ -270,7 +279,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            '${_currentPlaylist.tracks.length} 首',
+                            _playableCountText(),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -280,12 +289,20 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                       ),
                     ),
                   ),
-                  if (!_isVirtualDownloads && !_isFavorites && !_isEditMode) ...[
+                  if (!_isVirtualDownloads &&
+                      !_isFavorites &&
+                      !_isEditMode) ...[
                     IconButton(
                       icon: const Icon(Icons.image_outlined,
                           color: AppColors.textSecondary, size: 22),
                       tooltip: '更换封面',
                       onPressed: _pickCover,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.drive_file_rename_outline_rounded,
+                          color: AppColors.textSecondary, size: 22),
+                      tooltip: '重命名歌单',
+                      onPressed: _editPlaylistName,
                     ),
                     IconButton(
                       icon: const Icon(Icons.add_rounded,
@@ -310,13 +327,13 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                       ? null
                       : () {
                           Haptics.medium();
-                          widget.onPlayCollection?.call(_playableQueue,
-                              shuffle: true);
+                          widget.onPlayCollection
+                              ?.call(_playableQueue, shuffle: true);
                         },
                   icon: const Icon(Icons.shuffle_rounded, size: 22),
                   label: const Text('随机播放',
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold)),
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.accent,
                     foregroundColor: AppColors.textPrimary,
@@ -352,24 +369,23 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                         final track = _currentPlaylist.tracks[index];
                         final rowContent = _trackRow(track, index);
 
+                        // Drag handles live in edit mode only; normal
+                        // browsing has no competing drag gesture.
                         if (_isEditMode) {
-                          return Container(
-                            key: ValueKey('e_${track.id}'),
+                          return ReorderableDragStartListener(
+                            key: ValueKey(track.id),
+                            index: index,
                             child: rowContent,
                           );
                         }
 
-                        return ReorderableDelayedDragStartListener(
-                          key: ValueKey(track.id),
-                          index: index,
-                          child: Dismissible(
-                            key: ValueKey('d_${track.id}'),
-                            direction: DismissDirection.endToStart,
-                            background: _removeBackground(),
-                            confirmDismiss: (_) => _confirmRemove(track),
-                            onDismissed: (_) => _removeTrack(track),
-                            child: rowContent,
-                          ),
+                        return Dismissible(
+                          key: ValueKey('d_${track.id}'),
+                          direction: DismissDirection.endToStart,
+                          background: _removeBackground(),
+                          confirmDismiss: (_) => _confirmRemove(track),
+                          onDismissed: (_) => _removeTrack(track),
+                          child: rowContent,
                         );
                       },
                     ),
@@ -377,8 +393,8 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
 
             if (_isEditMode)
               Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 20, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                 decoration: const BoxDecoration(
                   color: AppColors.backgroundElevated,
                   border: Border(top: BorderSide(color: AppColors.hairline)),
@@ -401,8 +417,8 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                             ? null
                             : () async {
                                 final selected = _currentPlaylist.tracks
-                                    .where((t) =>
-                                        _selectedTrackIds.contains(t.id))
+                                    .where(
+                                        (t) => _selectedTrackIds.contains(t.id))
                                     .toList();
                                 await TrackOptionsMenu
                                     .showAddToPlaylistForTracks(
@@ -449,13 +465,11 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
   /// One track row; selection/download state is read live here so
   /// edit mode and normal mode share a single definition.
   Widget _trackRow(Track track, int index) {
-    final isDownloading =
-        DownloadManager.instance.isDownloading(track.id);
+    final isDownloading = DownloadManager.instance.isDownloading(track.id);
     final isSelected = _selectedTrackIds.contains(track.id);
 
     return Padding(
-      padding:
-          const EdgeInsets.only(bottom: TrackRow.gap),
+      padding: const EdgeInsets.only(bottom: TrackRow.gap),
       child: TrackRow(
         onTap: _isEditMode
             ? () {
@@ -469,8 +483,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
               }
             : (isDownloading
                 ? null
-                : () => widget.onSelectTrack(track,
-                    queue: _playableQueue)),
+                : () => widget.onSelectTrack(track, queue: _playableQueue)),
         child: Row(
           children: [
             if (_isEditMode) ...[
@@ -478,9 +491,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                 isSelected
                     ? Icons.check_circle_rounded
                     : Icons.radio_button_unchecked_rounded,
-                color: isSelected
-                    ? AppColors.accent
-                    : AppColors.textFaint,
+                color: isSelected ? AppColors.accent : AppColors.textFaint,
                 size: 22,
               ),
               const SizedBox(width: 12),
@@ -496,10 +507,9 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
             const SizedBox(width: 12),
             Expanded(
               child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                    RepaintBoundary(
+                  RepaintBoundary(
                     child: MarqueeText(
                       text: track.title,
                       phase: (index % 5) / 5,
@@ -519,6 +529,11 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                 ],
               ),
             ),
+            if (_isEditMode) ...[
+              const SizedBox(width: 8),
+              const Icon(Icons.drag_handle_rounded,
+                  color: AppColors.textFaint, size: 22),
+            ],
             if (!_isEditMode) ...[
               const SizedBox(width: 8),
               TrackDownloadButton(
@@ -526,25 +541,20 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
                 size: 24,
                 onPlay: () {
                   if (widget.onPlayOnly != null) {
-                    widget.onPlayOnly!(track,
-                        queue: _playableQueue);
+                    widget.onPlayOnly!(track, queue: _playableQueue);
                   } else {
-                    widget.onSelectTrack(track,
-                        queue: _playableQueue);
+                    widget.onSelectTrack(track, queue: _playableQueue);
                   }
                 },
               ),
               IconButton(
                 icon: const Icon(Icons.add,
-                    color: AppColors.textSecondary,
-                    size: 22),
+                    color: AppColors.textSecondary, size: 22),
                 tooltip: '添加至歌单',
                 padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(
-                    minWidth: 48, minHeight: 48),
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
                 onPressed: () {
-                  TrackOptionsMenu.showAddToPlaylist(
-                      context, track,
+                  TrackOptionsMenu.showAddToPlaylist(context, track,
                       onTrackChanged: _refresh);
                 },
               ),
@@ -577,21 +587,27 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
   bool get _isVirtualDownloads => _currentPlaylist.id == 'downloaded';
   bool get _isFavorites => _currentPlaylist.id == Playlist.favoritesId;
 
+  /// Total count plus the playable (downloaded) count when they differ, so
+  /// a collection containing nonlocal tracks is honest about what Play does.
+  String _playableCountText() {
+    final total = _currentPlaylist.tracks.length;
+    final playable = _playableQueue.length;
+    if (playable == total) return '$total 首';
+    return '$total 首 · $playable 首可播放';
+  }
+
   /// The playlist's artwork. 本地 is rebuilt from
   /// the download library on every refresh and has no row to store a cover on,
-  /// so it keeps the default badge.
+  /// so it keeps the default badge. Placeholders stay neutral (flat surface,
+  /// tinted icon) so they never compete with real artwork.
   Widget _headerArtwork(bool isFav) {
     final cover = _currentPlaylist.coverUrl;
-    final List<Color> gradient;
     final IconData icon;
     if (_isVirtualDownloads) {
-      gradient = [AppColors.success, const Color(0xFF1B8A4B)];
       icon = Icons.download_rounded;
     } else if (isFav) {
-      gradient = [AppColors.accent, const Color(0xFFFF5252)];
       icon = Icons.favorite;
     } else {
-      gradient = [AppColors.surfaceNeutral, AppColors.surfaceNeutralDeep];
       icon = Icons.queue_music;
     }
     return SizedBox(
@@ -601,12 +617,14 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
         borderRadius: BorderRadius.circular(AppRadius.md),
         child: cover != null && cover.isNotEmpty && !_isVirtualDownloads
             ? CachedCoverImage(url: cover, width: 72, height: 72)
-            : DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(colors: gradient),
-                ),
+            : ColoredBox(
+                color: AppColors.white06,
                 child: Center(
-                  child: Icon(icon, color: AppColors.textPrimary, size: 36),
+                  child: Icon(
+                    icon,
+                    color: isFav ? AppColors.accent : AppColors.textSecondary,
+                    size: 36,
+                  ),
                 ),
               ),
       ),
@@ -616,15 +634,13 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
   Future<void> _pickCover() async {
     Haptics.light();
     try {
-      final image =
-          await ImagePicker().pickImage(source: ImageSource.gallery);
+      final image = await ImagePicker().pickImage(source: ImageSource.gallery);
       if (image == null) return;
       final docs = await getApplicationDocumentsDirectory();
       final dir = Directory('${docs.path}/bilibeat_covers');
       if (!await dir.exists()) await dir.create(recursive: true);
       final ext = image.path.split('.').last;
-      final saved = File(
-          '${dir.path}/playlist_${_currentPlaylist.id}_'
+      final saved = File('${dir.path}/playlist_${_currentPlaylist.id}_'
           '${DateTime.now().millisecondsSinceEpoch}.$ext');
       await File(image.path).copy(saved.path);
       await DatabaseService.setPlaylistCover(_currentPlaylist.id, saved.path);
@@ -669,7 +685,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
             style: const TextStyle(color: AppColors.textPrimary)),
         content: Text(
           _isVirtualDownloads
-              ? '确定要彻底删除选中的 $count 首本地音频吗？（本地文件将被删除）'
+              ? '确定要删除选中的 $count 首本地音频吗？（歌单与收藏保留，可重新下载）'
               : '确定要将选中的 $count 首曲目从「${_currentPlaylist.name}」中移除吗？',
           style: const TextStyle(color: AppColors.textSecondary),
         ),
@@ -719,7 +735,8 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
       context: context,
       builder: (dCtx) => AlertDialog(
         backgroundColor: AppColors.backgroundElevated,
-        title: const Text('重命名歌单', style: TextStyle(color: AppColors.textPrimary)),
+        title:
+            const Text('重命名歌单', style: TextStyle(color: AppColors.textPrimary)),
         content: TextField(
           controller: controller,
           autofocus: true,
@@ -743,7 +760,9 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
     );
     controller.dispose();
 
-    if (newName != null && newName.trim().isNotEmpty && newName.trim() != _currentPlaylist.name) {
+    if (newName != null &&
+        newName.trim().isNotEmpty &&
+        newName.trim() != _currentPlaylist.name) {
       await DatabaseService.renamePlaylist(_currentPlaylist.id, newName.trim());
       await _refresh();
     }
@@ -777,7 +796,7 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
         backgroundColor: AppColors.backgroundElevated,
         title: const Text('删除本地音频',
             style: TextStyle(color: AppColors.textPrimary)),
-        content: const Text('将删除本地音频，可重新下载。',
+        content: const Text('将删除本地音频，可重新下载。歌单与收藏保留。',
             style: TextStyle(color: AppColors.textSecondary)),
         actions: [
           TextButton(
@@ -794,7 +813,8 @@ class _PlaylistDetailSheetState extends State<PlaylistDetailSheet> {
   }
 
   Future<void> _removeTrack(Track track) async {
-    setState(() => _currentPlaylist.tracks.removeWhere((t) => t.id == track.id));
+    setState(
+        () => _currentPlaylist.tracks.removeWhere((t) => t.id == track.id));
     if (_isVirtualDownloads) {
       await DatabaseService.removeDownloadedTrack(track);
     } else {

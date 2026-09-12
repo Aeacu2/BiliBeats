@@ -3,15 +3,14 @@ import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
 
-/// Sliding-pill tab selector: a highlighted pill glides between labels as the
-/// driving [animation] advances from `0` to `labels.length - 1`.
+/// Quiet, text-led navigation.
 ///
-/// The pill is measured against the label rows themselves (keys are owned
-/// internally), so it tracks drags/fades exactly. On the very first frame the
-/// child RenderBoxes do not exist yet; instead of the old
-/// `(context as Element).markNeedsBuild()` post-frame hack — which rebuilt the
-/// entire parent dialog/page — the retry is a local setState on this widget.
-class SegmentTabs extends StatefulWidget {
+/// Labels keep their natural widths. Selection is communicated through
+/// contrast and a short underline, rather than a filled segmented pill.
+///
+/// Works with the existing PageController animation adapter and with
+/// TabController.animation.
+class SegmentTabs extends StatelessWidget {
   final List<String> labels;
   final Animation<double> animation;
   final ValueChanged<int> onTap;
@@ -26,111 +25,107 @@ class SegmentTabs extends StatefulWidget {
   });
 
   @override
-  State<SegmentTabs> createState() => _SegmentTabsState();
-}
-
-class _SegmentTabsState extends State<SegmentTabs> {
-  final GlobalKey _rowKey = GlobalKey();
-  late List<GlobalKey> _itemKeys;
-
-  @override
-  void initState() {
-    super.initState();
-    _itemKeys = List.generate(widget.labels.length, (_) => GlobalKey());
-  }
-
-  @override
-  void didUpdateWidget(covariant SegmentTabs oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.labels.length != widget.labels.length) {
-      _itemKeys = List.generate(widget.labels.length, (_) => GlobalKey());
-    }
-  }
-
-  int get _activeIndex => widget.animation.value
-      .round()
-      .clamp(0, widget.labels.length - 1);
-
-  void _scheduleRetry() {
-    // First frame only: children paint before their RenderBoxes exist.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  RenderBox? _boxOf(GlobalKey key) =>
-      key.currentContext?.findRenderObject() as RenderBox?;
-
-  @override
   Widget build(BuildContext context) {
-    return Stack(
-      key: _rowKey,
-      children: [
-        AnimatedBuilder(
-          animation: widget.animation,
-          builder: (context, _) {
-            final rowBox = _boxOf(_rowKey);
-            final boxes = [for (final k in _itemKeys) _boxOf(k)];
-            if (rowBox == null || boxes.any((b) => b == null)) {
-              _scheduleRetry();
-              return const SizedBox.shrink();
-            }
-            // Interpolate between the two labels the fraction sits between.
-            final t = widget.animation.value
-                .clamp(0.0, (widget.labels.length - 1).toDouble());
-            final i = t.floor().clamp(0, widget.labels.length - 2);
-            final frac = t - i;
-            final from = boxes[i]!;
-            final to = boxes[i + 1]!;
-            final offFrom =
-                from.localToGlobal(Offset.zero, ancestor: rowBox);
-            final offTo = to.localToGlobal(Offset.zero, ancestor: rowBox);
-            return Positioned(
-              left: offFrom.dx + (offTo.dx - offFrom.dx) * frac,
-              width: from.size.width +
-                  (to.size.width - from.size.width) * frac,
-              top: 0,
-              bottom: 0,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: AppColors.accent14,
-                  borderRadius: BorderRadius.circular(AppRadius.pill),
-                  border: Border.all(color: AppColors.accent30),
+    if (labels.isEmpty) return const SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: animation,
+      builder: (context, _) {
+        final double value =
+            animation.value.clamp(0.0, labels.length - 1).toDouble();
+
+        final selectedIndex = value.round();
+
+        return Material(
+          type: MaterialType.transparency,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (var index = 0; index < labels.length; index++) ...[
+                if (index > 0) const SizedBox(width: 24),
+                Flexible(
+                  child: _label(
+                    context,
+                    index: index,
+                    value: value,
+                    selected: selectedIndex == index,
+                  ),
                 ),
-              ),
-            );
-          },
-        ),
-        Row(
-          children: [
-            for (var i = 0; i < widget.labels.length; i++) ...[
-              if (i > 0) const SizedBox(width: 8),
-              _item(i),
+              ],
             ],
-          ],
-        ),
-      ],
+          ),
+        );
+      },
     );
   }
 
-  Widget _item(int index) {
-    final active = _activeIndex == index;
-    return GestureDetector(
-      key: _itemKeys[index],
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        Haptics.selection();
-        widget.onTap(index);
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
-        child: Text(
-          widget.labels[index],
-          style: TextStyle(
-            color: active ? AppColors.textPrimary : AppColors.textMuted,
-            fontSize: widget.fontSize,
-            fontWeight: FontWeight.w700,
-            letterSpacing: -0.3,
+  Widget _label(
+    BuildContext context, {
+    required int index,
+    required double value,
+    required bool selected,
+  }) {
+    final emphasis = (1.0 - (value - index).abs()).clamp(0.0, 1.0).toDouble();
+
+    final color = Color.lerp(
+      AppColors.textMuted,
+      AppColors.textPrimary,
+      emphasis,
+    )!;
+
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: labels[index],
+      child: Tooltip(
+        message: labels[index],
+        child: InkWell(
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          onTap: () {
+            if (!selected) Haptics.selection();
+            onTap(index);
+          },
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minWidth: 48,
+              minHeight: 52,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ExcludeSemantics(
+                    child: Text(
+                      labels[index],
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTypography.titleLarge.copyWith(
+                        fontSize: fontSize,
+                        height: 1.2,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.4,
+                        color: color,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 9),
+                  Opacity(
+                    opacity: emphasis,
+                    child: Container(
+                      width: 18,
+                      height: 2,
+                      decoration: BoxDecoration(
+                        color: AppColors.accent,
+                        borderRadius: BorderRadius.circular(1),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),

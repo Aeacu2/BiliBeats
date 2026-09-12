@@ -23,6 +23,21 @@ class DownloadTask {
       DownloadTask(track: track, fraction: fraction ?? this.fraction);
 }
 
+/// A user-initiated download that failed, kept for the session so the
+/// management view can offer Retry. Playback-path failures never land here:
+/// only explicit user downloads are surfaced.
+class FailedDownload {
+  final Track track;
+  final String error;
+  final DateTime failedAt;
+
+  const FailedDownload({
+    required this.track,
+    required this.error,
+    required this.failedAt,
+  });
+}
+
 /// Tracks user-initiated downloads with live progress so any screen can render
 /// Apple Music–style rings and "X 下载中 / Y 已下载" counts.
 ///
@@ -35,8 +50,15 @@ class DownloadManager {
   static final DownloadManager instance = DownloadManager._();
 
   final Map<String, DownloadTask> _tasks = {};
-  final StreamController<String> _controller = StreamController<String>.broadcast();
-  final StreamController<String> _errorController = StreamController<String>.broadcast();
+  final StreamController<String> _controller =
+      StreamController<String>.broadcast();
+  final StreamController<String> _errorController =
+      StreamController<String>.broadcast();
+
+  /// Session failed downloads, newest first. Cleared per item on success,
+  /// retry, or explicit dismiss. Never persisted: a restart re-discovers
+  /// actual files instead of trusting stale failure records.
+  final Map<String, FailedDownload> _failed = {};
 
   /// Emits the id of the track whose download state changed, so listeners
   /// can compare against their own id and sleep through everyone else's
@@ -50,11 +72,40 @@ class DownloadManager {
   Stream<String> get errors => _errorController.stream;
 
   /// Currently in-flight tasks, newest first.
-  List<DownloadTask> get activeTasks => _tasks.values.toList().reversed.toList();
+  List<DownloadTask> get activeTasks =>
+      _tasks.values.toList().reversed.toList();
+
+  /// Failed downloads awaiting retry or dismissal, newest first.
+  List<FailedDownload> get failedTasks {
+    final list = _failed.values.toList()
+      ..sort((a, b) => b.failedAt.compareTo(a.failedAt));
+    return list;
+  }
 
   DownloadTask? taskFor(String trackId) => _tasks[trackId];
 
   bool isDownloading(String trackId) => _tasks.containsKey(trackId);
+
+  bool isFailed(String trackId) => _failed.containsKey(trackId);
+
+  /// Moves a failed item back to active and retries. Returns false when
+  /// there is nothing to retry.
+  bool retryDownload(String trackId) {
+    final failed = _failed.remove(trackId);
+    if (failed == null) return false;
+    if (_tasks.containsKey(trackId)) {
+      _notify(trackId);
+      return true;
+    }
+    _notify(trackId);
+    unawaited(startDownload(failed.track));
+    return true;
+  }
+
+  /// Drops a failed item without retrying.
+  void dismissFailed(String trackId) {
+    if (_failed.remove(trackId) != null) _notify(trackId);
+  }
 
   // Guards double-tap while isDownloaded check is in flight.
   final Set<String> _pendingIsDownloadedCheck = {};
@@ -76,11 +127,17 @@ class DownloadManager {
     if (alreadyDownloaded) return;
     // Claim the slot synchronously after the check, before any further await.
     _tasks[track.id] = DownloadTask(track: track);
+    _failed.remove(track.id);
     _notify(track.id);
     try {
       await AudioDownloadService.ensureDownloaded(track);
     } catch (e) {
       debugPrint('Download failed: $e');
+      _failed[track.id] = FailedDownload(
+        track: track,
+        error: '$e',
+        failedAt: DateTime.now(),
+      );
       if (!_errorController.isClosed) _errorController.add('$e');
     } finally {
       _tasks.remove(track.id);

@@ -158,10 +158,11 @@ class _AmbientBackgroundState extends State<AmbientBackground> {
       (b / wSum).round().clamp(0, 255),
     );
 
-    // Push saturation/lightness into an elegant, glow-friendly range.
+    // Push lightness into a glow-friendly range, but never invent
+    // saturation grayscale artwork never had.
     final hsl = HSLColor.fromColor(base);
     return hsl
-        .withSaturation(hsl.saturation.clamp(0.45, 0.85))
+        .withSaturation(hsl.saturation.clamp(0.0, 0.8))
         .withLightness(hsl.lightness.clamp(0.38, 0.6))
         .toColor();
   }
@@ -197,8 +198,8 @@ class _AmbientBackgroundState extends State<AmbientBackground> {
                   decoration: BoxDecoration(
                     gradient: RadialGradient(
                       colors: [
-                        c.withValues(alpha: 0.40),
-                        c.withValues(alpha: 0.15),
+                        c.withValues(alpha: 0.20),
+                        c.withValues(alpha: 0.07),
                         Colors.transparent,
                       ],
                       stops: const [0.0, 0.55, 1.0],

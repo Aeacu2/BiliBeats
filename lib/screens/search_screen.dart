@@ -10,7 +10,6 @@ import '../theme/app_theme.dart';
 import '../widgets/cached_cover_image.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/marquee_text.dart';
-import '../widgets/mini_player.dart';
 import '../widgets/shimmer.dart';
 import '../widgets/track_download_button.dart';
 import '../widgets/track_row.dart';
@@ -50,6 +49,16 @@ class _SearchScreenState extends State<SearchScreen> {
   /// of a later one.
   int _searchToken = 0;
 
+  /// Guards the search-history read/write round-trips: clearing history must
+  /// not be undone by an older read completing late.
+  int _historyToken = 0;
+
+  /// Operation-identity ticket for pagination loading state. A completion
+  /// may only release loading when it still owns the operation — a shared
+  /// boolean cleared unconditionally lets an old request kill a newer
+  /// request's spinner.
+  Object? _loadMoreOwner;
+
   // --- Pagination / infinite scroll ----------------------------------------
   final ScrollController _scrollController = ScrollController();
 
@@ -88,8 +97,11 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Future<void> _loadSearchHistory() async {
+    final token = _historyToken;
     final history = await DatabaseService.getSearchHistory();
-    if (!mounted) return;
+    // Startup read must not overwrite a later user action (e.g. clearing
+    // history while this read was in flight).
+    if (!mounted || token != _historyToken) return;
     setState(() => _searchHistory = history);
     _loadRecommendations();
   }
@@ -129,6 +141,9 @@ class _SearchScreenState extends State<SearchScreen> {
   bool get _canRecommend => _searchHistory.isNotEmpty;
 
   Future<void> _loadRecommendations() async {
+    // Invalidate the previous pass even when there is currently nothing to
+    // recommend: an older fetch must not repopulate after history is gone.
+    final pass = ++_recPass;
     if (!_canRecommend) {
       if (mounted) {
         setState(() {
@@ -138,13 +153,21 @@ class _SearchScreenState extends State<SearchScreen> {
       }
       return;
     }
-    if (mounted) setState(() => _isLoadingRecommended = true);
+    if (mounted) {
+      setState(() {
+        _isLoadingRecommended = true;
+        // A fresh pass owns pagination now; a load-more still in flight
+        // from the old pass must not clear the new loading state.
+        _isLoadingMore = false;
+        _loadMoreOwner = null;
+      });
+    }
     // A fresh recommendation pass restarts pagination from page 1. Its token
     // invalidates any load-more that was in flight when the pass began.
     _recPage = 1;
     _seenRecIds.clear();
     _recReachedEnd = false;
-    final pass = ++_recPass;
+    _recLoadFailed = false;
     try {
       final tracks = await RecommendationEngine.recommend();
       if (!mounted || pass != _recPass) return;
@@ -160,7 +183,11 @@ class _SearchScreenState extends State<SearchScreen> {
       });
     } catch (_) {
       if (mounted && pass == _recPass) {
-        setState(() => _isLoadingRecommended = false);
+        setState(() {
+          _isLoadingRecommended = false;
+          _recLoadFailed = true;
+          _lastRecFail = DateTime.now();
+        });
       }
     }
   }
@@ -169,15 +196,30 @@ class _SearchScreenState extends State<SearchScreen> {
   /// to fold that new signal in — refreshing on every keystroke or every
   /// search would mean several extra requests per query.
   void _showRecommendations() {
+    // Invalidate any in-flight search: it must not repopulate results after
+    // the user cleared the field, and its loading/pagination state is dead.
+    ++_searchToken;
+    _loadMoreOwner = null;
     _searchController.clear();
     setState(() {
       _searchResults = const [];
       _hasSearched = false;
+      _isLoading = false;
+      _isLoadingMore = false;
+      _searchLoadFailed = false;
+      _searchPage = 1;
+      _seenSearchIds.clear();
+      _searchReachedEnd = false;
     });
     if (_recommendationsStale) _loadRecommendations();
   }
 
   Future<void> _clearSearchHistory() async {
+    // Invalidate recommendation work and the startup history read before
+    // touching storage, so neither can restore the cleared chips.
+    ++_recPass;
+    ++_historyToken;
+    _loadMoreOwner = null;
     await DatabaseService.clearSearchHistory();
     if (!mounted) return;
     // Search history feeds the taste profile, so dropping it must drop its
@@ -186,6 +228,9 @@ class _SearchScreenState extends State<SearchScreen> {
     setState(() {
       _searchHistory = const [];
       _recommendedTracks = const [];
+      _isLoadingRecommended = false;
+      _isLoadingMore = false;
+      _recLoadFailed = false;
       _seenRecIds.clear();
       _seenSearchIds.clear();
       _recReachedEnd = false;
@@ -200,26 +245,43 @@ class _SearchScreenState extends State<SearchScreen> {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return;
 
-    final history = await DatabaseService.addSearchHistory(trimmed);
-    // Leaving the tab during those awaits would otherwise unfocus a disposed
-    // FocusNode and setState on a dead State.
-    if (!mounted) return;
-
+    // Allocate ownership before the first await: rapid submissions must not
+    // finish their history writes out of order, and loading shows at once.
+    final token = ++_searchToken;
+    final historyToken = _historyToken;
     _focusNode.unfocus();
     setState(() {
-      _searchHistory = history;
       _isLoading = true;
       _hasSearched = true;
       _lastQuery = trimmed;
-      // A new query restarts pagination from page 1.
+      // A new query restarts pagination from page 1 and takes loading
+      // ownership from any in-flight load-more.
       _searchResults = const [];
       _seenSearchIds.clear();
       _searchPage = 1;
       _searchReachedEnd = false;
       _searchLoadFailed = false;
+      _isLoadingMore = false;
+      _loadMoreOwner = null;
     });
 
-    final token = ++_searchToken;
+    List<String> history;
+    try {
+      history = await DatabaseService.addSearchHistory(trimmed);
+    } catch (e) {
+      debugPrint('Search history write failed: $e');
+      if (!mounted || token != _searchToken) return;
+      history = _searchHistory;
+    }
+    // Leaving the tab during those awaits would otherwise unfocus a disposed
+    // FocusNode and setState on a dead State.
+    if (!mounted || token != _searchToken) return;
+
+    setState(() {
+      // History cleared mid-search: keep the search, drop the stale chips.
+      if (historyToken == _historyToken) _searchHistory = history;
+    });
+
     try {
       final results = await BilibiliSdk.search(trimmed);
       if (mounted && token == _searchToken) {
@@ -261,8 +323,6 @@ class _SearchScreenState extends State<SearchScreen> {
     if (pos.pixels >= pos.maxScrollExtent - 240) _loadMore();
   }
 
-
-
   Future<void> _loadMore() async {
     if (_isLoadingMore || _isLoading || _isLoadingRecommended) return;
     if (_hasSearched) {
@@ -284,16 +344,30 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
+  /// Releases pagination loading only for the operation that still owns it.
+  void _releaseLoadMore(Object owner) {
+    if (mounted && identical(_loadMoreOwner, owner)) {
+      setState(() => _isLoadingMore = false);
+    }
+  }
+
   Future<void> _loadMoreSearch() async {
     if (_lastQuery.isEmpty || _isLoadingMore) return;
     // A new search may have started while this fetch is in flight; only a
-    // batch that still belongs to the current query may be appended.
+    // batch that still belongs to the current query may be appended, and
+    // only the owning fetch may release the loading flag.
     final token = _searchToken;
+    final owner = Object();
+    _loadMoreOwner = owner;
     setState(() => _isLoadingMore = true);
     final page = _searchPage + 1;
     try {
       final results = await BilibiliSdk.search(_lastQuery, page: page);
-      if (!mounted || token != _searchToken) return;
+      if (!mounted ||
+          token != _searchToken ||
+          !identical(_loadMoreOwner, owner)) {
+        return;
+      }
       final fresh = <Track>[];
       for (final t in results) {
         if (_seenSearchIds.add(t.id)) fresh.add(t);
@@ -301,27 +375,36 @@ class _SearchScreenState extends State<SearchScreen> {
       setState(() {
         _searchResults = [..._searchResults, ...fresh];
         _searchPage = page;
+        _isLoadingMore = false;
         _searchLoadFailed = false;
-        if (fresh.isEmpty) _searchReachedEnd = true;
+        // The source returning nothing proves the end; a page of only
+        // duplicates does not (filtering can discard a whole batch).
+        if (results.isEmpty) _searchReachedEnd = true;
       });
     } catch (e) {
       debugPrint('Load more search error: $e');
-      if (mounted && token == _searchToken) {
+      if (mounted &&
+          token == _searchToken &&
+          identical(_loadMoreOwner, owner)) {
         setState(() {
+          _isLoadingMore = false;
           _searchLoadFailed = true;
           _lastSearchFail = DateTime.now();
         });
       }
     } finally {
-      if (mounted) setState(() => _isLoadingMore = false);
+      _releaseLoadMore(owner);
     }
   }
 
   Future<void> _loadMoreRecommendations() async {
     if (_isLoadingMore) return;
     // A fresh recommendation pass resets the seen-set and page while this is
-    // in flight; a stale batch must not be appended to the new list.
+    // in flight; a stale batch must not be appended to the new list, nor
+    // release a newer operation's loading flag.
     final pass = _recPass;
+    final owner = Object();
+    _loadMoreOwner = owner;
     setState(() => _isLoadingMore = true);
     final page = _recPage + 1;
     List<Track> tracks;
@@ -332,7 +415,7 @@ class _SearchScreenState extends State<SearchScreen> {
           page: page, excludeIds: Set.of(_seenRecIds));
     } catch (e) {
       debugPrint('Load more recommendations error: $e');
-      if (mounted && pass == _recPass) {
+      if (mounted && pass == _recPass && identical(_loadMoreOwner, owner)) {
         setState(() {
           _isLoadingMore = false;
           _recLoadFailed = true;
@@ -341,15 +424,8 @@ class _SearchScreenState extends State<SearchScreen> {
       }
       return;
     }
-    if (!mounted || pass != _recPass) {
-      if (mounted && pass == _recPass) {
-        // Defensive: ensure stuck loading flag is cleared on stale pass.
-        // pass != _recPass case already abandoned; original caller will handle.
-      }
-      // Always clear isLoadingMore on abandon to avoid infinite spinner.
-      if (mounted) {
-        setState(() => _isLoadingMore = false);
-      }
+    if (!mounted || pass != _recPass || !identical(_loadMoreOwner, owner)) {
+      _releaseLoadMore(owner);
       return;
     }
     final fresh = <Track>[];
@@ -361,7 +437,7 @@ class _SearchScreenState extends State<SearchScreen> {
       _recPage = page;
       _isLoadingMore = false;
       _recLoadFailed = false;
-      if (fresh.isEmpty) _recReachedEnd = true;
+      if (tracks.isEmpty) _recReachedEnd = true;
     });
   }
 
@@ -369,8 +445,9 @@ class _SearchScreenState extends State<SearchScreen> {
   /// "没有更多了" once a fetch came back with nothing new.
   Widget _loadMoreFooter() {
     final reachedEnd = _hasSearched ? _searchReachedEnd : _recReachedEnd;
-    final hasContent =
-        _hasSearched ? _searchResults.isNotEmpty : _recommendedTracks.isNotEmpty;
+    final hasContent = _hasSearched
+        ? _searchResults.isNotEmpty
+        : _recommendedTracks.isNotEmpty;
     if (_isLoadingMore) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 22),
@@ -437,8 +514,8 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
         ),
         SliverToBoxAdapter(child: _loadMoreFooter()),
-        SliverToBoxAdapter(
-          child: SizedBox(height: MiniPlayer.totalHeight(context) + 24),
+        const SliverToBoxAdapter(
+          child: SizedBox(height: 24),
         ),
       ],
     );
@@ -446,260 +523,353 @@ class _SearchScreenState extends State<SearchScreen> {
 
   List<Widget> _header() {
     return [
-        // No "搜索" heading: the tab bar above already says which page this is,
-        // and printing the same word twice, one line apart, was pure noise.
-        // Search Input Bar with Focus Listener
-        GlassCard(
-          borderRadius: 20,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      // No "搜索" heading: the tab bar above already says which page this is,
+      // and printing the same word twice, one line apart, was pure noise.
+      // Search Input Bar with Focus Listener
+      GlassCard(
+        padding: const EdgeInsets.only(left: 16, right: 4),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 56),
           child: Row(
             children: [
-              const Icon(Icons.search, color: AppColors.textMuted, size: 20),
-              const SizedBox(width: 10),
+              const Icon(
+                Icons.search_rounded,
+                color: AppColors.textMuted,
+                size: 22,
+              ),
+              const SizedBox(width: 12),
               Expanded(
                 child: TextField(
                   controller: _searchController,
                   focusNode: _focusNode,
-                  style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+                  textInputAction: TextInputAction.search,
+                  autocorrect: false,
+                  style: AppTypography.body,
+                  cursorColor: AppColors.accent,
                   onSubmitted: _performSearch,
-                  decoration: const InputDecoration(
-                    isCollapsed: true,
-                    hintText: '搜索歌曲、BV 号或链接',
-                    hintStyle: TextStyle(color: AppColors.textFaint, fontSize: 14),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: '歌曲、UP 主或 BV 链接',
+                    hintStyle: AppTypography.body.copyWith(
+                      color: AppColors.textFaint,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 16),
                     border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
                   ),
                 ),
               ),
-              if (_searchController.text.isNotEmpty)
-                IconButton(
-                  // Clearing the query returns to the recommendation view and
-                  // resets search pagination, so a later scroll cannot re-fetch
-                  // the old query's next page.
-                  onPressed: _showRecommendations,
-                  icon: const Icon(Icons.clear, color: AppColors.textMuted, size: 18),
-                  tooltip: '清空',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-                ),
+              SizedBox(
+                width: 48,
+                height: 48,
+                child: _searchController.text.isEmpty
+                    ? null
+                    : IconButton(
+                        onPressed: _showRecommendations,
+                        tooltip: '清除搜索',
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          size: 20,
+                          color: AppColors.textMuted,
+                        ),
+                      ),
+              ),
             ],
           ),
         ),
+      ),
 
-        // Show Search History ONLY when Search Bar is Focused / Tapped!
-        if (_focusNode.hasFocus) ...[
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                '历史搜索',
-                style: TextStyle(color: AppColors.textMuted, fontSize: 13, fontWeight: FontWeight.bold),
-              ),
-              if (_searchHistory.isNotEmpty)
-                InkWell(
-                  onTap: _clearSearchHistory,
-                  borderRadius: BorderRadius.circular(4),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                    child: Text('清空历史', style: TextStyle(color: AppColors.textFaint, fontSize: 12)),
-                  ),
+      // Show Search History ONLY when Search Bar is Focused / Tapped!
+      if (_focusNode.hasFocus) ...[
+        const SizedBox(height: 16),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              '历史搜索',
+              style: TextStyle(
+                  color: AppColors.textMuted,
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold),
+            ),
+            if (_searchHistory.isNotEmpty)
+              InkWell(
+                onTap: _clearSearchHistory,
+                borderRadius: BorderRadius.circular(4),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                  child: Text('清空历史',
+                      style:
+                          TextStyle(color: AppColors.textFaint, fontSize: 12)),
                 ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: _searchHistory.map((tag) {
+            return ActionChip(
+              label: Text(tag,
+                  style: const TextStyle(
+                      color: AppColors.textSecondary, fontSize: 12)),
+              backgroundColor: AppColors.white10,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20)),
+              onPressed: () {
+                _searchController.text = tag;
+                _performSearch(tag);
+              },
+            );
+          }).toList(),
+        ),
+      ],
+
+      const SizedBox(height: 24),
+
+      // Loading Indicator
+      if (_isLoading)
+        const Column(
+          children: [
+            SkeletonTrackTile(),
+            SkeletonTrackTile(),
+            SkeletonTrackTile(),
+            SkeletonTrackTile(),
+            SkeletonTrackTile(),
+          ],
+        )
+      // Active Search Results List
+      else if (_hasSearched && _searchResults.isNotEmpty) ...[
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              '${_searchResults.length} 个结果',
+              style: const TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold),
+            ),
+            TextButton(
+              onPressed: _showRecommendations,
+              child: const Text('清空搜索',
+                  style: TextStyle(color: AppColors.textFaint, fontSize: 12)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+      ]
+      // Search failed: transport/API error, not an empty result. The query
+      // is kept so retry is one tap.
+      else if (_hasSearched && _searchResults.isEmpty && _searchLoadFailed) ...[
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 40),
+          child: Column(
+            children: [
+              const Icon(Icons.wifi_off_rounded,
+                  size: 48, color: AppColors.textMuted),
+              const SizedBox(height: 12),
+              const Text(
+                '暂时无法加载结果',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '请稍后重试，你的搜索内容已保留',
+                style: TextStyle(color: AppColors.textFaint, fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: () => _performSearch(_lastQuery),
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('重试'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                  side: const BorderSide(color: AppColors.accent30),
+                ),
+              ),
             ],
           ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _searchHistory.map((tag) {
-              return ActionChip(
-                label: Text(tag, style: const TextStyle(color: AppColors.textSecondary, fontSize: 12)),
-                backgroundColor: AppColors.white10,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                onPressed: () {
-                  _searchController.text = tag;
-                  _performSearch(tag);
-                },
-              );
-            }).toList(),
+        ),
+      ]
+      // Search Completed but No Results Found
+      else if (_hasSearched && _searchResults.isEmpty) ...[
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 40),
+          child: Column(
+            children: [
+              const Icon(Icons.search_off_rounded,
+                  size: 48, color: AppColors.textMuted),
+              const SizedBox(height: 12),
+              Text(
+                '未找到「$_lastQuery」',
+                style: const TextStyle(
+                    color: AppColors.textSecondary, fontSize: 14),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '试试 BV 号，或更简短的关键词',
+                style: TextStyle(color: AppColors.textFaint, fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: () => _performSearch(_lastQuery),
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('重试'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.accent,
+                  side: const BorderSide(color: AppColors.accent30),
+                ),
+              ),
+            ],
           ),
-        ],
-
-        const SizedBox(height: 24),
-
-        // Loading Indicator
-        if (_isLoading)
+        ),
+      ]
+      // Default view: recommendations, once there is a search to learn from.
+      else if (!_canRecommend) ...[
+        const EmptyState(
+          icon: Icons.search_rounded,
+          title: '先搜索一首歌吧',
+          subtitle: '搜过之后，这里会根据你的收藏与播放推荐',
+        ),
+      ] else ...[
+        const Row(
+          children: [
+            Icon(Icons.auto_awesome, color: AppColors.accent, size: 20),
+            SizedBox(width: 8),
+            Text(
+              '推荐',
+              style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (_isLoadingRecommended)
           const Column(
             children: [
               SkeletonTrackTile(),
               SkeletonTrackTile(),
               SkeletonTrackTile(),
-              SkeletonTrackTile(),
-              SkeletonTrackTile(),
             ],
           )
-        // Active Search Results List
-        else if (_hasSearched && _searchResults.isNotEmpty) ...[
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                '${_searchResults.length} 个结果',
-                style: const TextStyle(color: AppColors.textSecondary, fontSize: 14, fontWeight: FontWeight.bold),
+        else if (_recommendedTracks.isEmpty && _recLoadFailed)
+          Center(
+            child: OutlinedButton.icon(
+              onPressed: _loadRecommendations,
+              icon: const Icon(Icons.refresh, size: 16),
+              label: const Text('重新加载推荐'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.accent,
+                side: const BorderSide(color: AppColors.accent30),
               ),
-              TextButton(
-                onPressed: _showRecommendations,
-                child: const Text('清空搜索', style: TextStyle(color: AppColors.textFaint, fontSize: 12)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-        ]
-        // Search Completed but No Results Found
-        else if (_hasSearched && _searchResults.isEmpty) ...[
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 40),
-            child: Column(
-              children: [
-                const Icon(Icons.search_off_rounded, size: 48, color: AppColors.textMuted),
-                const SizedBox(height: 12),
-                Text(
-                  '未找到「$_lastQuery」',
-                  style: const TextStyle(color: AppColors.textSecondary, fontSize: 14),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  '试试 BV 号，或更简短的关键词',
-                  style: TextStyle(color: AppColors.textFaint, fontSize: 12),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                OutlinedButton.icon(
-                  onPressed: () => _performSearch(_lastQuery),
-                  icon: const Icon(Icons.refresh, size: 16),
-                  label: const Text('重试'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.accent,
-                    side: const BorderSide(color: AppColors.accent30),
-                  ),
-                ),
-              ],
             ),
           ),
-        ]
-        // Default view: recommendations, once there is a search to learn from.
-        else if (!_canRecommend) ...[
-          const EmptyState(
-            icon: Icons.search_rounded,
-            title: '先搜索一首歌吧',
-            subtitle: '搜过之后，这里会根据你的收藏与播放推荐',
-          ),
-        ] else ...[
-          const Row(
-            children: [
-              Icon(Icons.auto_awesome, color: AppColors.accent, size: 20),
-              SizedBox(width: 8),
-              Text(
-                '推荐',
-                style: TextStyle(color: AppColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-
-          if (_isLoadingRecommended)
-            const Column(
-              children: [
-                SkeletonTrackTile(),
-                SkeletonTrackTile(),
-                SkeletonTrackTile(),
-              ],
-            ),
-        ],
-      ];
+      ],
+    ];
   }
 
   Widget _buildTrackTile(Track track, int index) {
     return Padding(
       padding: const EdgeInsets.only(bottom: TrackRow.gap),
       child: TrackRow(
-          // Tapping the row: plays AND opens the full player.
-          onTap: () => widget.onSelectTrack(track),
-          child: Row(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: CachedCoverImage(
-                    url: track.coverUrl,
-                    width: 54,
-                    height: 54,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Bilibili titles are routinely far wider than a row.
-                      // The marquee is affordable here because it only
-                      // animates when the text actually overflows, and the
-                      // RepaintBoundary keeps each ticking title from
-                      // repainting the rest of the row.
-                      RepaintBoundary(
-                        child: MarqueeText(
-                          text: track.title,
-                          style: AppTypography.body.copyWith(
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.textPrimary,
-                          ),
-                          // Desynchronise rows so a screenful of titles does
-                          // not slide in lockstep.
-                          phase: (index % 5) / 5,
-                        ),
+        // Tapping the row: plays AND opens the full player.
+        onTap: () => widget.onSelectTrack(track),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: CachedCoverImage(
+                url: track.coverUrl,
+                width: 54,
+                height: 54,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Bilibili titles are routinely far wider than a row.
+                  // The marquee is affordable here because it only
+                  // animates when the text actually overflows, and the
+                  // RepaintBoundary keeps each ticking title from
+                  // repainting the rest of the row.
+                  RepaintBoundary(
+                    child: MarqueeText(
+                      text: track.title,
+                      style: AppTypography.body.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textPrimary,
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${track.uploader} • ${formatDuration(Duration(seconds: track.duration))}',
-                        style: AppTypography.caption.copyWith(fontSize: 13),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
+                      // Desynchronise rows so a screenful of titles does
+                      // not slide in lockstep.
+                      phase: (index % 5) / 5,
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${track.uploader} • ${formatDuration(Duration(seconds: track.duration))}',
+                    style: AppTypography.caption.copyWith(fontSize: 13),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
 
-                // Nudged right: the gap that was missing between the title
-                // and the download control comes out of the padding after the
-                // last button, so the title keeps exactly the width it had.
-                const SizedBox(width: 8),
-                TrackDownloadButton(
-                  track: track,
-                  size: 24,
-                  onPlay: () {
-                    if (widget.onPlayOnly != null) {
-                      widget.onPlayOnly!(track);
-                    } else {
-                      widget.onSelectTrack(track);
-                    }
-                  },
-                ),
+            // Nudged right: the gap that was missing between the title
+            // and the download control comes out of the padding after the
+            // last button, so the title keeps exactly the width it had.
+            const SizedBox(width: 8),
+            TrackDownloadButton(
+              track: track,
+              size: 24,
+              onPlay: () {
+                if (widget.onPlayOnly != null) {
+                  widget.onPlayOnly!(track);
+                } else {
+                  widget.onSelectTrack(track);
+                }
+              },
+            ),
 
-                // Plus Sign Button (+) to Add to Playlist
-                IconButton(
-                  icon: const Icon(Icons.add, color: AppColors.textSecondary, size: 22),
-                  tooltip: '添加至歌单',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
-                  onPressed: () {
-                    TrackOptionsMenu.showAddToPlaylist(context, track, onTrackChanged: () {
-                      if (mounted) setState(() {});
-                    });
+            // Overflow menu: favorite / add-to-playlist live here.
+            // Download stays directly available.
+            IconButton(
+              tooltip: '更多选项',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(
+                minWidth: 48,
+                minHeight: 48,
+              ),
+              icon: const Icon(
+                Icons.more_horiz_rounded,
+                color: AppColors.textMuted,
+                size: 24,
+              ),
+              onPressed: () {
+                TrackOptionsMenu.show(
+                  context,
+                  track,
+                  onTrackChanged: () {
+                    if (mounted) setState(() {});
                   },
-                ),
-              ],
-          ),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }

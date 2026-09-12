@@ -12,9 +12,28 @@ import 'lyric_editor_info_tab.dart';
 import 'lyric_preview_pane.dart';
 import 'lyric_result_row.dart';
 import 'segment_tabs.dart';
+import '../utils/snack.dart';
+
+/// Applies a lyric choice. Direct interactions (row/preview/paste) use the
+/// default `settle: true`, which also closes the editor session on success.
+/// "Save all" passes `settle: false` and performs one awaited close itself,
+/// so a combined save has a single error outcome.
+typedef LyricsApplyCallback = Future<void> Function(
+  LyricsResult result, {
+  bool settle,
+});
+
+/// Saves edited metadata. Same settle contract as [LyricsApplyCallback].
+typedef MetadataSaveCallback = Future<void> Function(
+  String title,
+  String artist,
+  String coverUrl, {
+  bool settle,
+});
 
 class LyricEditorDialog extends StatefulWidget {
   final String songTitle;
+
   /// The B站 raw video title. 智能识别 must parse this, never [songTitle]:
   /// metadata edits overwrite [songTitle] but the parse has to stay
   /// deterministic against the original title.
@@ -23,8 +42,8 @@ class LyricEditorDialog extends StatefulWidget {
   final String? coverUrl;
   final ValueNotifier<Duration>? positionNotifier;
   final List<LyricLine>? currentLines;
-  final Function(LyricsResult) onApplyLyrics;
-  final Function(String title, String artist, String coverUrl)? onUpdateMetadata;
+  final LyricsApplyCallback onApplyLyrics;
+  final MetadataSaveCallback? onUpdateMetadata;
   final VoidCallback? onClose;
 
   /// Which tab to land on: 0 = 信息, 1 = 歌词.
@@ -51,10 +70,12 @@ class LyricEditorDialog extends StatefulWidget {
   });
 
   @override
-  State<LyricEditorDialog> createState() => _LyricEditorDialogState();
+  State<LyricEditorDialog> createState() => LyricEditorDialogState();
 }
 
-class _LyricEditorDialogState extends State<LyricEditorDialog>
+/// Public so the hosting sheet can route system Back through nested
+/// editor states via a [GlobalKey].
+class LyricEditorDialogState extends State<LyricEditorDialog>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   late TextEditingController _titleController;
@@ -178,10 +199,8 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
   // Search & results
   // ---------------------------------------------------------------------------
 
-  String _fingerprint(List<LyricLine> lines) => lines
-      .map((l) => l.text.trim())
-      .where((t) => t.isNotEmpty)
-      .join('\n');
+  String _fingerprint(List<LyricLine> lines) =>
+      lines.map((l) => l.text.trim()).where((t) => t.isNotEmpty).join('\n');
 
   bool _matchesCurrent(LyricsResult r) {
     final current = widget.currentLines;
@@ -209,6 +228,9 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
   Future<void> _performSearch() async {
     final query = _searchController.text.trim();
     if (query.isEmpty) {
+      // Invalidate any in-flight provider search so an older nonempty query
+      // cannot repopulate results after an empty search.
+      ++_searchToken;
       setState(() => _searchResults = _pinnedResults());
       return;
     }
@@ -223,8 +245,8 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
     // Only the newest search may commit.
     final combo = '$_searchArtist $_searchSong'.trim();
     final reverseCombo = '$_searchSong $_searchArtist'.trim();
-    final isStructuredQuery = _searchSong.isNotEmpty &&
-        (query == combo || query == reverseCombo);
+    final isStructuredQuery =
+        _searchSong.isNotEmpty && (query == combo || query == reverseCombo);
     final netease = isStructuredQuery
         ? await LyricsEngine.fetchFromNetEase(_searchSong,
             artist: _searchArtist.isEmpty ? null : _searchArtist)
@@ -263,7 +285,8 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
   // Apply / calibration
   // ---------------------------------------------------------------------------
 
-  void _applyLyricResult(LyricsResult res, {double offset = 0.0}) {
+  Future<void> _applyLyricResult(LyricsResult res,
+      {double offset = 0.0, bool settle = true}) {
     final adjustedLines = offset == 0.0
         ? res.lines
         : res.lines
@@ -274,12 +297,15 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
                 ))
             .toList();
 
-    widget.onApplyLyrics(LyricsResult(
-      source: res.source,
-      songTitle: res.songTitle,
-      artistName: res.artistName,
-      lines: adjustedLines,
-    ));
+    return widget.onApplyLyrics(
+      LyricsResult(
+        source: res.source,
+        songTitle: res.songTitle,
+        artistName: res.artistName,
+        lines: adjustedLines,
+      ),
+      settle: settle,
+    );
   }
 
   void _applyTapCalibration(double offset) {
@@ -293,8 +319,9 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
   /// Opens the LRC editor. If [res] is given its lines are serialised into
   /// the text field for editing; otherwise the field starts empty (paste).
   void _openLrcEditor(LyricsResult? res) {
-    _lrcController.text =
-        (res != null && res.lines.isNotEmpty) ? LyricsEngine.toLrc(res.lines) : '';
+    _lrcController.text = (res != null && res.lines.isNotEmpty)
+        ? LyricsEngine.toLrc(res.lines)
+        : '';
     setState(() {
       _inLrcEditor = true;
       _previewingResult = null;
@@ -331,23 +358,19 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
   // Metadata
   // ---------------------------------------------------------------------------
 
-  void _saveAll() {
+  /// Guards double-tap while a combined save is in flight.
+  bool _saving = false;
+
+  void _saveAll() async {
+    if (_saving) return;
     final newTitle = _titleController.text.trim();
     final newArtist = _artistController.text.trim();
     final newCover = _coverUrlController.text.trim();
 
     final hasMetadataEdit = newTitle.isNotEmpty &&
         (newTitle != widget.songTitle ||
-         newArtist != widget.artistName ||
-         newCover != (widget.coverUrl ?? ''));
-
-    if (hasMetadataEdit && widget.onUpdateMetadata != null) {
-      widget.onUpdateMetadata!(
-        newTitle,
-        newArtist.isNotEmpty ? newArtist : '未知UP主',
-        newCover,
-      );
-    }
+            newArtist != widget.artistName ||
+            newCover != (widget.coverUrl ?? ''));
 
     final sel = _selectedResult ??
         (_previewOffset != 0.0 &&
@@ -356,26 +379,58 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
             ? LyricsResult(
                 source: 'current',
                 songTitle: newTitle.isNotEmpty ? newTitle : widget.songTitle,
-                artistName: newArtist.isNotEmpty ? newArtist : widget.artistName,
+                artistName:
+                    newArtist.isNotEmpty ? newArtist : widget.artistName,
                 lines: widget.currentLines!,
               )
             : null);
 
-    if (sel != null) {
-      _applyLyricResult(sel, offset: _previewOffset);
-    } else if (!hasMetadataEdit ||
-        // Metadata-only save with no caller-side handler: nobody else is
-        // going to close this dialog, so it must close itself.
-        widget.onUpdateMetadata == null) {
+    if (!hasMetadataEdit && sel == null) {
       _close();
+      return;
+    }
+    if (hasMetadataEdit && widget.onUpdateMetadata == null && sel == null) {
+      // Metadata-only save with no caller-side handler: nobody else is
+      // going to close this dialog, so it must close itself.
+      _close();
+      return;
+    }
+
+    // One explicitly awaited operation: a single close and a single error
+    // outcome. The callbacks run with settle: false and must not close or
+    // report on their own.
+    setState(() => _saving = true);
+    try {
+      if (hasMetadataEdit && widget.onUpdateMetadata != null) {
+        await widget.onUpdateMetadata!(
+          newTitle,
+          newArtist.isNotEmpty ? newArtist : '未知UP主',
+          newCover,
+          settle: false,
+        );
+      }
+
+      if (sel != null) {
+        await _applyLyricResult(sel, offset: _previewOffset, settle: false);
+      }
+
+      if (mounted) _close();
+    } catch (_) {
+      if (mounted) {
+        showAppSnackBar(
+          ScaffoldMessenger.of(context),
+          message: '保存失败，请重试',
+          backgroundColor: AppColors.backgroundElevated,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
   // ---------------------------------------------------------------------------
   // Offset bar (calibration controls)
   // ---------------------------------------------------------------------------
-
-
 
   // ---------------------------------------------------------------------------
   // Build
@@ -387,6 +442,50 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
     } else {
       Navigator.pop(context);
     }
+  }
+
+  /// Steps Back inside the dialog instead of closing it. Returns true when
+  /// the press was consumed: preview → results, LRC editor → results (with
+  /// unsaved-text protection). Returns false when already at the top level
+  /// so the host can close the editor.
+  Future<bool> onBackPressed() async {
+    if (_previewingResult != null) {
+      setState(() {
+        _previewingResult = null;
+        _calibrating = false;
+        _previewOffset = 0.0;
+      });
+      return true;
+    }
+    if (_inLrcEditor) {
+      if (_lrcController.text.trim().isNotEmpty) {
+        final discard = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.backgroundElevated,
+            title: const Text('放弃未保存的歌词？',
+                style: TextStyle(color: AppColors.textPrimary)),
+            content: const Text('返回将丢失编辑器中的文本。',
+                style: TextStyle(color: AppColors.textSecondary)),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('继续编辑'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child:
+                    const Text('放弃', style: TextStyle(color: AppColors.danger)),
+              ),
+            ],
+          ),
+        );
+        if (discard != true) return true;
+      }
+      setState(() => _inLrcEditor = false);
+      return true;
+    }
+    return false;
   }
 
   @override
@@ -404,21 +503,13 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SizedBox(height: 2),
-          // Tabs — animation-driven indicator that follows drag in real time
-          Row(
-            children: [
-              Expanded(
-                child: SegmentTabs(
-                  labels: const ['信息', '歌词'],
-                  animation: _tabController.animation!,
-                  onTap: (i) => _tabController.animateTo(i),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(left: 12, right: 2),
-                child: Image.asset('assets/logo.png', height: 36),
-              ),
-            ],
+          // Tabs — animation-driven indicator that follows drag in real time.
+          // No decorative logo: the text navigation fills the row, matching
+          // the main shell.
+          SegmentTabs(
+            labels: const ['信息', '歌词'],
+            animation: _tabController.animation!,
+            onTap: (i) => _tabController.animateTo(i),
           ),
           const SizedBox(height: 14),
           Expanded(
@@ -434,9 +525,9 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
           // Single stationary 确认 button fixed at the bottom of the dialog
           SizedBox(
             width: double.infinity,
-            height: 44,
+            height: 48,
             child: ElevatedButton(
-              onPressed: _saveAll,
+              onPressed: _saving ? null : _saveAll,
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.accent,
                 shape: RoundedRectangleBorder(
@@ -527,7 +618,6 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
     if (research) _performSearch();
   }
 
-
   // ---------------------------------------------------------------------------
   // Tab 2: Lyrics (three states: list → LRC editor → preview)
   // ---------------------------------------------------------------------------
@@ -575,25 +665,34 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
         ),
         const SizedBox(height: 10),
 
-        // Results
+        // Results. The list (including the paste card) stays visible while
+        // searching: the field's spinner already signals activity, and the
+        // paste action is needed most precisely when providers find nothing.
         Expanded(
-          child: (_isSearching && _searchResults.isEmpty)
-              ? const Center(
-                  child: CircularProgressIndicator(color: AppColors.accent))
-              : _searchResults.isEmpty
-                  ? const Center(
-                      child: Text('无结果',
-                          style: TextStyle(color: AppColors.textFaint)))
-                  : ListView.builder(
-                      itemCount: _searchResults.length + 1, // +1 for paste card
-                      itemBuilder: (context, index) {
-                        // Last item: paste / edit LRC card
-                        if (index == _searchResults.length) {
-                          return _pasteCard();
-                        }
-                        return _resultRow(_searchResults[index], index);
-                      },
+          child: ListView.builder(
+            itemCount: _searchResults.length + 1,
+            itemBuilder: (context, index) {
+              if (index < _searchResults.length) {
+                return _resultRow(_searchResults[index], index);
+              }
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_searchResults.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 24),
+                      child: Text(
+                        _isSearching ? '正在查找歌词…' : '暂未找到匹配歌词',
+                        textAlign: TextAlign.center,
+                        style: AppTypography.bodyMedium,
+                      ),
                     ),
+                  _pasteCard(),
+                ],
+              );
+            },
+          ),
         ),
       ],
     );
@@ -613,9 +712,8 @@ class _LyricEditorDialogState extends State<LyricEditorDialog>
   /// the row title already says 当前歌词, so a second 当前 is pure repetition —
   /// the row then shows only the line count.
   String _sourceLabel(LyricsResult res) {
-    final raw = res.source == 'current'
-        ? (_currentSourceLabel ?? '')
-        : res.source;
+    final raw =
+        res.source == 'current' ? (_currentSourceLabel ?? '') : res.source;
     switch (raw) {
       case 'netease':
         return '网易云';
