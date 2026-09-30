@@ -133,9 +133,9 @@ build_macos() {
     --obfuscate \
     --split-debug-info="$SYMBOLS_DIR"
 
-  local app_path="build/macos/Build/Products/Release/bilibeat.app"
+  local app_path="build/macos/Build/Products/Release/BiliBeats.app"
   local dmg="build/macos/bilibeat-${SHORT_VERSION}-macos.dmg"
-  hdiutil create -volname "BiliBeat" -srcfolder "$app_path" -ov -format UDZO "$dmg"
+  hdiutil create -volname "BiliBeats" -srcfolder "$app_path" -ov -format UDZO "$dmg"
 
   echo
   echo "==> macOS DMG"
