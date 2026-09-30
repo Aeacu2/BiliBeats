@@ -7,9 +7,12 @@
     <!-- Android 13+ gates notifications behind a runtime grant. Stock Android
          exempts media-session notifications, but stricter OEM builds do not. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Lets the app ask (via a system dialog) to be exempt from battery
+         optimization, which aggressive OEM builds use to kill media apps. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
     <application
-        android:label="BiliBeat"
+        android:label="BiliBeats"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="false"

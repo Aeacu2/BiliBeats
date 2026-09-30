@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../services/audio_player_handler.dart';
@@ -42,22 +40,22 @@ class SleepTimerSheet extends StatefulWidget {
 }
 
 class _SleepTimerSheetState extends State<SleepTimerSheet> {
-  late SleepTimerState _state;
-  StreamSubscription<SleepTimerState>? _sub;
+  SleepTimerState get _state => widget.handler.sleepTimerState;
 
   @override
   void initState() {
     super.initState();
-    _state = widget.handler.sleepTimerState;
-    _sub = widget.handler.sleepTimerStream.listen((state) {
-      if (mounted) setState(() => _state = state);
-    });
+    widget.handler.sleepTimerNotifier.addListener(_onChanged);
   }
 
   @override
   void dispose() {
-    _sub?.cancel();
+    widget.handler.sleepTimerNotifier.removeListener(_onChanged);
     super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
   }
 
   void _set(SleepTimerMode mode, {Duration? duration}) {

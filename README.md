@@ -1,4 +1,4 @@
-# BiliBeat
+# BiliBeats
 
 基于 Flutter 开发的哔哩哔哩音频播放器，支持同步 LRC 歌词与离线缓存。
 
@@ -18,7 +18,7 @@
 
 ### iOS 安装
 
-BiliBeat 未上架 Apple App Store，发布构建以未签名归档包（`bilibeat-x.x.x-unsigned.ipa`）形式提供。iOS 安装前需使用个人开发者证书进行签名（需 iOS 13.0 及以上版本）。
+BiliBeats 未上架 Apple App Store，发布构建以未签名归档包（`bilibeat-x.x.x-unsigned.ipa`）形式提供。iOS 安装前需使用个人开发者证书进行签名（需 iOS 13.0 及以上版本）。
 
 #### 方式一：通过 AltStore 安装（推荐）
 
@@ -30,7 +30,7 @@ AltStore 支持本地安装，并可通过 Wi-Fi 自动续签后台证书。
    - 点击菜单栏或系统托盘中的 AltServer 图标，选择 `Install AltStore`，再选择已连接的 iOS 设备。
    - 使用 Apple ID 登录以签发免费开发证书。
 3. **信任描述文件**：在 iOS 设备上进入 `设置` > `通用` > `VPN 与设备管理`，在"开发者 App"下找到您的 Apple ID 并选择`信任`。
-4. **安装 BiliBeat**：
+4. **安装 BiliBeats**：
    - 使用 iOS 设备上的 Safari 下载 `bilibeat-x.x.x-unsigned.ipa`。
    - 打开 AltStore，进入"我的 App"页面，点击 `+` 图标并选择已下载的 `.ipa` 文件。
    - *自动续签*：只要主机电脑与设备处于同一 Wi-Fi 网络且保持运行，AltServer 会自动续签 7 天有效期的证书。

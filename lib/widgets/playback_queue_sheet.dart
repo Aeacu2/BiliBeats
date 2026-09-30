@@ -7,13 +7,12 @@ import 'empty_state.dart';
 import 'marquee_text.dart';
 import 'track_row.dart';
 
-/// Read-only view of the handler's authoritative logical queue.
+/// Read-only view of what the player is queued to play, in play order.
 ///
-/// No queue editing, no reorder controls, and no second queue model: rows
-/// render [PlaybackQueueSnapshot] exactly as published. Do not filter tracks
-/// here (e.g. hiding nonlocal items) — that would create a second
-/// interpretation of queue order and break index correspondence.
-class PlaybackQueueSheet extends StatelessWidget {
+/// Rows render [PlaybackQueueSnapshot] exactly as the handler publishes it
+/// (which is itself read from the native player), so the highlighted row is
+/// always the song that is actually playing.
+class PlaybackQueueSheet extends StatefulWidget {
   final BiliBeatAudioHandler handler;
 
   const PlaybackQueueSheet({
@@ -40,6 +39,30 @@ class PlaybackQueueSheet extends StatelessWidget {
       },
     );
   }
+
+  @override
+  State<PlaybackQueueSheet> createState() => _PlaybackQueueSheetState();
+}
+
+class _PlaybackQueueSheetState extends State<PlaybackQueueSheet> {
+  BiliBeatAudioHandler get handler => widget.handler;
+
+  // Open at the current song, not the top of a possibly very long queue.
+  late final ScrollController _scroll = ScrollController(
+    initialScrollOffset: handler.queueSnapshot.currentIndex > 2
+        ? (handler.queueSnapshot.currentIndex - 2) * _rowExtent
+        : 0,
+  );
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// Fixed row height: lets a long queue open scrolled to the current song
+  /// without measuring every row.
+  static const double _rowExtent = 64;
 
   String _modeLabel(PlaybackQueueSnapshot snapshot) {
     final order = snapshot.isShuffle ? '随机播放' : '顺序播放';
@@ -78,11 +101,9 @@ class PlaybackQueueSheet extends StatelessWidget {
       heightFactor: 0.78,
       child: SafeArea(
         top: false,
-        child: StreamBuilder<PlaybackQueueSnapshot>(
-          stream: handler.queueSnapshotStream,
-          initialData: handler.queueSnapshot,
-          builder: (context, state) {
-            final snapshot = state.data ?? handler.queueSnapshot;
+        child: ValueListenableBuilder<PlaybackQueueSnapshot>(
+          valueListenable: handler.queueNotifier,
+          builder: (context, snapshot, _) {
 
             return Column(
               children: [
@@ -134,6 +155,8 @@ class PlaybackQueueSheet extends StatelessWidget {
                           ),
                         )
                       : ListView.builder(
+                          controller: _scroll,
+                          itemExtent: _rowExtent,
                           padding: const EdgeInsets.fromLTRB(
                             20,
                             0,

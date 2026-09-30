@@ -83,6 +83,11 @@ class AudioDownloadService {
   }
 
   static String _audioPath(String dir, String key) => '$dir/audio_$key.m4a';
+
+  /// Where [id]'s audio lives once downloaded. Does not check existence —
+  /// callers pair it with [isDownloadedById] or the downloaded library.
+  static Future<String> audioPathForId(String id) async =>
+      _audioPath(await _dir(), id);
   static String _readyPath(String dir, String key) => '$dir/audio_$key.ready';
   static String _metaPath(String dir, String key) => '$dir/audio_$key.json';
 

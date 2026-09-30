@@ -37,6 +37,9 @@ class AppColors {
   /// placeholder read as "card on card" instead of fighting for the same tone.
   static const Color surfaceDeep = Color(0xFF141416);
   static const Color surfaceCard = Color(0x0AFFFFFF); // ~4% white
+
+  /// Fill for the search field and other inset controls.
+  static const Color fieldFill = Color(0xFF1B1B1F);
   static const Color hairline = Color(0x14FFFFFF); // subtle borders
   static const Color hairlineStrong = Color(0x26FFFFFF);
 
@@ -65,6 +68,24 @@ class AppRadius {
 /// get a premium look from weight contrast, tight tracking on large text, and
 /// generous line heights. SF Pro (iOS) / Roboto (Android) are high-quality.
 class AppTypography {
+  /// Page-level titles (聆听 / 下载, a playlist's name).
+  static const TextStyle largeTitle = TextStyle(
+    fontSize: 30,
+    height: 1.12,
+    fontWeight: FontWeight.w800,
+    letterSpacing: -0.8,
+    color: AppColors.textPrimary,
+  );
+
+  /// Section headers inside a page (最近播放, 我的歌单, 全部歌曲).
+  static const TextStyle section = TextStyle(
+    fontSize: 19,
+    height: 1.2,
+    fontWeight: FontWeight.w700,
+    letterSpacing: -0.3,
+    color: AppColors.textPrimary,
+  );
+
   static const TextStyle display = TextStyle(
     fontSize: 32,
     height: 1.1,
@@ -163,6 +184,43 @@ class AppTheme {
         elevation: 0,
       ),
       iconTheme: const IconThemeData(color: AppColors.textSecondary),
+      dialogTheme: const DialogThemeData(
+        backgroundColor: AppColors.backgroundElevated,
+        surfaceTintColor: Colors.transparent,
+        titleTextStyle: AppTypography.headline,
+        contentTextStyle: AppTypography.bodyMedium,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(AppRadius.xl)),
+        ),
+      ),
+      bottomSheetTheme: const BottomSheetThemeData(
+        backgroundColor: AppColors.backgroundElevated,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(
+            top: Radius.circular(AppRadius.xl),
+          ),
+        ),
+      ),
+      popupMenuTheme: const PopupMenuThemeData(
+        color: AppColors.backgroundElevated,
+        surfaceTintColor: Colors.transparent,
+        textStyle: AppTypography.body,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(AppRadius.md)),
+        ),
+      ),
+      textSelectionTheme: const TextSelectionThemeData(
+        cursorColor: AppColors.accent,
+        selectionColor: AppColors.accent30,
+        selectionHandleColor: AppColors.accent,
+      ),
+      progressIndicatorTheme: const ProgressIndicatorThemeData(
+        color: AppColors.accent,
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
+      ),
       sliderTheme: const SliderThemeData(
         activeTrackColor: AppColors.accent,
         inactiveTrackColor: AppColors.hairlineStrong,

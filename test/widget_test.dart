@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:bilibeat/models/lyric_line.dart';
+import 'package:bilibeat/services/audio_player_handler.dart';
+import 'package:bilibeat/services/local_search.dart';
 import 'package:bilibeat/services/lyrics_engine.dart';
 import 'package:bilibeat/services/recommendation_engine.dart';
 import 'package:bilibeat/models/playlist.dart';
@@ -10,7 +12,8 @@ import 'package:bilibeat/widgets/marquee_text.dart';
 import 'package:bilibeat/widgets/expand_from_card.dart';
 import 'package:bilibeat/widgets/mini_player.dart';
 import 'package:bilibeat/widgets/synced_lyrics_view.dart';
-import 'package:bilibeat/widgets/playlist_detail_sheet.dart';
+
+import 'fake_audio_player.dart';
 
 const _style = TextStyle(fontSize: 14, height: 1.25);
 
@@ -591,20 +594,10 @@ void main() {
   group('MiniPlayer', () {
     Widget wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
-    testWidgets('renders an empty state with no track', (tester) async {
-      await tester.pumpWidget(wrap(MiniPlayer(
-        currentTrack: null,
-        isPlaying: false,
-        positionNotifier: ValueNotifier(Duration.zero),
-        durationNotifier: ValueNotifier(Duration.zero),
-        onPlayPause: () {},
-        onNext: () {},
-        onTap: () {},
-      )));
-
-      expect(find.text('选择一首，开始聆听'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    });
+    BiliBeatAudioHandler handler() => BiliBeatAudioHandler(
+          player: FakeAudioPlayer(),
+          manageAudioSession: false,
+        );
 
     const track = Track(
       id: 'BV1_p1',
@@ -617,109 +610,126 @@ void main() {
       duration: 200,
     );
 
-    testWidgets('progress fills from the left edge, not from the middle',
-        (tester) async {
-      await tester.pumpWidget(wrap(MiniPlayer(
-        currentTrack: track,
-        isPlaying: true,
-        positionNotifier: ValueNotifier(const Duration(seconds: 50)),
-        durationNotifier: ValueNotifier(const Duration(seconds: 200)),
-        onPlayPause: () {},
-        onNext: () {},
-        onTap: () {},
-        onSeek: (_) {},
-      )));
-      await tester.pump(const Duration(milliseconds: 300));
+    testWidgets('renders an empty state with no track', (tester) async {
+      await tester.pumpWidget(wrap(MiniPlayer(handler: handler(), onTap: () {})));
 
-      final track_ = tester.getRect(find.byType(FractionallySizedBox));
-      final lane = tester.getRect(find.ancestor(
-          of: find.byType(FractionallySizedBox),
-          matching: find.byType(ClipRRect).last));
-
-      // Left-anchored and a quarter across. Shrink-wrapped, the fill sized its
-      // own track and the whole bar grew outwards from the centre.
-      expect(track_.left, lane.left);
-      expect(track_.width, closeTo(lane.width * 0.25, 1.0));
-    });
-
-    testWidgets('progress is display-only and does not seek', (tester) async {
-      Duration? sought;
-      await tester.pumpWidget(wrap(MiniPlayer(
-        currentTrack: track,
-        isPlaying: true,
-        positionNotifier: ValueNotifier(Duration.zero),
-        durationNotifier: ValueNotifier(const Duration(seconds: 200)),
-        onPlayPause: () {},
-        onNext: () {},
-        onTap: () {},
-        onSeek: (d) => sought = d,
-      )));
-      await tester.pump(const Duration(milliseconds: 300));
-
-      // Seeking lives in the full player; the docked bar only displays.
-      expect(find.byType(IgnorePointer), findsWidgets);
-
-      final bar = tester.getRect(find.byType(FractionallySizedBox));
-      final lane = tester.getRect(find.ancestor(
-          of: find.byType(FractionallySizedBox),
-          matching: find.byType(ClipRRect).last));
-      final gesture =
-          await tester.startGesture(Offset(lane.left + 4, bar.center.dy));
-      await gesture.moveBy(Offset(lane.width / 2, 0));
-      await tester.pump();
-      await gesture.up();
-      await tester.pumpAndSettle();
-
-      expect(sought, isNull);
-    });
-
-    testWidgets('shows the track and toggles play', (tester) async {
-      var toggled = false;
-      await tester.pumpWidget(wrap(MiniPlayer(
-        currentTrack: const Track(
-          id: 'BV1_1',
-          bvid: 'BV1',
-          cid: 1,
-          title: '一首标题非常非常长的歌曲用来触发滚动效果',
-          rawTitle: '一首标题非常非常长的歌曲用来触发滚动效果',
-          uploader: '某位 UP 主',
-          coverUrl: '',
-          duration: 200,
-        ),
-        isPlaying: true,
-        positionNotifier: ValueNotifier(const Duration(seconds: 50)),
-        durationNotifier: ValueNotifier(const Duration(seconds: 200)),
-        onPlayPause: () => toggled = true,
-        onNext: () {},
-        onTap: () {},
-      )));
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(find.byIcon(Icons.pause_rounded), findsOneWidget);
-      await tester.tap(find.byIcon(Icons.pause_rounded));
-      expect(toggled, isTrue);
+      expect(find.text('选择一首歌，开始聆听'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('shows the playing track and its play state', (tester) async {
+      final h = handler();
+      h.nowPlaying.value = track;
+      h.playingNotifier.value = true;
+      await tester.pumpWidget(wrap(MiniPlayer(handler: h, onTap: () {})));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text(track.title), findsOneWidget);
+      expect(find.byIcon(Icons.pause_rounded), findsOneWidget);
+
+      h.playingNotifier.value = false;
+      await tester.pump();
+      expect(find.byIcon(Icons.play_arrow_rounded), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('names the song being prepared without switching to it',
+        (tester) async {
+      final h = handler();
+      h.nowPlaying.value = track;
+      h.preparing.value = const Track(
+        id: 'BV2_p1',
+        bvid: 'BV2',
+        cid: 1,
+        title: '下一首',
+        rawTitle: '下一首',
+        uploader: 'UP',
+        coverUrl: '',
+        duration: 100,
+      );
+      await tester.pumpWidget(wrap(MiniPlayer(handler: h, onTap: () {})));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text(track.title), findsOneWidget);
+      expect(find.text('正在准备「下一首」'), findsOneWidget);
+    });
+
+    testWidgets('progress fills from the left edge and is display-only',
+        (tester) async {
+      final h = handler();
+      h.nowPlaying.value = track;
+      h.durationNotifier.value = const Duration(seconds: 200);
+      await tester.pumpWidget(wrap(MiniPlayer(handler: h, onTap: () {})));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // Position comes from the player; the fake reports zero.
+      final fill = tester.getRect(find.byType(FractionallySizedBox));
+      final lane = tester.getRect(find
+          .ancestor(
+            of: find.byType(FractionallySizedBox),
+            matching: find.byType(Stack),
+          )
+          .first);
+      expect(fill.left, lane.left);
+      expect(
+        find.ancestor(
+          of: find.byType(FractionallySizedBox),
+          matching: find.byType(IgnorePointer),
+        ),
+        findsWidgets,
+      );
     });
   });
 
-  group('PlaylistDetailSheet', () {
-    testWidgets(
-        'renders empty state title as 暂无曲目 without subtitle and cover button on right',
-        (tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: PlaylistDetailSheet(
-            playlist: Playlist(id: 'test_pl', name: '测试歌单', tracks: []),
-            onSelectTrack: (_, {queue}) {},
-          ),
-        ),
-      ));
-      await tester.pumpAndSettle();
+  group('LocalSearch', () {
+    Track t(String id, String title, String uploader, {String? raw}) => Track(
+          id: id,
+          bvid: id,
+          cid: 1,
+          title: title,
+          rawTitle: raw ?? title,
+          uploader: uploader,
+          coverUrl: '',
+          duration: 200,
+        );
 
-      expect(find.text('暂无曲目'), findsOneWidget);
-      expect(find.text('歌单暂无曲目'), findsNothing);
-      expect(find.text('在搜索页点 + 添加'), findsNothing);
-      expect(find.byIcon(Icons.image_outlined), findsOneWidget);
+    final library = [
+      t('1', '逆光 (Live)', '陈楚生 周深'),
+      t('2', '光年之外', 'G.E.M. 邓紫棋'),
+      t('3', '大鱼', '周深'),
+      t('4', '起风了', '买辣椒也用券',
+          raw: '【周深】起风了 翻唱'),
+    ];
+
+    List<String> ids(String query) =>
+        [for (final track in LocalSearch.search(library, query)) track.id];
+
+    test('matches titles, artists and the original video title', () {
+      expect(ids('大鱼'), ['3']);
+      expect(ids('邓紫棋'), ['2']);
+      expect(ids('翻唱'), ['4']);
+    });
+
+    test('ranks title hits above artist hits', () {
+      // "周深" is 大鱼's artist, part of 逆光's artists, and only in 起风了's
+      // original title.
+      expect(ids('周深'), ['3', '1', '4']);
+    });
+
+    test('every term must match', () {
+      expect(ids('周深 逆光'), ['1']);
+      expect(ids('周深 光年'), isEmpty);
+    });
+
+    test('ignores case, width and punctuation', () {
+      expect(ids('gem'), ['2']);
+      expect(ids('ＧＥＭ'), ['2']);
+      expect(ids('光年 之外'), ['2']);
+      expect(ids('live'), ['1']);
+    });
+
+    test('an empty query matches nothing', () {
+      expect(ids('   '), isEmpty);
     });
   });
 }

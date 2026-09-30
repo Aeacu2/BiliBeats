@@ -1,7 +1,7 @@
 name: bilibeat
-description: "A premium Apple Music-inspired Bilibili audio player for Android & iOS."
+description: "BiliBeats — a premium Bilibili audio player for Android & iOS."
 publish_to: 'none'
-version: 4.0.0+51
+version: 5.0.0+52
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   just_audio: ^0.10.6
   audio_service: ^0.18.19
+  audio_session: ^0.2.4
   path_provider: ^2.1.6
   crypto: ^3.0.7
   image_picker: ^1.2.3

@@ -1,11 +1,11 @@
 {
-    "name": "BiliBeat",
-    "short_name": "BiliBeat",
+    "name": "BiliBeats",
+    "short_name": "BiliBeats",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#08080A",
     "theme_color": "#08080A",
-    "description": "BiliBeat — 在手机上听 B 站音乐。搜索、播放、下载你收藏的 B 站视频音频。",
+    "description": "BiliBeats — 在手机上听 B 站音乐。搜索、播放、下载你收藏的 B 站视频音频。",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

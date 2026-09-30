@@ -77,7 +77,11 @@ class Track {
     final rawTitle = map['title'];
     final title = rawTitle is String ? rawTitle : (rawTitle?.toString() ?? '未知曲目');
     final rawRawTitle = map['rawTitle'];
-    final rawTitleStr = rawRawTitle is String ? rawRawTitle : (rawRawTitle?.toString() ?? title);
+    // Falls back to the persisted title only — never the "未知曲目"
+    // placeholder, which 智能识别 would otherwise parse as if it were real.
+    final rawTitleStr = rawRawTitle is String
+        ? rawRawTitle
+        : (rawRawTitle?.toString() ?? (rawTitle is String ? rawTitle : ''));
     final rawUploader = map['uploader'];
     final uploader = rawUploader is String ? rawUploader : (rawUploader?.toString() ?? '未知UP主');
     final rawCover = map['coverUrl'];
@@ -163,8 +167,3 @@ class TrackNotifier extends ChangeNotifier implements ValueListenable<Track?> {
     notifyListeners();
   }
 }
-
-/// Callback for "play this track", optionally within a specific queue
-/// context (e.g. a playlist/favorites). When [queue] is null, the caller's
-/// default library (all downloaded tracks) is used.
-typedef TrackAction = void Function(Track track, {List<Track>? queue});

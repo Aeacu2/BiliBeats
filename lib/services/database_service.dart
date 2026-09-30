@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/track.dart';
 import '../models/playlist.dart';
 import '../models/lyric_line.dart';
+import '../models/playback_state.dart';
 import 'audio_download_service.dart';
 
 /// Parse helpers run inside a background isolate (via [compute]): a large
@@ -695,6 +696,7 @@ class DatabaseService {
     await _ensureLoaded();
     await AudioDownloadService.delete(track);
     _downloadedTracks.removeWhere((t) => t.id == track.id);
+    _downloadRemovedController.add({track.id});
     await _persistDownloaded();
     if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
   }
@@ -706,6 +708,7 @@ class DatabaseService {
     await _ensureLoaded();
     await AudioDownloadService.delete(track);
     _downloadedTracks.removeWhere((t) => t.id == track.id);
+    _downloadRemovedController.add({track.id});
     await _persistDownloaded();
     for (final pl in _playlists) {
       pl.tracks.removeWhere((t) => t.id == track.id);
@@ -724,6 +727,85 @@ class DatabaseService {
   static Future<List<Track>> getDownloadedTracks() async {
     await _ensureLoaded();
     return List<Track>.from(_downloadedTracks);
+  }
+
+  /// Ids whose local audio was just deleted. The player drops them from its
+  /// queue so it never tries to open a file that is gone.
+  static final StreamController<Set<String>> _downloadRemovedController =
+      StreamController<Set<String>>.broadcast();
+
+  static Stream<Set<String>> get downloadRemovedStream =>
+      _downloadRemovedController.stream;
+
+  // ---------------------------------------------------------------------------
+  // Small UI preferences (dismissed hints, sort order)
+  // ---------------------------------------------------------------------------
+
+  static Map<String, dynamic>? _prefs;
+
+  static Future<Map<String, dynamic>> _loadPrefs() async {
+    final cached = _prefs;
+    if (cached != null) return cached;
+    var loaded = <String, dynamic>{};
+    try {
+      final file = File('${await _docs()}/bilibeat_prefs.json');
+      if (await file.exists()) {
+        final payload = _readPayload(jsonDecode(await file.readAsString()));
+        if (payload is Map) loaded = Map<String, dynamic>.from(payload);
+      }
+    } catch (e) {
+      debugPrint('DatabaseService load prefs skipped: $e');
+    }
+    return _prefs ??= loaded;
+  }
+
+  static Future<Object?> getPref(String key) async => (await _loadPrefs())[key];
+
+  static Future<void> setPref(String key, Object? value) async {
+    final prefs = await _loadPrefs();
+    if (value == null) {
+      prefs.remove(key);
+    } else {
+      prefs[key] = value;
+    }
+    try {
+      await _writeJsonAtomically(
+        '${await _docs()}/bilibeat_prefs.json',
+        _envelope(prefs),
+      );
+    } catch (e) {
+      debugPrint('DatabaseService setPref error: $e');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Playback session (survives process death)
+  // ---------------------------------------------------------------------------
+
+  static Future<PlaybackSession?> loadPlaybackSession() async {
+    try {
+      final dir = await _docs();
+      final file = File('$dir/bilibeat_session.json');
+      if (!await file.exists()) return null;
+      return PlaybackSession.fromMap(
+        _readPayload(jsonDecode(await file.readAsString())),
+      );
+    } catch (e) {
+      debugPrint('DatabaseService loadPlaybackSession skipped: $e');
+      return null;
+    }
+  }
+
+  static Future<void> savePlaybackSession(PlaybackSession session) async {
+    try {
+      final dir = await _docs();
+      await _writeJsonAtomically(
+        '$dir/bilibeat_session.json',
+        _envelope(session.toMap()),
+      );
+    } catch (e) {
+      debugPrint('DatabaseService savePlaybackSession error: $e');
+    }
   }
 
   /// Changes synchronously whenever the user deliberately selects lyrics.

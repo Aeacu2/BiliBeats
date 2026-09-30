@@ -1,8 +1,14 @@
 package com.bilibeat.bilibeat
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -20,8 +26,41 @@ class MainActivity : AudioServiceActivity() {
                     requestNotificationPermission()
                     result.success(null)
                 }
+                "isIgnoringBatteryOptimizations" -> {
+                    result.success(isIgnoringBatteryOptimizations())
+                }
+                "requestIgnoreBatteryOptimizations" -> {
+                    result.success(requestIgnoreBatteryOptimizations())
+                }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return power.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /// Several OEM builds (MIUI, EMUI, ColorOS, …) kill background media apps
+    /// that are under battery optimization even while they play. Asking to be
+    /// exempted is the standard remedy; the user confirms in a system dialog.
+    @SuppressLint("BatteryLife")
+    private fun requestIgnoreBatteryOptimizations(): Boolean {
+        if (isIgnoringBatteryOptimizations()) return true
+        return try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(Uri.parse("package:$packageName")),
+            )
+            false
+        } catch (e: Exception) {
+            // Some builds hide the direct dialog; fall back to the list.
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Exception) {
+            }
+            false
         }
     }
 
