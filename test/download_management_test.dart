@@ -2,6 +2,7 @@ import 'package:bilibeat/models/track.dart';
 import 'package:bilibeat/services/audio_download_service.dart';
 import 'package:bilibeat/services/database_service.dart';
 import 'package:bilibeat/services/download_manager.dart';
+import 'package:bilibeat/utils/format.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
@@ -97,5 +98,32 @@ void main() {
 
     final breakdown = await AudioDownloadService.storageBreakdown();
     expect(breakdown[track.id], greaterThan(1024));
+  });
+
+  group('formatBytes', () {
+    test('formats zero and small byte counts in B', () {
+      expect(formatBytes(0), '0 B');
+      expect(formatBytes(-10), '0 B');
+      expect(formatBytes(512), '512 B');
+      expect(formatBytes(1023), '1023 B');
+    });
+
+    test('formats kilobytes correctly', () {
+      expect(formatBytes(1024), '1.0 KB');
+      expect(formatBytes(1536), '1.5 KB');
+      expect(formatBytes(50 * 1024), '50.0 KB');
+      expect(formatBytes(512 * 1024), '512 KB');
+    });
+
+    test('formats megabytes correctly without inflating to GB', () {
+      expect(formatBytes(1024 * 1024), '1.0 MB');
+      expect(formatBytes((5.4 * 1024 * 1024).round()), '5.4 MB');
+      expect(formatBytes(120 * 1024 * 1024), '120 MB');
+    });
+
+    test('formats gigabytes correctly', () {
+      expect(formatBytes(1024 * 1024 * 1024), '1.0 GB');
+      expect(formatBytes((2.5 * 1024 * 1024 * 1024).round()), '2.5 GB');
+    });
   });
 }

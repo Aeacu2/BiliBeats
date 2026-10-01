@@ -12,20 +12,8 @@ import 'empty_state.dart';
 import 'sheet.dart';
 import 'song_tile.dart';
 import 'track_download_button.dart';
+import '../utils/format.dart';
 
-String formatBytes(int bytes) {
-  if (bytes < 1024) return '$bytes B';
-  const units = ['KB', 'MB', 'GB'];
-  var value = bytes.toDouble();
-  var unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  final text =
-      value >= 100 ? value.toStringAsFixed(0) : value.toStringAsFixed(1);
-  return '$text ${units[unit]}';
-}
 
 /// Downloads in one list: what is in flight, what failed (retry or dismiss),
 /// and what is stored, with its size and a way to remove it.
