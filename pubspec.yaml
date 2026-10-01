@@ -1,7 +1,7 @@
 name: bilibeat
 description: "BiliBeats — a premium Bilibili audio player for Android & iOS."
 publish_to: 'none'
-version: 5.0.0+52
+version: 6.0.0+53
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
