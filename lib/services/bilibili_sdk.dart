@@ -203,6 +203,10 @@ class BilibiliSdk {
   }
 
   // Fetch audio stream URL (prefers standard MP4/M4A container for native MediaPlayer compatibility)
+  ///
+  /// The result also carries `loudness` (integrated LUFS, as a string) when
+  /// Bilibili has measured the video — the same figure its own player uses
+  /// for 音量均衡.
   static Future<Map<String, String>?> fetchAudioStream(
       String bvid, int cid) async {
     try {
@@ -222,6 +226,8 @@ class BilibiliSdk {
         'fnval': 16,
         'fnver': 0,
         'fourk': 1,
+        // Asks for the `volume` block (EBU R128 measurements).
+        'voice_balance': 1,
       };
 
       final signed = await WbiSigner.signParams(rawParams);
@@ -234,6 +240,10 @@ class BilibiliSdk {
       if (body != null) {
         final json = jsonDecode(body);
         if (json['code'] == 0 && json['data'] != null) {
+          final measured = json['data']?['volume']?['measured_i'];
+          final loudness = <String, String>{
+            if (measured is num && measured < 0) 'loudness': '$measured',
+          };
           // Check durl list (standard m4a/mp4 container)
           final durlList = json['data']?['durl'] as List? ?? [];
           if (durlList.isNotEmpty) {
@@ -242,6 +252,7 @@ class BilibiliSdk {
               return {
                 'url': streamUrl.replaceAll('http:', 'https:'),
                 'quality': '高品质 AAC/M4A',
+                ...loudness,
               };
             }
           }
@@ -266,6 +277,7 @@ class BilibiliSdk {
               return {
                 'url': streamUrl.replaceAll('http:', 'https:'),
                 'quality': '320k DASH',
+                ...loudness,
               };
             }
           }
@@ -276,6 +288,13 @@ class BilibiliSdk {
     }
 
     return null;
+  }
+
+  /// Integrated loudness (LUFS) of one video part, or null when Bilibili has
+  /// no measurement or the request failed.
+  static Future<double?> fetchLoudness(String bvid, int cid) async {
+    final info = await fetchAudioStream(bvid, cid);
+    return double.tryParse(info?['loudness'] ?? '');
   }
 
   // Search Bilibili catalog for ANY query.

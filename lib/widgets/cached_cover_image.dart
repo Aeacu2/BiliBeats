@@ -39,6 +39,10 @@ class CachedCoverImage extends StatefulWidget {
     final uri = Uri.tryParse(url);
     if (uri == null) return url;
     final host = uri.host;
+    // NetEase's image CDN (album artwork) resizes with a query parameter.
+    if (host.endsWith('music.126.net')) {
+      return uri.hasQuery ? url : '$url?param=${w}y$h';
+    }
     final isBili = host.contains('hdslb.com') ||
         host.contains('biliimg.com') ||
         host.contains('bilivideo.com') ||

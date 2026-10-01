@@ -30,6 +30,10 @@ class FakeAudioPlayer implements ja.AudioPlayer {
   int pauseCalls = 0;
   int stopCalls = 0;
   int setSourceCalls = 0;
+  double volumeValue = 1.0;
+
+  @override
+  Future<void> setVolume(double volume) async => volumeValue = volume;
 
   final _sequenceEvents = StreamController<ja.SequenceState>.broadcast();
   final _playingEvents = StreamController<bool>.broadcast();

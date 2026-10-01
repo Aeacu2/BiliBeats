@@ -39,6 +39,7 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+test/failures/
 
 # Symbolication related
 app.*.symbols

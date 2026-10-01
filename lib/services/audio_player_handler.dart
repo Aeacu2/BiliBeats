@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:audio_service/audio_service.dart';
@@ -9,6 +10,7 @@ import 'package:just_audio/just_audio.dart' as ja;
 import '../models/playback_state.dart';
 import '../models/track.dart';
 import 'audio_download_service.dart';
+import 'bilibili_sdk.dart';
 import 'database_service.dart';
 
 export '../models/playback_state.dart';
@@ -37,25 +39,60 @@ export '../models/playback_state.dart';
 /// never has to start a foreground service from the background — which
 /// Android 12+ forbids and answers by killing the process. After a long
 /// pause the service is stopped deliberately ([_idleStopAfter]).
+///
+/// **Even loudness.** Each track carries Bilibili's own EBU R128 loudness
+/// measurement; playback is levelled to one target ([_targetLufs]) so a
+/// quiet live recording and a loud studio master sit at the same volume.
 class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
-  BiliBeatAudioHandler({
+  /// [loudnessLookup] fetches a missing loudness figure for older downloads;
+  /// it defaults to Bilibili for the real player and to nothing when a
+  /// [player] is injected (tests stay offline).
+  factory BiliBeatAudioHandler({
     ja.AudioPlayer? player,
     bool manageAudioSession = true,
-  }) : _player = player ??
-            ja.AudioPlayer(
-              // Interruptions are handled below so a resume can be cancelled
-              // once the service has been stopped.
-              handleInterruptions: false,
-              // A missing or corrupt file skips ahead instead of stalling.
-              maxSkipsOnError: 3,
-            ) {
+    Future<double?> Function(String bvid, int cid)? loudnessLookup,
+  }) {
+    if (player != null) {
+      return BiliBeatAudioHandler._(
+          player, null, manageAudioSession, loudnessLookup);
+    }
+    // Android cannot raise a player's volume above 1.0; quiet tracks are
+    // lifted by the platform's loudness enhancer instead.
+    final enhancer =
+        !kIsWeb && Platform.isAndroid ? ja.AndroidLoudnessEnhancer() : null;
+    return BiliBeatAudioHandler._(
+      ja.AudioPlayer(
+        // Interruptions are handled below so a resume can be cancelled
+        // once the service has been stopped.
+        handleInterruptions: false,
+        // A missing or corrupt file skips ahead instead of stalling.
+        maxSkipsOnError: 3,
+        audioPipeline: enhancer == null
+            ? null
+            : ja.AudioPipeline(androidAudioEffects: [enhancer]),
+      ),
+      enhancer,
+      manageAudioSession,
+      loudnessLookup ?? BilibiliSdk.fetchLoudness,
+    );
+  }
+
+  BiliBeatAudioHandler._(
+    this._player,
+    this._enhancer,
+    bool manageAudioSession,
+    this._loudnessLookup,
+  ) {
     _listenToPlayer();
     _downloadRemovedSub =
         DatabaseService.downloadRemovedStream.listen(removeTracks);
     if (manageAudioSession) unawaited(_configureAudioSession());
+    unawaited(_loadNormalizationPref());
   }
 
   final ja.AudioPlayer _player;
+  final ja.AndroidLoudnessEnhancer? _enhancer;
+  final Future<double?> Function(String bvid, int cid)? _loudnessLookup;
 
   // ---------------------------------------------------------------------------
   // Observable state (read by the UI; all derived from the native player)
@@ -77,6 +114,9 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
 
   final ValueNotifier<SleepTimerState> sleepTimerNotifier =
       ValueNotifier(SleepTimerState.off);
+
+  /// Whether tracks are levelled to a common loudness (音量均衡).
+  final ValueNotifier<bool> normalizeVolume = ValueNotifier(true);
 
   final StreamController<String> _messages =
       StreamController<String>.broadcast();
@@ -192,6 +232,7 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
       // Same track, edited metadata.
       nowPlaying.value = current;
       mediaItem.add(_mediaItemFor(current));
+      _applyLoudness(current);
     }
 
     final old = queueNotifier.value;
@@ -225,10 +266,12 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
 
   void _announce(Track? track) {
     nowPlaying.value = track;
+    _applyLoudness(track);
     if (track == null) {
       durationNotifier.value = Duration.zero;
       return;
     }
+    _backfillLoudness(track);
 
     final known = _player.duration;
     durationNotifier.value = known != null && known > Duration.zero
@@ -244,7 +287,9 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
     durationNotifier.value = duration;
     final track = nowPlaying.value;
     final item = mediaItem.value;
-    if (track != null && item != null && item.id == track.id &&
+    if (track != null &&
+        item != null &&
+        item.id == track.id &&
         item.duration != duration) {
       mediaItem.add(item.copyWith(duration: duration));
     }
@@ -350,6 +395,91 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
                   : track.coverUrl,
             ),
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Loudness normalization
+  // ---------------------------------------------------------------------------
+
+  /// The level every track is brought to. −14 LUFS is what Bilibili's own
+  /// player (and most streaming services) normalize to.
+  static const double _targetLufs = -14.0;
+
+  /// Assumed for tracks not measured yet — typical for uploaded music — so
+  /// an unknown track does not blare next to levelled ones.
+  static const double _assumedLufs = -11.0;
+
+  static const double _maxCutDb = 14.0;
+  static const double _maxBoostDb = 8.0;
+
+  final Set<String> _loudnessRequested = {};
+
+  /// Gain in dB that brings [loudness] to the target (0 when switched off).
+  @visibleForTesting
+  double gainFor(double? loudness) {
+    if (!normalizeVolume.value) return 0.0;
+    return (_targetLufs - (loudness ?? _assumedLufs))
+        .clamp(-_maxCutDb, _maxBoostDb)
+        .toDouble();
+  }
+
+  void _applyLoudness(Track? track) {
+    final gain = track == null ? 0.0 : gainFor(track.loudness);
+    // Cuts are plain volume; boosts need the enhancer (Android only — on
+    // other platforms a quiet track simply plays at full volume).
+    final volume = gain >= 0 ? 1.0 : pow(10, gain / 20).toDouble();
+    unawaited(_player.setVolume(volume).catchError((Object error) {
+      debugPrint('setVolume failed: $error');
+    }));
+    final enhancer = _enhancer;
+    if (enhancer != null) {
+      unawaited(() async {
+        try {
+          await enhancer.setTargetGain(gain > 0 ? gain : 0.0);
+          await enhancer.setEnabled(gain > 0);
+        } catch (error) {
+          debugPrint('Loudness enhancer failed: $error');
+        }
+      }());
+    }
+  }
+
+  /// Downloads made before loudness was recorded get theirs the first time
+  /// they play (one small request, once per track).
+  void _backfillLoudness(Track track) {
+    final lookup = _loudnessLookup;
+    if (lookup == null ||
+        track.loudness != null ||
+        track.bvid.isEmpty ||
+        !_loudnessRequested.add(track.id)) {
+      return;
+    }
+    unawaited(() async {
+      try {
+        final loudness = await lookup(track.bvid, track.cid);
+        if (loudness == null) return;
+        await DatabaseService.setTrackLoudness(track.id, loudness);
+        _latest[track.id] = _resolve(track).copyWith(loudness: loudness);
+        _publish();
+      } catch (error) {
+        debugPrint('Loudness lookup failed: $error');
+      }
+    }());
+  }
+
+  Future<void> setNormalizeVolume(bool on) async {
+    if (normalizeVolume.value == on) return;
+    normalizeVolume.value = on;
+    _applyLoudness(nowPlaying.value);
+    await DatabaseService.setPref('normalizeVolume', on);
+  }
+
+  Future<void> _loadNormalizationPref() async {
+    final saved = await DatabaseService.getPref('normalizeVolume');
+    if (saved == false) {
+      normalizeVolume.value = false;
+      _applyLoudness(nowPlaying.value);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -667,8 +797,7 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> skipToPrevious() async {
-    if (_navTarget == null &&
-        _player.position > const Duration(seconds: 3)) {
+    if (_navTarget == null && _player.position > const Duration(seconds: 3)) {
       await _player.seek(Duration.zero);
       return;
     }

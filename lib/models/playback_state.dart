@@ -107,7 +107,10 @@ class PlaybackSession {
     final loopName = raw['loop'];
     final positionMs = raw['positionMs'];
     return PlaybackSession(
-      trackIds: [for (final id in ids) if (id is String && id.isNotEmpty) id],
+      trackIds: [
+        for (final id in ids)
+          if (id is String && id.isNotEmpty) id
+      ],
       currentId: raw['currentId'] is String ? raw['currentId'] as String : null,
       position: Duration(
         milliseconds: positionMs is num ? positionMs.toInt() : 0,

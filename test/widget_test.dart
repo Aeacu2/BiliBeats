@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:bilibeat/models/lyric_line.dart';
+import 'package:bilibeat/models/lyrics.dart';
 import 'package:bilibeat/services/audio_player_handler.dart';
 import 'package:bilibeat/services/local_search.dart';
 import 'package:bilibeat/services/lyrics_engine.dart';
@@ -11,7 +11,7 @@ import 'package:bilibeat/models/track.dart';
 import 'package:bilibeat/widgets/marquee_text.dart';
 import 'package:bilibeat/widgets/expand_from_card.dart';
 import 'package:bilibeat/widgets/mini_player.dart';
-import 'package:bilibeat/widgets/synced_lyrics_view.dart';
+import 'package:bilibeat/widgets/lyrics_view.dart';
 
 import 'fake_audio_player.dart';
 
@@ -423,137 +423,132 @@ void main() {
     });
   });
 
-  group('SyncedLyricsView', () {
+  group('LyricsView', () {
     List<LyricLine> lines() =>
         List.generate(30, (i) => LyricLine(time: i * 4.0, text: '第 $i 行歌词内容'));
 
     Widget host({
-      required List<LyricLine> data,
+      required Lyrics lyrics,
       ValueNotifier<Duration>? position,
-      void Function(double)? onSeek,
-      VoidCallback? onOpenEditor,
+      ValueChanged<Duration>? onSeek,
       bool calibrating = false,
-      void Function(double)? onCalibrateTap,
-      bool autoFollow = true,
-      double offset = 0.0,
+      ValueChanged<double>? onCalibrate,
     }) {
       return MaterialApp(
         home: Scaffold(
           body: SizedBox(
             height: 500,
-            child: SyncedLyricsView(
-              lines: data,
-              positionNotifier: position ?? ValueNotifier(Duration.zero),
+            child: LyricsView(
+              lyrics: lyrics,
+              position: position ?? ValueNotifier(Duration.zero),
               onSeek: onSeek,
-              onOpenEditor: onOpenEditor,
               calibrating: calibrating,
-              onCalibrateTap: onCalibrateTap,
-              autoFollow: autoFollow,
-              offset: offset,
+              onCalibrate: onCalibrate,
             ),
           ),
         ),
       );
     }
 
-    testWidgets('empty state offers the editor action', (tester) async {
-      var opened = false;
+    Lyrics synced({double offset = 0}) =>
+        Lyrics(source: 'netease', lines: lines(), offset: offset);
+
+    testWidgets('tapping a line seeks to its timestamp', (tester) async {
+      Duration? sought;
       await tester
-          .pumpWidget(host(data: const [], onOpenEditor: () => opened = true));
-
-      expect(find.text('暂无同步歌词'), findsOneWidget);
-      await tester.tap(find.text('搜索或粘贴歌词'));
-      expect(opened, isTrue);
-    });
-
-    testWidgets('tapping a line seeks to its timestamp when not calibrating',
-        (tester) async {
-      double? sought;
-      await tester.pumpWidget(host(data: lines(), onSeek: (s) => sought = s));
-      await tester.pump();
+          .pumpWidget(host(lyrics: synced(), onSeek: (d) => sought = d));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.text('第 2 行歌词内容'));
-      expect(sought, 8.0);
+      expect(sought, const Duration(seconds: 8));
     });
 
-    testWidgets('user scrolling suspends auto-follow and offers to resume',
+    testWidgets('a calibrated offset moves both the highlight and the seek',
+        (tester) async {
+      Duration? sought;
+      await tester.pumpWidget(
+          host(lyrics: synced(offset: 1.5), onSeek: (d) => sought = d));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('第 2 行歌词内容'));
+      expect(sought, const Duration(milliseconds: 9500));
+    });
+
+    testWidgets('user scrolling suspends following and offers to resume',
         (tester) async {
       final position = ValueNotifier(Duration.zero);
-      await tester.pumpWidget(host(data: lines(), position: position));
-      await tester.pump();
+      await tester.pumpWidget(host(lyrics: synced(), position: position));
+      await tester.pumpAndSettle();
 
-      expect(find.text('回到当前'), findsNothing);
+      expect(find.byTooltip('回到当前'), findsNothing);
 
-      await tester.drag(find.byType(ListView), const Offset(0, -200));
+      await tester.drag(
+          find.byType(SingleChildScrollView), const Offset(0, -200));
       await tester.pump();
-      expect(find.text('回到当前'), findsOneWidget,
-          reason: 'auto-scroll must yield while the user is reading ahead');
+      expect(find.byTooltip('回到当前'), findsOneWidget,
+          reason: 'following must yield while the user is reading ahead');
 
       // Playback continuing must not yank the list back mid-browse.
+      final scrolled = tester.getTopLeft(find.text('第 6 行歌词内容')).dy;
       position.value = const Duration(seconds: 40);
       await tester.pump(const Duration(milliseconds: 200));
-      expect(find.text('回到当前'), findsOneWidget);
+      expect(tester.getTopLeft(find.text('第 6 行歌词内容')).dy, scrolled);
 
-      await tester.tap(find.text('回到当前'));
+      await tester.tap(find.byTooltip('回到当前'));
       await tester.pumpAndSettle();
-      expect(find.text('回到当前'), findsNothing);
+      expect(find.byTooltip('回到当前'), findsNothing);
     });
 
-    testWidgets('armed, tapping a line reports tap calibration offset',
+    testWidgets('following resumes by itself after a pause', (tester) async {
+      await tester.pumpWidget(host(lyrics: synced()));
+      await tester.pumpAndSettle();
+      await tester.drag(
+          find.byType(SingleChildScrollView), const Offset(0, -200));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('回到当前'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('回到当前'), findsNothing);
+    });
+
+    testWidgets('calibrating, a tap reports the offset instead of seeking',
         (tester) async {
       final applied = <double>[];
+      Duration? sought;
       await tester.pumpWidget(host(
-        data: lines(),
+        lyrics: synced(),
         position: ValueNotifier(const Duration(seconds: 10)),
+        onSeek: (d) => sought = d,
         calibrating: true,
-        onCalibrateTap: applied.add,
+        onCalibrate: applied.add,
       ));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('第 2 行歌词内容'));
       await tester.pumpAndSettle();
 
-      // Line 2 time is 8.0s, playhead is at 10.0s. Difference - reaction time (0.2s) = 1.8s
+      // Line 2 is at 8.0s and the playhead at 10.0s; minus the reaction
+      // time (0.2s) the lyrics are 1.8s early.
       expect(applied, hasLength(1));
       expect(applied.single, closeTo(1.8, 0.01));
+      expect(sought, isNull);
     });
 
-    testWidgets('calibration mode shows tap instruction hint', (tester) async {
-      await tester.pumpWidget(
-          host(data: lines(), calibrating: true, onCalibrateTap: (_) {}));
-      await tester.pumpAndSettle();
-      expect(find.text('点击正在唱的那行歌词'), findsOneWidget);
-    });
-
-    testWidgets('unarmed, a drag scrolls and calibrates nothing',
-        (tester) async {
-      final applied = <double>[];
-      await tester.pumpWidget(host(data: lines(), onCalibrateTap: applied.add));
-      await tester.pump();
-
-      await tester.drag(find.byType(ListView), const Offset(0, -200));
+    testWidgets('lyrics without timestamps are a plain page', (tester) async {
+      Duration? sought;
+      await tester.pumpWidget(host(
+        lyrics: const Lyrics(source: 'user', lines: [
+          LyricLine(time: 0, text: '没有时间轴的第一句'),
+          LyricLine(time: 0, text: '没有时间轴的第二句'),
+        ]),
+        onSeek: (d) => sought = d,
+      ));
       await tester.pumpAndSettle();
 
-      expect(applied, isEmpty);
-      expect(find.text('回到当前'), findsOneWidget);
-    });
-
-    testWidgets('a preview with a frozen clock never scrolls itself back',
-        (tester) async {
-      // Auto-follow yanking the list back to 0:00 five seconds after every
-      // scroll made the lyrics unreadable in the editor's preview.
-      await tester.pumpWidget(host(data: lines(), autoFollow: false));
-      await tester.pumpAndSettle();
-
-      await tester.drag(find.byType(ListView), const Offset(0, -300));
-      await tester.pumpAndSettle();
-      final scrolled = tester.getTopLeft(find.text('第 5 行歌词内容')).dy;
-
-      await tester.pump(const Duration(seconds: 8));
-      await tester.pumpAndSettle();
-
-      expect(tester.getTopLeft(find.text('第 5 行歌词内容')).dy, scrolled);
-      expect(find.text('回到当前'), findsNothing);
+      await tester.tap(find.text('没有时间轴的第二句'));
+      expect(sought, isNull, reason: 'there is no time to seek to');
+      expect(tester.takeException(), isNull);
     });
   });
 
@@ -610,11 +605,23 @@ void main() {
       duration: 200,
     );
 
-    testWidgets('renders an empty state with no track', (tester) async {
-      await tester.pumpWidget(wrap(MiniPlayer(handler: handler(), onTap: () {})));
+    testWidgets('is absent with nothing playing', (tester) async {
+      await tester
+          .pumpWidget(wrap(MiniPlayer(handler: handler(), onTap: () {})));
 
-      expect(find.text('选择一首歌，开始聆听'), findsOneWidget);
+      expect(find.byType(IconButton), findsNothing);
+      expect(find.byType(Text), findsNothing);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('appears for a first song that is still downloading',
+        (tester) async {
+      final h = handler();
+      h.preparing.value = track;
+      await tester.pumpWidget(wrap(MiniPlayer(handler: h, onTap: () {})));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('正在准备「${track.title}」'), findsOneWidget);
     });
 
     testWidgets('shows the playing track and its play state', (tester) async {
@@ -697,8 +704,7 @@ void main() {
       t('1', '逆光 (Live)', '陈楚生 周深'),
       t('2', '光年之外', 'G.E.M. 邓紫棋'),
       t('3', '大鱼', '周深'),
-      t('4', '起风了', '买辣椒也用券',
-          raw: '【周深】起风了 翻唱'),
+      t('4', '起风了', '买辣椒也用券', raw: '【周深】起风了 翻唱'),
     ];
 
     List<String> ids(String query) =>

@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'app/app_services.dart';
 import 'app/app_shell.dart';
 import 'services/audio_player_handler.dart';
+import 'services/track_naming.dart';
 import 'theme/app_theme.dart';
 
 Future<void> main() async {
@@ -47,6 +48,7 @@ Future<void> main() async {
   );
 
   AppServices.init(handler);
+  unawaited(TrackNaming.init(handler));
   // Bring back the last queue, song and position (paused), so a process
   // killed in the background resumes exactly where it was.
   unawaited(handler.restoreSession());
@@ -56,8 +58,8 @@ Future<void> main() async {
   if (!kIsWeb && Platform.isAndroid) {
     const channel = MethodChannel('bilibeat/permissions');
     unawaited(channel.invokeMethod<void>('requestNotifications').catchError(
-      (Object _) {},
-    ));
+          (Object _) {},
+        ));
   }
 
   runApp(const BiliBeatApp());

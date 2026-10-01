@@ -1,16 +1,13 @@
 import 'dart:io';
 
-import 'package:bilibeat/models/lyric_line.dart';
-import 'package:bilibeat/services/database_service.dart';
+import 'package:bilibeat/models/lyrics.dart';
+import 'package:bilibeat/services/lyrics_store.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Targeted tests for the lyric-ownership patch (Prompt 2):
-/// UI load generations live in widgets (not unit-testable without a running
-/// app), so these cover the [DatabaseService] half of the contract —
-/// revision registration, stale-commit rejection, session reads, and
-/// failure propagation. Widget/handler halves are verified by review +
-/// manual QA (see summary).
+/// Who owns a song's lyrics: [LyricsStore]'s half of the contract — a pin
+/// registers at once, beats any automatic lookup already in flight, is
+/// never evicted, and reports a failed write without losing the choice.
 ///
 /// Each test uses unique track ids: the service keeps process-wide static
 /// state with no reset hook, and ids must not cross-talk.
@@ -30,10 +27,10 @@ void main() {
     });
   });
 
-  LyricsResult res(String source, String title, String text) => LyricsResult(
+  Lyrics res(String source, String title, String text) => Lyrics(
         source: source,
-        songTitle: title,
-        artistName: 'artist',
+        title: title,
+        artist: 'artist',
         lines: [LyricLine(time: 1.0, text: text)],
       );
 
@@ -42,18 +39,18 @@ void main() {
     final manual = res('user', 'manual pick', 'manual line');
     final auto = res('netease', 'auto result', 'auto line');
 
-    final revBefore = DatabaseService.lyricsRevisionFor(id);
-    await DatabaseService.cacheLyrics(id, manual);
+    final revBefore = LyricsStore.revisionOf(id);
+    await LyricsStore.pin(id, manual);
 
-    final accepted = await DatabaseService.cacheAutomaticLyrics(
+    final accepted = await LyricsStore.putAutomatic(
       id,
       auto,
       expectedRevision: revBefore,
     );
 
     expect(accepted, isFalse);
-    final cached = await DatabaseService.getCachedLyrics(id);
-    expect(cached?.songTitle, 'manual pick');
+    final cached = await LyricsStore.get(id);
+    expect(cached?.title, 'manual pick');
     expect(cached?.lines.single.text, 'manual line');
   });
 
@@ -61,16 +58,16 @@ void main() {
     const id = 'own-t2-auto-clean';
     final auto = res('netease', 'auto result', 'auto line');
 
-    final rev = DatabaseService.lyricsRevisionFor(id);
-    final accepted = await DatabaseService.cacheAutomaticLyrics(
+    final rev = LyricsStore.revisionOf(id);
+    final accepted = await LyricsStore.putAutomatic(
       id,
       auto,
       expectedRevision: rev,
     );
 
     expect(accepted, isTrue);
-    final cached = await DatabaseService.getCachedLyrics(id);
-    expect(cached?.songTitle, 'auto result');
+    final cached = await LyricsStore.get(id);
+    expect(cached?.title, 'auto result');
   });
 
   test('manual choice 2 supersedes manual choice 1', () async {
@@ -78,12 +75,12 @@ void main() {
     final first = res('netease', 'choice one', 'line one');
     final second = res('user', 'choice two', 'line two');
 
-    final save1 = DatabaseService.cacheLyrics(id, first);
-    final save2 = DatabaseService.cacheLyrics(id, second);
+    final save1 = LyricsStore.pin(id, first);
+    final save2 = LyricsStore.pin(id, second);
     await Future.wait([save1, save2]);
 
-    final cached = await DatabaseService.getCachedLyrics(id);
-    expect(cached?.songTitle, 'choice two');
+    final cached = await LyricsStore.get(id);
+    expect(cached?.title, 'choice two');
     expect(cached?.lines.single.text, 'line two');
   });
 
@@ -92,37 +89,71 @@ void main() {
     const id = 'own-t4-sync-register';
     final manual = res('user', 'sync pick', 'sync line');
 
-    final save = DatabaseService.cacheLyrics(id, manual);
+    final save = LyricsStore.pin(id, manual);
     // No await yet: registration must already be visible.
-    expect(DatabaseService.manualLyricsFor(id)?.songTitle, 'sync pick');
+    expect(LyricsStore.peek(id)?.title, 'sync pick');
 
     await save;
-    expect((await DatabaseService.getCachedLyrics(id))?.songTitle, 'sync pick');
+    expect((await LyricsStore.get(id))?.title, 'sync pick');
   });
 
   test('manual save for A leaves B untouched', () async {
     const a = 'own-t5-track-a';
     const b = 'own-t5-track-b';
 
-    await DatabaseService.cacheLyrics(a, res('user', 'A pick', 'A line'));
+    await LyricsStore.pin(a, res('user', 'A pick', 'A line'));
 
-    expect(DatabaseService.manualLyricsFor(b), isNull);
-    expect(DatabaseService.lyricsRevisionFor(b), 0);
+    expect(LyricsStore.peek(b), isNull);
+    expect(LyricsStore.revisionOf(b), 0);
   });
 
   test('automatic none-result removes the entry without a placeholder',
       () async {
     const id = 'own-t6-auto-none';
 
-    final rev = DatabaseService.lyricsRevisionFor(id);
-    final accepted = await DatabaseService.cacheAutomaticLyrics(
+    final rev = LyricsStore.revisionOf(id);
+    final accepted = await LyricsStore.putAutomatic(
       id,
-      res('none', 'nothing', 'nothing'),
+      const Lyrics(source: 'none', lines: []),
       expectedRevision: rev,
     );
 
     expect(accepted, isTrue);
-    expect(await DatabaseService.getCachedLyrics(id), isNull);
+    expect(await LyricsStore.get(id), isNull);
+  });
+
+  test('a pin is kept as pinned and survives any number of automatic entries',
+      () async {
+    const id = 'own-t8-never-evicted';
+    await LyricsStore.pin(id, res('user', 'mine', 'my line'));
+    for (var i = 0; i < 320; i++) {
+      await LyricsStore.putAutomatic(
+        'own-t8-filler-$i',
+        res('netease', 'auto $i', 'line'),
+        expectedRevision: 0,
+      );
+    }
+    final kept = await LyricsStore.get(id);
+    expect(kept?.pinned, isTrue);
+    expect(kept?.title, 'mine');
+    // The automatic cache itself is bounded: the oldest fillers are gone.
+    expect(await LyricsStore.get('own-t8-filler-0'), isNull);
+    expect(await LyricsStore.get('own-t8-filler-319'), isNotNull);
+  });
+
+  test('clearing forgets a pin and lets automatic results in again', () async {
+    const id = 'own-t9-clear';
+    await LyricsStore.pin(id, res('user', 'mine', 'my line'));
+    await LyricsStore.clear(id);
+    expect(LyricsStore.peek(id), isNull);
+
+    final accepted = await LyricsStore.putAutomatic(
+      id,
+      res('netease', 'auto', 'auto line'),
+      expectedRevision: LyricsStore.revisionOf(id),
+    );
+    expect(accepted, isTrue);
+    expect((await LyricsStore.get(id))?.pinned, isFalse);
   });
 
   // Last: deliberately breaks the lyrics file location so the disk write
@@ -144,11 +175,11 @@ void main() {
     }
 
     await expectLater(
-      DatabaseService.cacheLyrics(id, manual),
+      LyricsStore.pin(id, manual),
       throwsA(isA<FileSystemException>()),
     );
 
-    expect(DatabaseService.manualLyricsFor(id)?.songTitle, 'kept pick');
-    expect((await DatabaseService.getCachedLyrics(id))?.songTitle, 'kept pick');
+    expect(LyricsStore.peek(id)?.title, 'kept pick');
+    expect((await LyricsStore.get(id))?.title, 'kept pick');
   });
 }

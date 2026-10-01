@@ -49,7 +49,9 @@ class Playlist {
     final rawName = map['name'];
     final name = rawName is String
         ? (rawName.trim().isEmpty ? '未命名歌单' : rawName)
-        : (rawName?.toString().trim().isEmpty ?? true ? '未命名歌单' : rawName.toString());
+        : (rawName?.toString().trim().isEmpty ?? true
+            ? '未命名歌单'
+            : rawName.toString());
     final rawCover = map['coverUrl'];
     final coverUrl = rawCover is String ? rawCover : rawCover?.toString();
     return Playlist(

@@ -4,7 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:bilibeat/services/lyrics_engine.dart';
 
 void main() {
-  test('LyricsEngine.cleanTitle survives all 540 fixture Bilibili titles', () async {
+  test('LyricsEngine.cleanTitle survives all 540 fixture Bilibili titles',
+      () async {
     // The regression corpus is committed with the code, so this test runs on
     // any machine (including CI) instead of silently skipping when a
     // machine-local scratch file is missing.

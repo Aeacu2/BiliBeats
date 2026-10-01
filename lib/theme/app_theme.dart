@@ -8,26 +8,18 @@ import 'package:flutter/services.dart';
 class AppColors {
   // Brand
   static const Color accent = Color(0xFFFF3366);
-  static const Color pinkStart = Color(0xFFFF6699);
-  static const Color pinkEnd = Color(0xFFFF3366);
 
   // Precomputed opacity colors (avoids runtime Color allocations)
-  static const Color accent14 = Color(0x24FF3366); // accent 14%
   static const Color accent30 = Color(0x4DFF3366); // accent 30%
   static const Color accent22 = Color(0x38FF3366); // accent 22%
-  static const Color accent04 = Color(0x0AFF3366); // accent 4%
-  static const Color accent12 = Color(0x1FFF3366); // accent 12%
   static const Color accent50 = Color(0x80FF3366); // accent 50%
-  static const Color success12 = Color(0x1F34C77B); // success 12%
-  static const Color success50 = Color(0x8034C77B); // success 50%
-  static const Color black45 = Color(0x73000000); // black 45%
   static const Color black50 = Color(0x80000000); // black 50%
   static const Color black55 = Color(0x8C000000); // black 55%
-  static const Color white05 = Color(0x0DFFFFFF); // white 5%
-  static const Color white06 = Color(0x0FFFFFFF); // white 6%
   static const Color white10 = Color(0x1AFFFFFF); // white 10%
   static const Color white12 = Color(0x1FFFFFFF); // white 12%
   static const Color white24 = Color(0x3DFFFFFF); // white 24%
+  static const Color white30 = Color(0x4DFFFFFF); // white 30%
+  static const Color white45 = Color(0x73FFFFFF); // white 45%
 
   // Neutral ramp (cool near-black, not pure #000 — reads more refined).
   static const Color background = Color(0xFF08080A);
@@ -36,7 +28,6 @@ class AppColors {
   /// One step deeper than [backgroundElevated]: nested surfaces and the cover
   /// placeholder read as "card on card" instead of fighting for the same tone.
   static const Color surfaceDeep = Color(0xFF141416);
-  static const Color surfaceCard = Color(0x0AFFFFFF); // ~4% white
 
   /// Fill for the search field and other inset controls.
   static const Color fieldFill = Color(0xFF1B1B1F);
@@ -59,6 +50,7 @@ class AppColors {
 class AppRadius {
   static const double sm = 10;
   static const double md = 14;
+  static const double lg = 20;
   static const double xl = 28;
   static const double pill = 999;
 }
@@ -68,16 +60,7 @@ class AppRadius {
 /// get a premium look from weight contrast, tight tracking on large text, and
 /// generous line heights. SF Pro (iOS) / Roboto (Android) are high-quality.
 class AppTypography {
-  /// Page-level titles (聆听 / 下载, a playlist's name).
-  static const TextStyle largeTitle = TextStyle(
-    fontSize: 30,
-    height: 1.12,
-    fontWeight: FontWeight.w800,
-    letterSpacing: -0.8,
-    color: AppColors.textPrimary,
-  );
-
-  /// Section headers inside a page (最近播放, 我的歌单, 全部歌曲).
+  /// Section headers inside a page (为你推荐, 我的音乐).
   static const TextStyle section = TextStyle(
     fontSize: 19,
     height: 1.2,

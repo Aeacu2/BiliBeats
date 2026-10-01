@@ -27,9 +27,16 @@ class _ShimmerState extends State<Shimmer> with SingleTickerProviderStateMixin {
       vsync: this,
       duration: const Duration(milliseconds: 1300),
     );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
     // Respect reduced motion: a static placeholder instead of a sweep.
-    final media = MediaQueryData.fromView(View.of(context));
-    if (!(media.disableAnimations || media.accessibleNavigation)) {
+    final media = MediaQuery.of(context);
+    if (media.disableAnimations || media.accessibleNavigation) {
+      _controller.stop();
+    } else if (!_controller.isAnimating) {
       _controller.repeat();
     }
   }
@@ -80,9 +87,8 @@ class SkeletonTrackTile extends StatelessWidget {
       child: Row(
         children: [
           const Shimmer(
-            width: 56,
-            height: 56,
-            borderRadius: BorderRadius.all(Radius.circular(12)),
+            width: 48,
+            height: 48,
           ),
           const SizedBox(width: 14),
           Expanded(

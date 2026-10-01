@@ -58,7 +58,15 @@ SYMBOLS_DIR="symbols/$VERSION"
 mkdir -p "$SYMBOLS_DIR"
 
 build_android() {
-  : "${JAVA_HOME:=/opt/homebrew/opt/openjdk@21}"
+  if [ -z "${JAVA_HOME:-}" ]; then
+    if [ -d "/opt/homebrew/opt/openjdk@21" ]; then
+      JAVA_HOME="/opt/homebrew/opt/openjdk@21"
+    elif compgen -G "$HOME/miniforge3/pkgs/openjdk-*/lib/jvm" >/dev/null; then
+      JAVA_HOME=$(compgen -G "$HOME/miniforge3/pkgs/openjdk-*/lib/jvm" | head -n 1)
+    else
+      JAVA_HOME="/opt/homebrew/opt/openjdk@21"
+    fi
+  fi
   export JAVA_HOME
   export PATH="$JAVA_HOME/bin:$PATH"
 

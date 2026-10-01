@@ -4,20 +4,18 @@ import 'package:flutter/material.dart';
 
 import '../app/app_services.dart';
 import '../services/background_protection.dart';
+import '../services/track_naming.dart';
 import '../theme/app_theme.dart';
 import '../utils/snack.dart';
 import '../widgets/download_management_sheet.dart';
+import '../widgets/sheet.dart';
 
 /// The few things worth a setting.
 class SettingsSheet extends StatefulWidget {
   const SettingsSheet({super.key});
 
   static Future<void> show(BuildContext context) {
-    return showModalBottomSheet<void>(
-      context: context,
-      useSafeArea: true,
-      builder: (_) => const SettingsSheet(),
-    );
+    return showAppSheet<void>(context, builder: (_) => const SettingsSheet());
   }
 
   @override
@@ -55,81 +53,99 @@ class _SettingsSheetState extends State<SettingsSheet>
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(8, 0, 8, 8),
-              child: Text('设置', style: AppTypography.title),
-            ),
-            if (BackgroundProtection.supported)
-              _row(
-                icon: Icons.shield_moon_outlined,
-                title: '后台播放保护',
-                subtitle: _protected == true
-                    ? '已开启：BiliBeats 不受电池优化限制'
-                    : '部分手机会在后台关闭音乐应用，点按以允许后台运行',
-                trailing: _protected == true
-                    ? const Icon(Icons.check_circle_rounded,
-                        color: AppColors.success)
-                    : null,
-                onTap: _protected == true
-                    ? null
-                    : () => unawaited(BackgroundProtection.request()),
-              ),
-            _row(
-              icon: Icons.download_for_offline_outlined,
-              title: '下载管理',
-              subtitle: '失败重试、已下载歌曲与存储空间',
-              onTap: () {
-                final navigator = Navigator.of(context);
-                final parent = navigator.context;
-                navigator.pop();
-                DownloadManagementSheet.show(parent);
-              },
-            ),
-            _row(
-              icon: Icons.history_rounded,
-              title: '清除搜索记录',
-              subtitle: '推荐也会随之重新学习',
-              onTap: () async {
-                final messenger = ScaffoldMessenger.of(context);
-                Navigator.of(context).pop();
-                await AppServices.instance.onlineSearch.clearHistory();
-                showAppSnackBar(
-                  messenger,
-                  message: '已清除搜索记录',
-                  backgroundColor: AppColors.backgroundElevated,
-                );
-              },
-            ),
-          ],
+    final handler = AppServices.instance.handler;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SheetTitle('设置'),
+        ValueListenableBuilder<bool>(
+          valueListenable: handler.normalizeVolume,
+          builder: (context, on, _) => _Toggle(
+            icon: Icons.graphic_eq_rounded,
+            label: '音量均衡',
+            value: on,
+            onChanged: handler.setNormalizeVolume,
+          ),
         ),
-      ),
+        _Toggle(
+          icon: Icons.auto_awesome_outlined,
+          label: '自动识别歌名',
+          value: TrackNaming.enabled,
+          onChanged: (on) async {
+            await TrackNaming.setEnabled(on);
+            if (mounted) setState(() {});
+          },
+        ),
+        if (BackgroundProtection.supported)
+          SheetAction(
+            icon: Icons.shield_moon_outlined,
+            label: '后台播放保护',
+            trailing: _protected == true
+                ? const Icon(Icons.check_rounded, color: AppColors.success)
+                : const Text('开启',
+                    style: TextStyle(color: AppColors.accent, fontSize: 14)),
+            onTap: _protected == true
+                ? null
+                : () => unawaited(BackgroundProtection.request()),
+          ),
+        SheetAction(
+          icon: Icons.download_done_rounded,
+          label: '下载管理',
+          trailing: const Icon(Icons.chevron_right_rounded,
+              color: AppColors.textFaint),
+          onTap: () {
+            final navigator = Navigator.of(context);
+            navigator.pop();
+            DownloadManagementSheet.show(navigator.context);
+          },
+        ),
+        SheetAction(
+          icon: Icons.history_rounded,
+          label: '清除搜索记录',
+          onTap: () async {
+            final messenger = ScaffoldMessenger.of(context);
+            Navigator.of(context).pop();
+            await AppServices.instance.onlineSearch.clearHistory();
+            showAppSnackBar(messenger, message: '已清除');
+          },
+        ),
+        const SizedBox(height: 8),
+      ],
     );
   }
+}
 
-  Widget _row({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    VoidCallback? onTap,
-    Widget? trailing,
-  }) {
-    return ListTile(
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppRadius.md),
+class _Toggle extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  const _Toggle({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SheetAction(
+      icon: icon,
+      label: label,
+      onTap: () => onChanged(!value),
+      trailing: IgnorePointer(
+        child: Switch(
+          value: value,
+          onChanged: (_) {},
+          activeThumbColor: Colors.white,
+          activeTrackColor: AppColors.accent,
+          inactiveThumbColor: AppColors.textMuted,
+          inactiveTrackColor: AppColors.white12,
+          trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
+        ),
       ),
-      leading: Icon(icon, color: AppColors.textSecondary),
-      title: Text(title, style: AppTypography.body),
-      subtitle: Text(subtitle, style: AppTypography.caption),
-      trailing: trailing,
-      onTap: onTap,
     );
   }
 }

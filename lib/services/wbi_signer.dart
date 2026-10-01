@@ -10,10 +10,70 @@ class WbiSigner {
   static final RegExp _stripChars = RegExp(r"[!'()*]");
 
   static const List<int> mixinKeyEncTab = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
-    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
-    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
-    36, 20, 34, 44, 52
+    46,
+    47,
+    18,
+    2,
+    53,
+    8,
+    23,
+    32,
+    15,
+    50,
+    10,
+    31,
+    58,
+    3,
+    45,
+    35,
+    27,
+    43,
+    5,
+    49,
+    33,
+    9,
+    42,
+    19,
+    29,
+    28,
+    14,
+    39,
+    12,
+    38,
+    41,
+    13,
+    37,
+    48,
+    7,
+    16,
+    24,
+    55,
+    40,
+    61,
+    26,
+    17,
+    0,
+    1,
+    60,
+    51,
+    30,
+    4,
+    22,
+    25,
+    54,
+    21,
+    56,
+    59,
+    6,
+    63,
+    57,
+    62,
+    11,
+    36,
+    20,
+    34,
+    44,
+    52
   ];
 
   static String _cachedImgKey = '';
@@ -24,7 +84,8 @@ class WbiSigner {
     return mixinKeyEncTab.map((n) => orig[n]).join().substring(0, 32);
   }
 
-  static Future<Map<String, dynamic>> signParams(Map<String, dynamic> params) async {
+  static Future<Map<String, dynamic>> signParams(
+      Map<String, dynamic> params) async {
     final keys = await _getWbiKeys();
     final mixinKey = _getMixinKey(keys['imgKey']! + keys['subKey']!);
     final currTime = (DateTime.now().millisecondsSinceEpoch / 1000).round();
@@ -49,7 +110,8 @@ class WbiSigner {
   }
 
   static Future<Map<String, String>> _getWbiKeys() async {
-    if (_cacheTime != null && DateTime.now().difference(_cacheTime!).inHours < 12) {
+    if (_cacheTime != null &&
+        DateTime.now().difference(_cacheTime!).inHours < 12) {
       if (_cachedImgKey.isNotEmpty && _cachedSubKey.isNotEmpty) {
         return {'imgKey': _cachedImgKey, 'subKey': _cachedSubKey};
       }
@@ -71,18 +133,18 @@ class WbiSigner {
           .transform(utf8.decoder)
           .join()
           .timeout(const Duration(seconds: 10));
-        final json = jsonDecode(body);
-        final wbiImg = json['data']?['wbi_img'];
-        if (wbiImg != null) {
-          final imgUrl = wbiImg['img_url'] as String? ?? '';
-          final subUrl = wbiImg['sub_url'] as String? ?? '';
+      final json = jsonDecode(body);
+      final wbiImg = json['data']?['wbi_img'];
+      if (wbiImg != null) {
+        final imgUrl = wbiImg['img_url'] as String? ?? '';
+        final subUrl = wbiImg['sub_url'] as String? ?? '';
 
-          _cachedImgKey = imgUrl.split('/').last.split('.').first;
-          _cachedSubKey = subUrl.split('/').last.split('.').first;
-          _cacheTime = DateTime.now();
+        _cachedImgKey = imgUrl.split('/').last.split('.').first;
+        _cachedSubKey = subUrl.split('/').last.split('.').first;
+        _cacheTime = DateTime.now();
 
-          return {'imgKey': _cachedImgKey, 'subKey': _cachedSubKey};
-        }
+        return {'imgKey': _cachedImgKey, 'subKey': _cachedSubKey};
+      }
     } catch (e) {
       debugPrint('Failed to fetch WBI keys: $e');
     }

@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../models/track.dart';
 import '../services/recommendation_engine.dart';
 
-/// "为你推荐" on the 下载 tab: Bilibili tracks picked from the listener's
+/// "为你推荐" in search: Bilibili tracks picked from the listener's
 /// favorites, history and searches, paged for infinite scroll.
 class RecommendationsController extends ChangeNotifier {
   List<Track> _tracks = const [];

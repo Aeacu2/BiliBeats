@@ -32,8 +32,7 @@ void main() {
 
     final failed = DownloadManager.instance.failedTasks;
     expect(failed.any((f) => f.track.id == 'ht-$name'), isTrue);
-    final entry =
-        failed.firstWhere((f) => f.track.id == 'ht-$name');
+    final entry = failed.firstWhere((f) => f.track.id == 'ht-$name');
     expect(entry.error, isNotEmpty);
   });
 
@@ -47,8 +46,7 @@ void main() {
     server.serveInstant(name);
     expect(DownloadManager.instance.retryDownload('ht-$name'), isTrue);
 
-    await waitForTrue(
-        () => AudioDownloadService.isDownloaded(t(name)));
+    await waitForTrue(() => AudioDownloadService.isDownloaded(t(name)));
     expect(DownloadManager.instance.isFailed('ht-$name'), isFalse);
   });
 
@@ -61,14 +59,11 @@ void main() {
 
     DownloadManager.instance.dismissFailed('ht-$name');
     expect(DownloadManager.instance.isFailed('ht-$name'), isFalse);
-    expect(
-        await AudioDownloadService.isDownloaded(t(name)), isFalse);
+    expect(await AudioDownloadService.isDownloaded(t(name)), isFalse);
   });
 
   test('retry of an unknown id returns false', () {
-    expect(
-        DownloadManager.instance.retryDownload('dm-no-such-id'),
-        isFalse);
+    expect(DownloadManager.instance.retryDownload('dm-no-such-id'), isFalse);
   });
 
   test('remove-download preserves playlists and favorites', () async {
@@ -77,11 +72,9 @@ void main() {
     final track = t(name);
 
     await DownloadManager.instance.startDownload(track);
-    await waitForTrue(
-        () => AudioDownloadService.isDownloaded(track));
+    await waitForTrue(() => AudioDownloadService.isDownloaded(track));
 
-    final playlist =
-        await DatabaseService.createPlaylist('保存测试');
+    final playlist = await DatabaseService.createPlaylist('保存测试');
     await DatabaseService.addTrackToPlaylist(playlist.id, track);
     await DatabaseService.toggleFavorite(track);
 
@@ -89,8 +82,7 @@ void main() {
 
     expect(await AudioDownloadService.isDownloaded(track), isFalse);
     final playlists = await DatabaseService.getPlaylists();
-    final reloaded =
-        playlists.firstWhere((p) => p.id == playlist.id);
+    final reloaded = playlists.firstWhere((p) => p.id == playlist.id);
     expect(reloaded.tracks.any((e) => e.id == track.id), isTrue);
     expect(await DatabaseService.isFavorite(track.id), isTrue);
   });
@@ -101,11 +93,9 @@ void main() {
     final track = t(name);
 
     await DownloadManager.instance.startDownload(track);
-    await waitForTrue(
-        () => AudioDownloadService.isDownloaded(track));
+    await waitForTrue(() => AudioDownloadService.isDownloaded(track));
 
-    final breakdown =
-        await AudioDownloadService.storageBreakdown();
+    final breakdown = await AudioDownloadService.storageBreakdown();
     expect(breakdown[track.id], greaterThan(1024));
   });
 }

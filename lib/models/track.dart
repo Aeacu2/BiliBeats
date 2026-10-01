@@ -18,6 +18,7 @@ class Track {
   final String bvid;
   final int cid;
   final String title;
+
   /// The B站 raw video title, immutable after fetch. Metadata edits overwrite
   /// [title] (the display name) but must never touch this field — 智能识别
   /// parses THIS, or a polluted display title would be re-parsed forever.
@@ -26,6 +27,10 @@ class Track {
   final String coverUrl;
   final int duration; // in seconds
   final String? audioUrl;
+
+  /// Integrated loudness in LUFS as measured by Bilibili (EBU R128), or null
+  /// when unknown. Playback evens tracks out against this.
+  final double? loudness;
 
   const Track({
     required this.id,
@@ -37,6 +42,7 @@ class Track {
     required this.coverUrl,
     required this.duration,
     this.audioUrl,
+    this.loudness,
   });
 
   Map<String, dynamic> toMap() {
@@ -50,6 +56,7 @@ class Track {
       'coverUrl': coverUrl,
       'duration': duration,
       'audioUrl': audioUrl,
+      if (loudness != null) 'loudness': loudness,
     };
   }
 
@@ -75,7 +82,8 @@ class Track {
       cid = 0;
     }
     final rawTitle = map['title'];
-    final title = rawTitle is String ? rawTitle : (rawTitle?.toString() ?? '未知曲目');
+    final title =
+        rawTitle is String ? rawTitle : (rawTitle?.toString() ?? '未知曲目');
     final rawRawTitle = map['rawTitle'];
     // Falls back to the persisted title only — never the "未知曲目"
     // placeholder, which 智能识别 would otherwise parse as if it were real.
@@ -83,9 +91,12 @@ class Track {
         ? rawRawTitle
         : (rawRawTitle?.toString() ?? (rawTitle is String ? rawTitle : ''));
     final rawUploader = map['uploader'];
-    final uploader = rawUploader is String ? rawUploader : (rawUploader?.toString() ?? '未知UP主');
+    final uploader = rawUploader is String
+        ? rawUploader
+        : (rawUploader?.toString() ?? '未知UP主');
     final rawCover = map['coverUrl'];
-    final coverUrl = rawCover is String ? rawCover : (rawCover?.toString() ?? '');
+    final coverUrl =
+        rawCover is String ? rawCover : (rawCover?.toString() ?? '');
     final rawDuration = map['duration'];
     int duration;
     if (rawDuration is int) {
@@ -98,7 +109,9 @@ class Track {
       duration = 0;
     }
     final rawAudioUrl = map['audioUrl'];
-    final audioUrl = rawAudioUrl is String ? rawAudioUrl : rawAudioUrl?.toString();
+    final audioUrl =
+        rawAudioUrl is String ? rawAudioUrl : rawAudioUrl?.toString();
+    final rawLoudness = map['loudness'];
     return Track(
       id: id,
       bvid: bvid,
@@ -109,6 +122,7 @@ class Track {
       coverUrl: coverUrl,
       duration: duration,
       audioUrl: audioUrl,
+      loudness: rawLoudness is num ? rawLoudness.toDouble() : null,
     );
   }
 
@@ -118,6 +132,7 @@ class Track {
     String? coverUrl,
     int? duration,
     String? audioUrl,
+    double? loudness,
   }) {
     return Track(
       id: id,
@@ -129,6 +144,7 @@ class Track {
       coverUrl: coverUrl ?? this.coverUrl,
       duration: duration ?? this.duration,
       audioUrl: audioUrl ?? this.audioUrl,
+      loudness: loudness ?? this.loudness,
     );
   }
 

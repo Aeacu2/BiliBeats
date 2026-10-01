@@ -6,9 +6,23 @@ import '../models/playlist.dart';
 import '../models/track.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
+import '../services/lyrics_engine.dart';
+import '../services/track_naming.dart';
 
-/// How the song list on 聆听 is ordered.
+/// How the song list is ordered.
 enum LibrarySort { recent, title, artist }
+
+/// Downloaded songs that share an artist — a collection nobody has to build.
+@immutable
+class ArtistGroup {
+  final String name;
+  final List<Track> tracks;
+
+  const ArtistGroup(this.name, this.tracks);
+
+  /// Artwork standing in for a portrait: the newest song's cover.
+  String get coverUrl => tracks.isEmpty ? '' : tracks.first.coverUrl;
+}
 
 /// One in-memory view of the library for every screen.
 ///
@@ -60,12 +74,16 @@ class LibraryController extends ChangeNotifier {
       favorites?.tracks.any((t) => t.id == id) ?? false;
 
   /// User playlists (everything except 收藏).
-  List<Playlist> get userPlaylists =>
-      [for (final p in _playlists) if (p.id != Playlist.favoritesId) p];
+  List<Playlist> get userPlaylists => [
+        for (final p in _playlists)
+          if (p.id != Playlist.favoritesId) p
+      ];
 
   /// The subset of [tracks] that can play right now, in order.
-  List<Track> playableOf(List<Track> tracks) =>
-      [for (final t in tracks) if (_downloadedIds.contains(t.id)) t];
+  List<Track> playableOf(List<Track> tracks) => [
+        for (final t in tracks)
+          if (_downloadedIds.contains(t.id)) t
+      ];
 
   List<Track>? _sortedCache;
   List<Track>? _sortedSource;
@@ -87,13 +105,89 @@ class LibraryController extends ChangeNotifier {
       LibrarySort.artist => List.of(_downloaded)
         ..sort((a, b) {
           final byArtist =
-              a.uploader.toLowerCase().compareTo(b.uploader.toLowerCase());
+              artistOf(a).toLowerCase().compareTo(artistOf(b).toLowerCase());
           return byArtist != 0 ? byArtist : byTitle(a, b);
         }),
     };
     _sortedSource = _downloaded;
     _sortedBy = _sort;
     return _sortedCache = List.unmodifiable(sorted);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Artists
+  // ---------------------------------------------------------------------------
+
+  static final RegExp _artistSeparators =
+      RegExp(r'\s*(?:[&、,，/／×]|\bfeat\.?|\bft\.?)\s*', caseSensitive: false);
+
+  static final Map<String, String> _artistCache = {};
+
+  /// Who performs [track].
+  ///
+  /// A song the listener has named carries its artist in [Track.uploader].
+  /// For an untouched download that field is only the UP主, so the video
+  /// title is consulted first (【周深】大鱼 → 周深), falling back to the UP主.
+  static String artistOf(Track track) {
+    if (track.title != track.rawTitle) return track.uploader.trim();
+    final key = '${track.rawTitle}\n${track.uploader}';
+    final cached = _artistCache[key];
+    if (cached != null) return cached;
+    final parsed = LyricsEngine.cleanTitle(
+      track.rawTitle,
+      defaultArtist: track.uploader,
+    )['artist'];
+    final artist =
+        (parsed == null || parsed.trim().isEmpty ? track.uploader : parsed)
+            .trim();
+    if (_artistCache.length > 2000) _artistCache.clear();
+    return _artistCache[key] = artist;
+  }
+
+  /// Individual names in a credit like `黄绮珊 & 周深`.
+  static List<String> artistNamesOf(Track track) => artistOf(track)
+      .split(_artistSeparators)
+      .map((name) => name.trim())
+      .where((name) => name.isNotEmpty)
+      .toList();
+
+  List<ArtistGroup>? _artistsCache;
+  List<Track>? _artistsSource;
+
+  /// Every artist in the library, most songs first. A collaboration counts
+  /// for each of its artists.
+  List<ArtistGroup> get artists {
+    final cached = _artistsCache;
+    if (cached != null && identical(_artistsSource, _downloaded)) return cached;
+
+    final groups = <String, List<Track>>{};
+    final names = <String, String>{};
+    for (final track in _downloaded) {
+      for (final name in artistNamesOf(track)) {
+        final key = name.toLowerCase();
+        names.putIfAbsent(key, () => name);
+        groups.putIfAbsent(key, () => []).add(track);
+      }
+    }
+    final list = [
+      for (final entry in groups.entries)
+        ArtistGroup(names[entry.key]!, List.unmodifiable(entry.value)),
+    ]..sort((a, b) {
+        final byCount = b.tracks.length.compareTo(a.tracks.length);
+        return byCount != 0
+            ? byCount
+            : a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+    _artistsSource = _downloaded;
+    return _artistsCache = List.unmodifiable(list);
+  }
+
+  ArtistGroup? artistNamed(String name) {
+    final key = name.toLowerCase();
+    for (final group in artists) {
+      if (group.name.toLowerCase() == key) return group;
+    }
+    return null;
   }
 
   Future<void> setSort(LibrarySort sort) async {
@@ -118,8 +212,15 @@ class LibraryController extends ChangeNotifier {
       DatabaseService.getPlaylists(),
       DatabaseService.getRecentlyPlayed(),
     ]);
+    final known = _downloadedIds;
     _downloaded = List.unmodifiable(results[0] as List<Track>);
     _downloadedIds = {for (final t in _downloaded) t.id};
+    if (_loaded) {
+      // A song that just arrived gets its real name looked up.
+      for (final track in _downloaded) {
+        if (!known.contains(track.id)) TrackNaming.autoName(track);
+      }
+    }
     _playlists = List.unmodifiable(results[1] as List<Playlist>);
     _recent = List.unmodifiable(results[2] as List<Track>);
     _active = DownloadManager.instance.activeTasks;

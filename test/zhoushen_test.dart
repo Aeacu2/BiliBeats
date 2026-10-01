@@ -91,7 +91,9 @@ void main() {
     expect(res['artist'], '周深');
   });
 
-  test('cleanTitleWithValidation: 【姚贝娜&amp;单依纯 心火】collab bracket (DB disambiguation)', () async {
+  test(
+      'cleanTitleWithValidation: 【姚贝娜&amp;单依纯 心火】collab bracket (DB disambiguation)',
+      () async {
     await _skipIfOffline();
     final res = await LyricsEngine.cleanTitleWithValidation(
       '【姚贝娜&amp;单依纯 心火】音乐是我们最珍贵的琥珀，致敬。',
@@ -139,7 +141,8 @@ void main() {
     expect(res['artist'], '周深');
   });
 
-  test('cleanTitleWithValidation: repeated taps are idempotent (memoized)', () async {
+  test('cleanTitleWithValidation: repeated taps are idempotent (memoized)',
+      () async {
     await _skipIfOffline();
     const raw = '【周深｜舞台】《音乐缘计划》第二季EP09带来《全世界下雨》舞台';
     final a =
@@ -212,7 +215,9 @@ void main() {
   // the 2-char 逆光 against the full query). Without this, the hinted query
   // yielded nothing and the bare 逆光 fallback resurrected 孙燕姿's studio
   // version — the 3.11.1 fix regressed.
-  test('matchesSongQuery: multi-token artist hints still match short song names', () {
+  test(
+      'matchesSongQuery: multi-token artist hints still match short song names',
+      () {
     expect(
       LyricsEngine.matchesSongQuery('逆光 (live)', '陈楚生 周深 逆光'),
       isTrue,

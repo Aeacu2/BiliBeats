@@ -1,9 +1,4 @@
-import 'dart:async';
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../app/app_services.dart';
 import '../app/playback_actions.dart';
@@ -13,20 +8,20 @@ import '../services/database_service.dart';
 import '../state/library_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
+import '../utils/cover_picker.dart';
 import '../utils/snack.dart';
-import '../widgets/add_local_tracks_sheet.dart';
-import '../widgets/cached_cover_image.dart';
+import '../widgets/collection_header.dart';
+import '../widgets/docked_player.dart';
 import '../widgets/empty_state.dart';
-import '../widgets/mini_player.dart';
-import '../widgets/pill_button.dart';
+import '../widgets/sheet.dart';
 import '../widgets/song_tile.dart';
-import '../widgets/track_options_menu.dart';
-import 'now_playing_page.dart';
+import '../widgets/track_sheet.dart';
 
 /// A playlist (or 收藏) as a full page.
 ///
 /// Reads the playlist live from [LibraryController] by id, so edits made
-/// anywhere (the player, a song's sheet) show up here immediately.
+/// anywhere (the player, a song's sheet) show up here immediately. Swipe a
+/// row away to remove it; 编辑 turns on multi-select and reordering.
 class PlaylistPage extends StatefulWidget {
   final String playlistId;
 
@@ -56,8 +51,6 @@ class _PlaylistPageState extends State<PlaylistPage> {
   /// row must leave the tree immediately.
   final Set<String> _removing = {};
 
-  final GlobalKey _miniPlayerKey = GlobalKey();
-
   Playlist? get _playlist {
     for (final p in _library.playlists) {
       if (p.id == widget.playlistId) return p;
@@ -82,6 +75,7 @@ class _PlaylistPageState extends State<PlaylistPage> {
             if (!_removing.contains(t.id)) t,
         ];
         final playable = _library.playableOf(tracks);
+        final cover = playlist.coverUrl;
 
         return PopScope(
           canPop: !_editing,
@@ -95,16 +89,39 @@ class _PlaylistPageState extends State<PlaylistPage> {
                 Expanded(
                   child: CustomScrollView(
                     slivers: [
-                      _appBar(playlist),
+                      _appBar(playlist, tracks),
                       SliverToBoxAdapter(
-                        child: _header(playlist, tracks, playable),
+                        child: CollectionHeader(
+                          title: playlist.name,
+                          coverUrl: cover != null && cover.isNotEmpty
+                              ? cover
+                              : (tracks.isNotEmpty
+                                  ? tracks.first.coverUrl
+                                  : ''),
+                          placeholder: _isFavorites
+                              ? Icons.favorite_rounded
+                              : Icons.queue_music_rounded,
+                          placeholderColor: _isFavorites
+                              ? AppColors.accent
+                              : AppColors.textMuted,
+                          playable: playable,
+                          count: tracks.length,
+                          showActions: !_editing,
+                        ),
                       ),
                       if (tracks.isEmpty)
-                        const SliverToBoxAdapter(
+                        SliverToBoxAdapter(
                           child: EmptyState(
-                            icon: Icons.library_music_rounded,
-                            title: '暂无歌曲',
-                            subtitle: '在歌曲的「更多」中选择「加入歌单」',
+                            icon: Icons.library_music_outlined,
+                            title: '还没有歌曲',
+                            action: _isFavorites
+                                ? null
+                                : TextButton(
+                                    onPressed: () => _addSongs(playlist),
+                                    child: const Text('添加歌曲',
+                                        style:
+                                            TextStyle(color: AppColors.accent)),
+                                  ),
                           ),
                         )
                       else
@@ -116,13 +133,7 @@ class _PlaylistPageState extends State<PlaylistPage> {
                 if (_editing)
                   _editBar(playlist, tracks)
                 else
-                  KeyedSubtree(
-                    key: _miniPlayerKey,
-                    child: MiniPlayer(
-                      handler: AppServices.instance.handler,
-                      onTap: _openPlayer,
-                    ),
-                  ),
+                  const DockedPlayer(),
               ],
             ),
           ),
@@ -131,15 +142,7 @@ class _PlaylistPageState extends State<PlaylistPage> {
     );
   }
 
-  void _openPlayer() {
-    final box = _miniPlayerKey.currentContext?.findRenderObject() as RenderBox?;
-    final rect = box != null && box.hasSize
-        ? box.localToGlobal(Offset.zero) & box.size
-        : null;
-    unawaited(NowPlayingPage.open(context, from: rect));
-  }
-
-  Widget _appBar(Playlist playlist) {
+  Widget _appBar(Playlist playlist, List<Track> tracks) {
     return SliverAppBar(
       pinned: true,
       backgroundColor: AppColors.background,
@@ -147,9 +150,7 @@ class _PlaylistPageState extends State<PlaylistPage> {
       leading: _editing
           ? TextButton(
               onPressed: () => setState(() {
-                final all = (_pendingOrder ?? playlist.tracks)
-                    .map((t) => t.id)
-                    .toSet();
+                final all = tracks.map((t) => t.id).toSet();
                 if (_selected.length == all.length) {
                   _selected.clear();
                 } else {
@@ -158,140 +159,84 @@ class _PlaylistPageState extends State<PlaylistPage> {
                     ..addAll(all);
                 }
               }),
-              child: const Text('全选', style: TextStyle(color: AppColors.accent)),
+              child: const Text('全选'),
             )
           : null,
       leadingWidth: _editing ? 72 : null,
       actions: [
-        if (playlist.tracks.isNotEmpty)
+        if (_editing)
           TextButton(
             onPressed: _toggleEditing,
-            child: Text(
-              _editing ? '完成' : '编辑',
-              style: TextStyle(
-                color: _editing ? AppColors.accent : AppColors.textSecondary,
-                fontWeight: _editing ? FontWeight.w600 : FontWeight.w400,
-              ),
-            ),
-          ),
-        if (!_isFavorites && !_editing)
-          PopupMenuButton<String>(
+            child: const Text('完成',
+                style: TextStyle(
+                    color: AppColors.accent, fontWeight: FontWeight.w600)),
+          )
+        else if (!_isFavorites || tracks.isNotEmpty)
+          IconButton(
             tooltip: '更多',
+            onPressed: () => _showMenu(playlist),
             icon: const Icon(Icons.more_horiz_rounded,
                 color: AppColors.textSecondary),
-            onSelected: (action) => switch (action) {
-              'add' => _addLocalTracks(playlist),
-              'rename' => _rename(playlist),
-              'cover' => _pickCover(playlist),
-              'delete' => _delete(playlist),
-              _ => null,
-            },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'add', child: Text('添加已下载歌曲')),
-              PopupMenuItem(value: 'rename', child: Text('重命名')),
-              PopupMenuItem(value: 'cover', child: Text('更换封面')),
-              PopupMenuItem(
-                value: 'delete',
-                child: Text('删除歌单', style: TextStyle(color: AppColors.danger)),
-              ),
-            ],
           ),
+        const SizedBox(width: 4),
       ],
     );
   }
 
-  Widget _header(Playlist playlist, List<Track> tracks, List<Track> playable) {
-    final cover = playlist.coverUrl;
-    final fallback = tracks.isNotEmpty ? tracks.first.coverUrl : '';
-    final art = (cover != null && cover.isNotEmpty) ? cover : fallback;
-    const size = 128.0;
+  void _showMenu(Playlist playlist) {
+    showAppSheet<void>(
+      context,
+      builder: (sheet) {
+        void run(void Function() action) {
+          Navigator.pop(sheet);
+          action();
+        }
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(AppRadius.md),
-                child: art.isNotEmpty
-                    ? CachedCoverImage(url: art, width: size, height: size)
-                    : SizedBox(
-                        width: size,
-                        height: size,
-                        child: ColoredBox(
-                          color: AppColors.fieldFill,
-                          child: Icon(
-                            _isFavorites
-                                ? Icons.favorite_rounded
-                                : Icons.queue_music_rounded,
-                            size: 48,
-                            color: _isFavorites
-                                ? AppColors.accent
-                                : AppColors.textMuted,
-                          ),
-                        ),
-                      ),
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 4),
+            if (!_isFavorites)
+              SheetAction(
+                icon: Icons.add_rounded,
+                label: '添加歌曲',
+                onTap: () => run(() => _addSongs(playlist)),
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      playlist.name,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTypography.largeTitle.copyWith(fontSize: 26),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      playable.length == tracks.length
-                          ? '${tracks.length} 首'
-                          : '${tracks.length} 首 · ${playable.length} 首可播放',
-                      style: AppTypography.caption.copyWith(fontSize: 13),
-                    ),
-                  ],
-                ),
+            if (playlist.tracks.isNotEmpty)
+              SheetAction(
+                icon: Icons.checklist_rounded,
+                label: '编辑',
+                onTap: () => run(_toggleEditing),
+              ),
+            if (!_isFavorites) ...[
+              SheetAction(
+                icon: Icons.drive_file_rename_outline_rounded,
+                label: '重命名',
+                onTap: () => run(() => _rename(playlist)),
+              ),
+              SheetAction(
+                icon: Icons.image_outlined,
+                label: '更换封面',
+                onTap: () => run(() => _pickCover(playlist)),
+              ),
+              SheetAction(
+                icon: Icons.delete_outline_rounded,
+                label: '删除歌单',
+                color: AppColors.danger,
+                onTap: () => run(() => _delete(playlist)),
               ),
             ],
-          ),
-          if (tracks.isNotEmpty && !_editing) ...[
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(
-                  child: PillButton(
-                    icon: Icons.play_arrow_rounded,
-                    label: '播放',
-                    onPressed:
-                        playable.isEmpty ? null : () => playCollection(playable),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: PillButton(
-                    icon: Icons.shuffle_rounded,
-                    label: '随机播放',
-                    onPressed: playable.isEmpty
-                        ? null
-                        : () => playCollection(playable, shuffle: true),
-                  ),
-                ),
-              ],
-            ),
+            const SizedBox(height: 8),
           ],
-        ],
-      ),
+        );
+      },
     );
   }
 
   Widget _list(Playlist playlist, List<Track> tracks, List<Track> playable) {
     if (_editing) {
       return SliverPadding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
+        padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
         sliver: SliverReorderableList(
           itemCount: tracks.length,
           onReorderItem: (oldIndex, newIndex) =>
@@ -313,12 +258,12 @@ class _PlaylistPageState extends State<PlaylistPage> {
                   selected
                       ? Icons.check_circle_rounded
                       : Icons.radio_button_unchecked_rounded,
-                  color: selected ? AppColors.accent : AppColors.textFaint,
+                  color: selected ? AppColors.accent : AppColors.white24,
                 ),
                 trailing: ReorderableDragStartListener(
                   index: index,
                   child: const SizedBox(
-                    width: 44,
+                    width: 48,
                     height: 48,
                     child: Icon(Icons.drag_handle_rounded,
                         color: AppColors.textFaint),
@@ -332,7 +277,7 @@ class _PlaylistPageState extends State<PlaylistPage> {
     }
 
     return SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
       sliver: SliverList.builder(
         itemCount: tracks.length,
         itemBuilder: (context, index) {
@@ -347,14 +292,13 @@ class _PlaylistPageState extends State<PlaylistPage> {
                 color: AppColors.danger.withValues(alpha: 0.18),
                 borderRadius: BorderRadius.circular(AppRadius.md),
               ),
-              child: const Icon(Icons.playlist_remove_rounded,
+              child: const Icon(Icons.remove_circle_outline_rounded,
                   color: AppColors.danger),
             ),
             onDismissed: (_) => _removeOne(playlist, track),
             child: SongTile(
               track: track,
               queue: playable,
-              showDownload: !_library.isDownloaded(track.id),
               onTap: () => openTrack(context, track, queue: playable),
             ),
           );
@@ -364,15 +308,15 @@ class _PlaylistPageState extends State<PlaylistPage> {
   }
 
   Widget _editBar(Playlist playlist, List<Track> tracks) {
-    final count = _selected.length;
     final selectedTracks = [
       for (final t in tracks)
         if (_selected.contains(t.id)) t,
     ];
+    final none = selectedTracks.isEmpty;
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
         decoration: const BoxDecoration(
           color: AppColors.backgroundElevated,
           border: Border(top: BorderSide(color: AppColors.hairline)),
@@ -381,27 +325,23 @@ class _PlaylistPageState extends State<PlaylistPage> {
           children: [
             Expanded(
               child: TextButton.icon(
-                onPressed: count == 0
+                onPressed: none
                     ? null
-                    : () => TrackOptionsMenu.showAddToPlaylistForTracks(
-                          context,
-                          selectedTracks,
-                          onTrackChanged: () => setState(() {
-                            _editing = false;
-                            _selected.clear();
-                          }),
-                        ),
+                    : () async {
+                        final added =
+                            await PlaylistPicker.show(context, selectedTracks);
+                        if (added && mounted && _editing) _toggleEditing();
+                      },
                 icon: const Icon(Icons.playlist_add_rounded),
-                label: Text('加入歌单 ($count)'),
+                label: const Text('加入歌单'),
               ),
             ),
             Expanded(
               child: TextButton.icon(
                 style: TextButton.styleFrom(foregroundColor: AppColors.danger),
-                onPressed:
-                    count == 0 ? null : () => _removeSelected(playlist),
-                icon: const Icon(Icons.playlist_remove_rounded),
-                label: Text('移出歌单 ($count)'),
+                onPressed: none ? null : () => _removeSelected(playlist),
+                icon: const Icon(Icons.remove_circle_outline_rounded),
+                label: Text(none ? '移出' : '移出 ${selectedTracks.length} 首'),
               ),
             ),
           ],
@@ -430,11 +370,10 @@ class _PlaylistPageState extends State<PlaylistPage> {
   ) async {
     Haptics.selection();
     // onReorderItem already reports newIndex adjusted for the removal.
-    final target = newIndex;
     final order = List<Track>.of(tracks);
-    order.insert(target, order.removeAt(oldIndex));
+    order.insert(newIndex, order.removeAt(oldIndex));
     setState(() => _pendingOrder = order);
-    await DatabaseService.reorderPlaylist(playlist.id, oldIndex, target);
+    await DatabaseService.reorderPlaylist(playlist.id, oldIndex, newIndex);
     if (mounted) setState(() => _pendingOrder = null);
   }
 
@@ -455,133 +394,134 @@ class _PlaylistPageState extends State<PlaylistPage> {
     });
   }
 
-  Future<void> _addLocalTracks(Playlist playlist) async {
-    final downloaded = _library.downloaded;
-    if (downloaded.isEmpty) {
-      showAppSnackBar(
-        ScaffoldMessenger.of(context),
-        message: '还没有已下载的歌曲',
-        backgroundColor: AppColors.backgroundElevated,
-      );
+  Future<void> _addSongs(Playlist playlist) async {
+    final existing = playlist.tracks.map((t) => t.id).toSet();
+    final candidates = [
+      for (final t in _library.downloaded)
+        if (!existing.contains(t.id)) t,
+    ];
+    if (candidates.isEmpty) {
+      showAppSnackBar(ScaffoldMessenger.of(context), message: '没有可添加的歌曲');
       return;
     }
-    await AddLocalTracksSheet.show(
-      context,
-      downloaded: downloaded,
-      existingIds: playlist.tracks.map((t) => t.id).toSet(),
-      playlistId: playlist.id,
-      onAdded: _library.reload,
-    );
+    final picked = await _SongPicker.show(context, candidates);
+    if (picked == null || picked.isEmpty) return;
+    await DatabaseService.addTracksToPlaylist(playlist.id, picked);
   }
 
   Future<void> _rename(Playlist playlist) async {
-    final controller = TextEditingController(text: playlist.name);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('重命名歌单'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: AppTypography.body,
-          decoration: const InputDecoration(hintText: '歌单名称'),
-          onSubmitted: (value) => Navigator.pop(ctx, value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, controller.text),
-            child: const Text('保存', style: TextStyle(color: AppColors.accent)),
-          ),
-        ],
-      ),
+    final name = await promptForText(
+      context,
+      title: '重命名',
+      confirm: '保存',
+      initial: playlist.name,
     );
-    controller.dispose();
-    if (name != null && name.trim().isNotEmpty && name.trim() != playlist.name) {
-      await DatabaseService.renamePlaylist(playlist.id, name.trim());
+    if (name != null && name != playlist.name) {
+      await DatabaseService.renamePlaylist(playlist.id, name);
     }
   }
 
   Future<void> _pickCover(Playlist playlist) async {
-    try {
-      final image = await ImagePicker().pickImage(source: ImageSource.gallery);
-      if (image == null) return;
-      final docs = await getApplicationDocumentsDirectory();
-      final dir = Directory('${docs.path}/bilibeat_covers');
-      if (!await dir.exists()) await dir.create(recursive: true);
-      final ext = image.path.split('.').last;
-      final saved = File('${dir.path}/playlist_${playlist.id}_'
-          '${DateTime.now().millisecondsSinceEpoch}.$ext');
-      await File(image.path).copy(saved.path);
-      await DatabaseService.setPlaylistCover(playlist.id, saved.path);
-    } catch (e) {
-      debugPrint('Playlist cover pick failed: $e');
-    }
+    final path = await pickCoverImage('playlist_${playlist.id}');
+    if (path != null) await DatabaseService.setPlaylistCover(playlist.id, path);
   }
 
   Future<void> _delete(Playlist playlist) async {
     final navigator = Navigator.of(context);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('删除歌单'),
-        content: Text('「${playlist.name}」将被删除，歌曲与本地音频保留。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除', style: TextStyle(color: AppColors.danger)),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
+    if (!await confirmAction(
+      context,
+      title: '删除「${playlist.name}」？',
+      message: '歌曲和下载会保留。',
+      confirm: '删除',
+    )) {
+      return;
+    }
     navigator.pop();
     await DatabaseService.deletePlaylist(playlist.id);
   }
 }
 
-/// Creates a playlist from the 歌单 header and opens it.
-Future<void> createAndOpenPlaylist(BuildContext context) async {
-  final created = await createPlaylistDialog(context);
-  if (created != null && context.mounted) {
-    await PlaylistPage.open(context, created.id);
+/// Multi-select over downloaded songs, for adding to a playlist.
+class _SongPicker extends StatefulWidget {
+  final List<Track> tracks;
+
+  const _SongPicker({required this.tracks});
+
+  static Future<List<Track>?> show(BuildContext context, List<Track> tracks) {
+    return showAppSheet<List<Track>>(
+      context,
+      expand: true,
+      builder: (_) => _SongPicker(tracks: tracks),
+    );
+  }
+
+  @override
+  State<_SongPicker> createState() => _SongPickerState();
+}
+
+class _SongPickerState extends State<_SongPicker> {
+  final Set<String> _selected = {};
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        SheetTitle(
+          '添加歌曲',
+          trailing: TextButton(
+            onPressed: _selected.isEmpty
+                ? null
+                : () => Navigator.pop(context, [
+                      for (final t in widget.tracks)
+                        if (_selected.contains(t.id)) t,
+                    ]),
+            child: Text(
+              _selected.isEmpty ? '添加' : '添加 ${_selected.length} 首',
+              style: TextStyle(
+                color:
+                    _selected.isEmpty ? AppColors.textFaint : AppColors.accent,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 0, 8, 16),
+            itemExtent: SongTile.extent,
+            itemCount: widget.tracks.length,
+            itemBuilder: (context, index) {
+              final track = widget.tracks[index];
+              final checked = _selected.contains(track.id);
+              return SongTile(
+                track: track,
+                onTap: () => setState(() {
+                  checked
+                      ? _selected.remove(track.id)
+                      : _selected.add(track.id);
+                }),
+                trailing: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Icon(
+                    checked
+                        ? Icons.check_circle_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                    color: checked ? AppColors.accent : AppColors.white24,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
   }
 }
 
-/// Asks for a playlist name and creates it. Returns the new playlist.
-Future<Playlist?> createPlaylistDialog(BuildContext context) async {
-  final controller = TextEditingController();
-  final name = await showDialog<String>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('新建歌单'),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        style: AppTypography.body,
-        decoration: const InputDecoration(hintText: '歌单名称'),
-        onSubmitted: (value) => Navigator.pop(ctx, value),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('取消'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, controller.text),
-          child: const Text('创建', style: TextStyle(color: AppColors.accent)),
-        ),
-      ],
-    ),
-  );
-  controller.dispose();
-  if (name == null || name.trim().isEmpty) return null;
-  return DatabaseService.createPlaylist(name);
+/// Asks for a name, creates the playlist and opens it.
+Future<void> createAndOpenPlaylist(BuildContext context) async {
+  final name = await promptForText(context, title: '新建歌单', confirm: '创建');
+  if (name == null) return;
+  final created = await DatabaseService.createPlaylist(name);
+  if (context.mounted) await PlaylistPage.open(context, created.id);
 }

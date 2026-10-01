@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/track.dart';
 import '../theme/haptics.dart';
-import '../widgets/track_options_menu.dart';
+import '../widgets/track_sheet.dart';
 import 'app_services.dart';
 
 /// The one row-tap contract, used by every list in the app:
@@ -18,7 +18,7 @@ void openTrack(BuildContext context, Track track, {List<Track>? queue}) {
     Haptics.light();
     unawaited(services.handler.playTrack(track, queue: queue));
   } else {
-    unawaited(TrackOptionsMenu.show(context, track, queue: queue));
+    unawaited(TrackSheet.show(context, track, queue: queue));
   }
 }
 

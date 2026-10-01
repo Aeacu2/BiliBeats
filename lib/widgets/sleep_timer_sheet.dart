@@ -1,190 +1,113 @@
 import 'package:flutter/material.dart';
 
+import '../app/app_services.dart';
 import '../services/audio_player_handler.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
 import '../utils/format.dart';
-import 'glass_card.dart';
+import 'sheet.dart';
 
-/// Small sleep-timer surface. All timing lives in the handler; this only
-/// selects, displays, and cancels.
-class SleepTimerSheet extends StatefulWidget {
-  final BiliBeatAudioHandler handler;
+/// Pause after a while. All timing lives in the handler; this only selects,
+/// displays and cancels.
+class SleepTimerSheet extends StatelessWidget {
+  const SleepTimerSheet({super.key});
 
-  const SleepTimerSheet({
-    super.key,
-    required this.handler,
-  });
-
-  static Future<void> show(
-    BuildContext context, {
-    required BiliBeatAudioHandler handler,
-  }) {
-    return showModalBottomSheet<void>(
-      context: context,
-      useSafeArea: true,
-      backgroundColor: AppColors.backgroundElevated,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(AppRadius.xl),
-        ),
-      ),
-      builder: (context) {
-        return SleepTimerSheet(handler: handler);
-      },
+  static Future<void> show(BuildContext context) {
+    return showAppSheet<void>(
+      context,
+      builder: (_) => const SleepTimerSheet(),
     );
   }
 
-  @override
-  State<SleepTimerSheet> createState() => _SleepTimerSheetState();
-}
-
-class _SleepTimerSheetState extends State<SleepTimerSheet> {
-  SleepTimerState get _state => widget.handler.sleepTimerState;
-
-  @override
-  void initState() {
-    super.initState();
-    widget.handler.sleepTimerNotifier.addListener(_onChanged);
-  }
-
-  @override
-  void dispose() {
-    widget.handler.sleepTimerNotifier.removeListener(_onChanged);
-    super.dispose();
-  }
-
-  void _onChanged() {
-    if (mounted) setState(() {});
-  }
-
-  void _set(SleepTimerMode mode, {Duration? duration}) {
-    Haptics.selection();
-    widget.handler.setSleepTimer(mode, duration: duration);
-  }
+  static const List<int> _minutes = [15, 30, 45, 60];
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-        child: Column(
+    final handler = AppServices.instance.handler;
+
+    void set(SleepTimerMode mode, {Duration? duration}) {
+      Haptics.selection();
+      handler.setSleepTimer(mode, duration: duration);
+      if (mode != SleepTimerMode.off) Navigator.of(context).pop();
+    }
+
+    return ValueListenableBuilder<SleepTimerState>(
+      valueListenable: handler.sleepTimerNotifier,
+      builder: (context, state, _) {
+        return Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '睡眠定时',
-                    style: AppTypography.title,
-                  ),
-                ),
-                SizedBox(
-                  width: 48,
-                  height: 48,
-                  child: IconButton(
-                    tooltip: '关闭',
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                ),
-              ],
+            SheetTitle(
+              '睡眠定时',
+              detail: !state.isActive
+                  ? null
+                  : state.mode == SleepTimerMode.endOfTrack
+                      ? '播完本首后暂停'
+                      : '${formatDuration(state.remaining)} 后暂停',
+              trailing: state.isActive
+                  ? TextButton(
+                      onPressed: () => set(SleepTimerMode.off),
+                      child: const Text('关闭',
+                          style: TextStyle(color: AppColors.accent)),
+                    )
+                  : null,
             ),
-            if (_state.isActive) ...[
-              const SizedBox(height: 8),
-              GlassCard(
-                child: Row(
-                  children: [
-                    const Icon(Icons.bedtime_rounded,
-                        color: AppColors.accent, size: 22),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        _state.mode == SleepTimerMode.endOfTrack
-                            ? '播完当前歌曲后暂停'
-                            : '${formatDuration(_state.remaining)} 后暂停',
-                        style: AppTypography.bodyMedium,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 20),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  for (final minutes in _minutes)
+                    _Choice(
+                      label: '$minutes 分钟',
+                      onTap: () => set(
+                        SleepTimerMode.duration,
+                        duration: Duration(minutes: minutes),
                       ),
                     ),
-                    TextButton(
-                      onPressed: () => _set(SleepTimerMode.off),
-                      child: const Text('取消',
-                          style: TextStyle(color: AppColors.accent)),
-                    ),
-                  ],
-                ),
+                  _Choice(
+                    label: '播完本首',
+                    selected: state.mode == SleepTimerMode.endOfTrack,
+                    onTap: () => set(SleepTimerMode.endOfTrack),
+                  ),
+                ],
               ),
-            ],
-            const SizedBox(height: 12),
-            _option(
-              label: '15 分钟',
-              selected: _state.mode == SleepTimerMode.duration &&
-                  _state.remaining.inMinutes <= 15,
-              onTap: () =>
-                  _set(SleepTimerMode.duration, duration: const Duration(minutes: 15)),
-            ),
-            _option(
-              label: '30 分钟',
-              selected: _state.mode == SleepTimerMode.duration &&
-                  _state.remaining.inMinutes > 15 &&
-                  _state.remaining.inMinutes <= 30,
-              onTap: () =>
-                  _set(SleepTimerMode.duration, duration: const Duration(minutes: 30)),
-            ),
-            _option(
-              label: '60 分钟',
-              selected: _state.mode == SleepTimerMode.duration &&
-                  _state.remaining.inMinutes > 30,
-              onTap: () =>
-                  _set(SleepTimerMode.duration, duration: const Duration(minutes: 60)),
-            ),
-            _option(
-              label: '播完当前歌曲',
-              selected: _state.mode == SleepTimerMode.endOfTrack,
-              onTap: () => _set(SleepTimerMode.endOfTrack),
             ),
           ],
-        ),
-      ),
+        );
+      },
     );
   }
+}
 
-  Widget _option({
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
-      child: Material(
-        type: MaterialType.transparency,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(AppRadius.md),
-          onTap: onTap,
-          child: Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 6, vertical: 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    label,
-                    style: AppTypography.body.copyWith(
-                      color: selected
-                          ? AppColors.accent
-                          : AppColors.textPrimary,
-                      fontWeight: selected
-                          ? FontWeight.w600
-                          : FontWeight.w400,
-                    ),
-                  ),
-                ),
-                if (selected)
-                  const Icon(Icons.check_rounded,
-                      color: AppColors.accent, size: 20),
-              ],
+class _Choice extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _Choice({
+    required this.label,
+    required this.onTap,
+    this.selected = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? AppColors.textPrimary : AppColors.fieldFill,
+      shape: const StadiumBorder(),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+          child: Text(
+            label,
+            style: AppTypography.body.copyWith(
+              fontWeight: FontWeight.w500,
+              color: selected ? AppColors.background : AppColors.textPrimary,
             ),
           ),
         ),

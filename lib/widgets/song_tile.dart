@@ -2,18 +2,20 @@ import 'package:flutter/material.dart';
 
 import '../app/app_services.dart';
 import '../models/track.dart';
+import '../state/library_controller.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import 'cached_cover_image.dart';
 import 'track_download_button.dart';
-import 'track_options_menu.dart';
+import 'track_sheet.dart';
 
 /// The one song row.
 ///
-/// Every list — library, playlists, search, recommendations — draws songs
-/// with this, so a song looks and behaves the same wherever it appears. The
-/// row that is actually playing is marked (read from the player, not
-/// guessed from the last tap).
+/// Every list — library, playlists, search, queue — draws songs with this,
+/// so a song looks and behaves the same wherever it appears. A row carries
+/// two lines of text and a single control: a download button until the song
+/// is on the device, then ⋯. The row that is actually playing is marked
+/// (read from the player, not guessed from the last tap).
 class SongTile extends StatelessWidget {
   final Track track;
   final VoidCallback? onTap;
@@ -21,18 +23,17 @@ class SongTile extends StatelessWidget {
   /// Leading widget override (e.g. a selection check in edit mode).
   final Widget? leading;
 
-  /// Trailing override. By default: a download control for songs that are
-  /// not downloaded ([showDownload]), then a "more" button.
+  /// Replaces the default trailing control.
   final Widget? trailing;
 
-  /// Show a download/progress control for songs that are not downloaded.
-  final bool showDownload;
-
-  /// The queue the song's menu should play within.
+  /// The queue the song's sheet should play within.
   final List<Track>? queue;
 
-  static const double artSize = 52;
-  static const double extent = 68;
+  /// Second line override (file size in download management, an error…).
+  final String? detail;
+
+  static const double artSize = 48;
+  static const double extent = 64;
 
   const SongTile({
     super.key,
@@ -40,24 +41,25 @@ class SongTile extends StatelessWidget {
     this.onTap,
     this.leading,
     this.trailing,
-    this.showDownload = false,
     this.queue,
+    this.detail,
   });
 
   @override
   Widget build(BuildContext context) {
-    final handler = AppServices.instance.handler;
+    final services = AppServices.instance;
+    final handler = services.handler;
 
     return Material(
       type: MaterialType.transparency,
       child: InkWell(
         onTap: onTap,
-        onLongPress: () => TrackOptionsMenu.show(context, track, queue: queue),
+        onLongPress: () => TrackSheet.show(context, track, queue: queue),
         borderRadius: BorderRadius.circular(AppRadius.md),
         child: SizedBox(
           height: extent,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
+            padding: const EdgeInsets.only(left: 4),
             child: Row(
               children: [
                 if (leading != null) ...[leading!, const SizedBox(width: 12)],
@@ -72,45 +74,36 @@ class SongTile extends StatelessWidget {
                 const SizedBox(width: 14),
                 Expanded(
                   child: ListenableBuilder(
-                    listenable: handler.nowPlaying,
+                    listenable: Listenable.merge(
+                        [handler.nowPlaying, services.library]),
                     builder: (context, _) {
                       final current = handler.nowPlaying.value?.id == track.id;
+                      final downloaded =
+                          services.library.isDownloaded(track.id);
+                      final artist = LibraryController.artistOf(track);
+                      final second = detail ??
+                          (!downloaded && track.duration > 0
+                              ? '$artist · ${formatDuration(Duration(seconds: track.duration))}'
+                              : artist);
                       return Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Row(
-                            children: [
-                              if (current) ...[
-                                const Icon(
-                                  Icons.graphic_eq_rounded,
-                                  size: 15,
-                                  color: AppColors.accent,
-                                ),
-                                const SizedBox(width: 5),
-                              ],
-                              Expanded(
-                                child: Text(
-                                  track.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: AppTypography.body.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                    height: 1.25,
-                                    color: current
-                                        ? AppColors.accent
-                                        : AppColors.textPrimary,
-                                  ),
-                                ),
-                              ),
-                            ],
+                          Text(
+                            track.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.body.copyWith(
+                              fontWeight: FontWeight.w500,
+                              height: 1.25,
+                              color: current
+                                  ? AppColors.accent
+                                  : AppColors.textPrimary,
+                            ),
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            track.duration > 0
-                                ? '${track.uploader} · '
-                                    '${formatDuration(Duration(seconds: track.duration))}'
-                                : track.uploader,
+                            second,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: AppTypography.caption.copyWith(fontSize: 13),
@@ -121,13 +114,12 @@ class SongTile extends StatelessWidget {
                   ),
                 ),
                 trailing ??
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (showDownload)
-                          TrackDownloadButton(track: track, size: 22),
-                        _MoreButton(track: track, queue: queue),
-                      ],
+                    ListenableBuilder(
+                      listenable: services.library,
+                      builder: (context, _) =>
+                          services.library.isDownloaded(track.id)
+                              ? _MoreButton(track: track, queue: queue)
+                              : TrackDownloadButton(track: track, size: 22),
                     ),
               ],
             ),
@@ -147,15 +139,15 @@ class _MoreButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 40,
+      width: 48,
       height: 48,
       child: IconButton(
         tooltip: '更多',
         padding: EdgeInsets.zero,
-        onPressed: () => TrackOptionsMenu.show(context, track, queue: queue),
+        onPressed: () => TrackSheet.show(context, track, queue: queue),
         icon: const Icon(
           Icons.more_horiz_rounded,
-          color: AppColors.textMuted,
+          color: AppColors.textFaint,
           size: 22,
         ),
       ),

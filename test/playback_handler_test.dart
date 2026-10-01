@@ -68,8 +68,7 @@ void main() {
     await handler.dispose();
   });
 
-  test('a song still downloading changes nothing until it is ready',
-      () async {
+  test('a song still downloading changes nothing until it is ready', () async {
     final t = await downloaded(['pb-prep-a', 'pb-prep-b']);
     final fake = FakeAudioPlayer();
     final handler = handlerFor(fake);
@@ -154,8 +153,8 @@ void main() {
   });
 
   test('rapid Next presses each move one track', () async {
-    final t = await downloaded(
-        ['pb-next-a', 'pb-next-b', 'pb-next-c', 'pb-next-d']);
+    final t =
+        await downloaded(['pb-next-a', 'pb-next-b', 'pb-next-c', 'pb-next-d']);
     final fake = FakeAudioPlayer();
     final handler = handlerFor(fake);
     await handler.playTrack(t[0], queue: t);
@@ -168,8 +167,7 @@ void main() {
     await handler.dispose();
   });
 
-  test('Previous restarts the song after 3 seconds, else goes back',
-      () async {
+  test('Previous restarts the song after 3 seconds, else goes back', () async {
     final t = await downloaded(['pb-prev-a', 'pb-prev-b']);
     final fake = FakeAudioPlayer();
     final handler = handlerFor(fake);
@@ -263,8 +261,7 @@ void main() {
     await handler.dispose();
   });
 
-  test('lyric editing repeats the current song instead of moving on',
-      () async {
+  test('lyric editing repeats the current song instead of moving on', () async {
     final t = await downloaded(['pb-hold-a', 'pb-hold-b']);
     final fake = FakeAudioPlayer();
     final handler = handlerFor(fake);
@@ -332,6 +329,60 @@ void main() {
 
     expect(handler.currentTrack, t[0]);
     expect(handler.sleepTimerState.mode, SleepTimerMode.off);
+
+    await handler.dispose();
+  });
+
+  test('each track plays at the volume its loudness calls for', () async {
+    final t = await downloaded(['pb-loud-a', 'pb-loud-b']);
+    await DatabaseService.setTrackLoudness(t[0].id, -8);
+    await DatabaseService.setTrackLoudness(t[1].id, -14);
+    final fake = FakeAudioPlayer();
+    final handler = handlerFor(fake);
+
+    await handler.playTrack(t[0], queue: t);
+    // −8 LUFS → −6 dB to reach the −14 target: half amplitude.
+    expect(fake.volumeValue, closeTo(0.501, 0.005));
+
+    fake.simulateAutoAdvance();
+    await pumpEventQueue();
+    expect(fake.volumeValue, 1.0);
+
+    await handler.setNormalizeVolume(false);
+    fake.simulateAutoAdvance();
+    await pumpEventQueue();
+    expect(handler.currentTrack, t[0]);
+    expect(fake.volumeValue, 1.0, reason: 'switched off, nothing is cut');
+
+    await handler.setNormalizeVolume(true);
+    await handler.dispose();
+  });
+
+  test('an unmeasured download gets its loudness the first time it plays',
+      () async {
+    final t = await downloaded(['pb-backfill-a']);
+    final fake = FakeAudioPlayer();
+    var lookups = 0;
+    final handler = BiliBeatAudioHandler(
+      player: fake,
+      manageAudioSession: false,
+      loudnessLookup: (bvid, cid) async {
+        lookups++;
+        return -8.0;
+      },
+    );
+
+    await handler.playTrack(t[0], queue: t);
+    await waitFor(() => handler.currentTrack?.loudness == -8.0);
+    expect(fake.volumeValue, closeTo(0.501, 0.005));
+    final stored = (await DatabaseService.getDownloadedTracks())
+        .firstWhere((track) => track.id == t[0].id);
+    expect(stored.loudness, -8.0);
+
+    // Asked once, not on every play.
+    await handler.playTrack(t[0], queue: t);
+    await pumpEventQueue();
+    expect(lookups, 1);
 
     await handler.dispose();
   });

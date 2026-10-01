@@ -88,6 +88,7 @@ class LocalAudioServer {
   int get port => _server.port;
 
   String urlFor(String name) => 'http://127.0.0.1:$port/$name';
+
   /// Serves [bytes] (padded to >= 1024) immediately as audio/mp4.
   void serveInstant(String name, [List<int>? bytes]) {
     _errors.remove(name);
@@ -96,8 +97,7 @@ class LocalAudioServer {
   }
 
   /// Blocks the response until [gate] completes, then serves audio.
-  void serveGated(String name, Completer<void> gate,
-      [List<int>? bytes]) {
+  void serveGated(String name, Completer<void> gate, [List<int>? bytes]) {
     _errors.remove(name);
     _instant[name] = _padded(bytes);
     _gates[name] = gate;

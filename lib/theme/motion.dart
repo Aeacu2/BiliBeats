@@ -52,8 +52,7 @@ class AppMotion {
   /// A confident spring with a small, tasteful overshoot (~10%). Reserved for
   /// the focal interactive element — the album art breathing on play/pause —
   /// where a touch of physical life reads as premium rather than decorative.
-  static final Curve springBouncy =
-      SpringCurve(stiffness: 210, damping: 16);
+  static final Curve springBouncy = SpringCurve(stiffness: 210, damping: 16);
 }
 
 /// A [Curve] backed by a real damped-spring simulation, so implicit animations

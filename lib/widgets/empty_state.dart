@@ -2,60 +2,39 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
-/// A quiet empty-state placeholder: a flat medallion with a muted icon,
-/// plus a title and optional subtitle. Used wherever a list can be empty.
-/// Accent is reserved for interaction, so empty states do not glow.
+/// What a list shows when it has nothing: a faint glyph and a few words.
 class EmptyState extends StatelessWidget {
   final IconData icon;
   final String title;
-  final String? subtitle;
 
-  static const double _medallion = 84;
+  /// An optional way forward (e.g. a 重试 button).
+  final Widget? action;
 
   const EmptyState({
     super.key,
     required this.icon,
     required this.title,
-    this.subtitle,
+    this.action,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            width: _medallion,
-            height: _medallion,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.white06,
-              border: Border.all(color: AppColors.hairline),
-            ),
-            child: Icon(
-              icon,
-              size: _medallion * 0.42,
-              color: AppColors.textMuted,
-            ),
-          ),
-          const SizedBox(height: 18),
-          Text(
-            title,
-            textAlign: TextAlign.center,
-            style: AppTypography.headline,
-          ),
-          if (subtitle != null && subtitle!.isNotEmpty) ...[
-            const SizedBox(height: 6),
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 48, horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 40, color: AppColors.white24),
+            const SizedBox(height: 14),
             Text(
-              subtitle!,
+              title,
               textAlign: TextAlign.center,
-              style: AppTypography.caption,
+              style: AppTypography.body.copyWith(color: AppColors.textMuted),
             ),
+            if (action != null) ...[const SizedBox(height: 12), action!],
           ],
-        ],
+        ),
       ),
     );
   }

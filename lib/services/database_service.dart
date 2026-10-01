@@ -7,7 +7,6 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/track.dart';
 import '../models/playlist.dart';
-import '../models/lyric_line.dart';
 import '../models/playback_state.dart';
 import 'audio_download_service.dart';
 
@@ -54,26 +53,9 @@ List<Playlist> _parsePlaylistList(String json) {
   return out;
 }
 
-Map<String, LyricsResult> _parseLyricsMap(String json) {
-  final map =
-      DatabaseService._readPayload(jsonDecode(json)) as Map<String, dynamic>? ??
-          {};
-  final result = <String, LyricsResult>{};
-  map.forEach((key, value) {
-    try {
-      result[key] =
-          LyricsResult.fromMap(Map<String, dynamic>.from(value as Map));
-    } catch (e) {
-      debugPrint('Lyrics cache entry $key skipped: $e');
-    }
-  });
-  return result;
-}
-
 class DatabaseService {
   static final List<Track> _recentlyPlayed = [];
   static final List<Track> _downloadedTracks = [];
-  static final Map<String, LyricsResult> _lyricsCache = {};
   static final List<String> _searchHistory = [];
   static final StreamController<void> _libraryUpdateController =
       StreamController<void>.broadcast();
@@ -91,9 +73,6 @@ class DatabaseService {
   /// handler auto-advances, which no UI action would otherwise notice.
   static Stream<void> get historyUpdateStream =>
       _historyUpdateController.stream;
-
-  /// Cap on the in-memory + on-disk lyrics cache.
-  static const int _maxLyricsCacheEntries = 200;
 
   static final List<Playlist> _playlists = [
     Playlist(id: Playlist.favoritesId, name: '收藏', tracks: [])
@@ -141,7 +120,6 @@ class DatabaseService {
       await _loadTracks('$dir/bilibeat_recently_played.json', _recentlyPlayed);
       await _loadPlaylists('$dir/bilibeat_playlists.json');
       await _loadSearchHistory('$dir/bilibeat_search_history.json');
-      await _loadLyricsCache('$dir/bilibeat_lyrics.json');
     } catch (e) {
       debugPrint('DatabaseService _ensureLoaded error: $e');
     }
@@ -284,19 +262,6 @@ class DatabaseService {
       _searchHistory
         ..clear()
         ..addAll(list.map((e) => e.toString()));
-    } catch (e) {
-      debugPrint('DatabaseService load $path skipped: $e');
-    }
-  }
-
-  static Future<void> _loadLyricsCache(String path) async {
-    try {
-      final file = File(path);
-      if (!await file.exists()) return;
-      final parsed = await compute(_parseLyricsMap, await file.readAsString());
-      _lyricsCache
-        ..clear()
-        ..addAll(parsed);
     } catch (e) {
       debugPrint('DatabaseService load $path skipped: $e');
     }
@@ -483,6 +448,34 @@ class DatabaseService {
     if (!_historyUpdateController.isClosed) _historyUpdateController.add(null);
   }
 
+  /// Records a track's measured loudness on every stored copy, leaving the
+  /// rest of its (possibly edited) metadata alone.
+  static Future<void> setTrackLoudness(String trackId, double loudness) async {
+    await _ensureLoaded();
+    Track? stored;
+    bool patch(List<Track> list) {
+      final index = list.indexWhere((t) => t.id == trackId);
+      if (index == -1 || list[index].loudness == loudness) return false;
+      stored = list[index] = list[index].copyWith(loudness: loudness);
+      return true;
+    }
+
+    if (patch(_downloadedTracks)) {
+      await _persistDownloaded();
+      await AudioDownloadService.saveTrackMetadata(stored!, force: true);
+    }
+    var playlistsChanged = false;
+    for (final playlist in _playlists) {
+      if (patch(playlist.tracks)) playlistsChanged = true;
+    }
+    if (playlistsChanged) await _persistPlaylists();
+    if (patch(_recentlyPlayed)) await _persistRecentlyPlayed();
+    // Other holders of the track (lists, sheets) pick up the new copy.
+    if (stored != null && !_libraryUpdateController.isClosed) {
+      _libraryUpdateController.add(null);
+    }
+  }
+
   static Future<List<Playlist>> getPlaylists() async {
     await _ensureLoaded();
     return List<Playlist>.from(_playlists);
@@ -553,14 +546,6 @@ class DatabaseService {
     if (pl.id.isEmpty) return;
     _moveWithin(pl.tracks, oldIndex, newIndex);
     await _persistPlaylists();
-  }
-
-  /// The same, for the 本地 library, which is a list rather than a playlist.
-  static Future<void> reorderDownloaded(int oldIndex, int newIndex) async {
-    await _ensureLoaded();
-    _moveWithin(_downloadedTracks, oldIndex, newIndex);
-    await _persistDownloaded();
-    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
   }
 
   static void _moveWithin(List<Track> list, int oldIndex, int newIndex) {
@@ -701,29 +686,6 @@ class DatabaseService {
     if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
   }
 
-  /// Explicit broader removal: deletes the local audio AND removes the
-  /// track from every playlist, Favorites and Recently Played. Callers
-  /// must confirm with copy stating this scope.
-  static Future<void> removeFromLibrary(Track track) async {
-    await _ensureLoaded();
-    await AudioDownloadService.delete(track);
-    _downloadedTracks.removeWhere((t) => t.id == track.id);
-    _downloadRemovedController.add({track.id});
-    await _persistDownloaded();
-    for (final pl in _playlists) {
-      pl.tracks.removeWhere((t) => t.id == track.id);
-    }
-    await _persistPlaylists();
-    final removedFromHistory =
-        _recentlyPlayed.where((t) => t.id == track.id).isNotEmpty;
-    _recentlyPlayed.removeWhere((t) => t.id == track.id);
-    if (removedFromHistory) await _persistRecentlyPlayed();
-    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
-    if (removedFromHistory && !_historyUpdateController.isClosed) {
-      _historyUpdateController.add(null);
-    }
-  }
-
   static Future<List<Track>> getDownloadedTracks() async {
     await _ensureLoaded();
     return List<Track>.from(_downloadedTracks);
@@ -808,143 +770,25 @@ class DatabaseService {
     }
   }
 
-  /// Changes synchronously whenever the user deliberately selects lyrics.
-  static int _nextLyricsRevision = 0;
+  // ---------------------------------------------------------------------------
+  // Shared file access for sibling stores (lyrics)
+  // ---------------------------------------------------------------------------
 
-  static final Map<String, int> _lyricsRevisions = {};
-
-  /// Deliberate choices made during this process lifetime.
-  ///
-  /// Retained for the session so a manually selected provider result is
-  /// not later rejected by automatic title validation.
-  ///
-  /// This is not a second persistent cache. The existing lyrics cache
-  /// remains the on-disk store.
-  static final Map<String, LyricsResult> _manualLyricsSelections = {};
-
-  static int lyricsRevisionFor(String trackId) =>
-      _lyricsRevisions[trackId] ?? 0;
-
-  static LyricsResult? manualLyricsFor(String trackId) =>
-      _manualLyricsSelections[trackId];
-
-  /// Saves a deliberate lyric choice. After this patch, [cacheLyrics]
-  /// represents a manual selection; the automatic caller in `main.dart`
-  /// must use [cacheAutomaticLyrics].
-  ///
-  /// This wrapper is intentionally not async: revision invalidation and
-  /// the immediately readable manual selection happen before returning.
-  static Future<void> cacheLyrics(
-    String trackId,
-    LyricsResult lyrics,
-  ) {
-    final revision = ++_nextLyricsRevision;
-
-    _lyricsRevisions[trackId] = revision;
-    _manualLyricsSelections[trackId] = lyrics;
-
-    return _saveManualLyrics(
-      trackId,
-      lyrics,
-      revision: revision,
-    );
+  /// Reads `<documents>/[name]` as text, or null when it does not exist.
+  static Future<String?> readStoreFile(String name) async {
+    final file = File('${await _docs()}/$name');
+    if (!await file.exists()) return null;
+    return file.readAsString();
   }
 
-  static Future<void> _saveManualLyrics(
-    String trackId,
-    LyricsResult lyrics, {
-    required int revision,
-  }) async {
-    await _ensureLoaded();
-
-    // Another manual selection already superseded this one.
-    if (lyricsRevisionFor(trackId) != revision) return;
-
-    _storeLyricsInMemory(trackId, lyrics);
-    await _persistLyrics();
-  }
-
-  /// Commits an automatic result only if no deliberate selection has
-  /// superseded the request.
-  ///
-  /// Ownership is checked after _ensureLoaded and immediately before
-  /// changing the cache. There is no await between that check and mutation.
-  static Future<bool> cacheAutomaticLyrics(
-    String trackId,
-    LyricsResult lyrics, {
-    required int expectedRevision,
-  }) async {
-    await _ensureLoaded();
-
-    if (lyricsRevisionFor(trackId) != expectedRevision ||
-        _manualLyricsSelections.containsKey(trackId)) {
-      return false;
-    }
-
-    _storeLyricsInMemory(trackId, lyrics);
-    await _persistLyrics();
-
-    // A manual choice could have arrived while persistence was pending.
-    // The caller must not publish this automatic result in that case.
-    return lyricsRevisionFor(trackId) == expectedRevision &&
-        !_manualLyricsSelections.containsKey(trackId);
-  }
-
-  static void _storeLyricsInMemory(
-    String trackId,
-    LyricsResult lyrics,
-  ) {
-    // Do not persist "not found" placeholders: they would stick forever and
-    // stop the app from ever retrying a lookup that might succeed later.
-    if (lyrics.source == 'none') {
-      _lyricsCache.remove(trackId);
-      return;
-    }
-
-    // LRU: move existing key to end (most-recent) before re-insert.
-    _lyricsCache.remove(trackId);
-    _lyricsCache[trackId] = lyrics;
-
-    while (_lyricsCache.length > _maxLyricsCacheEntries) {
-      _lyricsCache.remove(_lyricsCache.keys.first);
-    }
-  }
-
-  static Future<LyricsResult?> getCachedLyrics(
-    String trackId,
-  ) async {
-    await _ensureLoaded();
-
-    // Check after the await: a manual selection may have been made while
-    // loading the database.
-    final manual = _manualLyricsSelections[trackId];
-    if (manual != null) return manual;
-
-    final cached = _lyricsCache[trackId];
-
-    if (cached != null) {
-      // Touch for LRU: move to end.
-      _lyricsCache.remove(trackId);
-      _lyricsCache[trackId] = cached;
-    }
-
-    return cached;
-  }
-
-  static Future<void> _persistLyrics() async {
+  /// Atomically writes [payload] (wrapped in the versioned envelope) to
+  /// `<documents>/[name]`, through the same write lock as every other file.
+  /// Failures propagate to the caller.
+  static Future<void> writeStoreFile(String name, Object payload) async {
     final dir = await _docs();
-
-    // Take the snapshot after resolving the directory.
-    //
-    // Snapshot creation and entry into _writeJsonAtomically happen in one
-    // synchronous turn, so the existing write lock preserves their order.
-    final map = _lyricsCache.map(
-      (key, value) => MapEntry(key, value.toMap()),
-    );
-
-    await _writeJsonAtomically(
-      '$dir/bilibeat_lyrics.json',
-      _envelope(map),
-    );
+    await _writeJsonAtomically('$dir/$name', _envelope(payload));
   }
+
+  /// Unwraps a decoded store file (see [_readPayload]).
+  static dynamic unwrapStorePayload(dynamic decoded) => _readPayload(decoded);
 }

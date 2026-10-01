@@ -1,30 +1,28 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
 import '../utils/format.dart';
 
-/// Playback position slider with elapsed/remaining readouts.
+/// Playback position: a thin line you can grab, with the elapsed and
+/// remaining time beneath it.
 ///
-/// The drag position is owned here: while the thumb is held, the slider
-/// shows the dragged value instead of the live stream position, then seeks
-/// on release. [isActive] false disables seeking entirely (seeking a track
-/// that is not the one playing is meaningless).
+/// While the thumb is held the bar shows the dragged value rather than the
+/// live position, and seeks once on release.
 class PlayerSeekBar extends StatefulWidget {
-  final ValueNotifier<Duration> positionNotifier;
-  final ValueNotifier<Duration> durationNotifier;
+  final ValueListenable<Duration> position;
+  final ValueListenable<Duration> duration;
 
-  /// Duration to use before the streamed duration is known; pass 1.0 when
-  /// the track has none of its own so the slider stays well-formed.
-  final double fallbackSeconds;
-  final bool isActive;
+  /// Used until the real duration is known.
+  final Duration fallback;
   final ValueChanged<Duration> onSeek;
 
   const PlayerSeekBar({
     super.key,
-    required this.positionNotifier,
-    required this.durationNotifier,
-    required this.fallbackSeconds,
-    required this.isActive,
+    required this.position,
+    required this.duration,
+    required this.fallback,
     required this.onSeek,
   });
 
@@ -33,77 +31,93 @@ class PlayerSeekBar extends StatefulWidget {
 }
 
 class _PlayerSeekBarState extends State<PlayerSeekBar> {
-  double? _dragValue;
+  double? _drag;
+
+  static const TextStyle _time = TextStyle(
+    color: AppColors.textMuted,
+    fontSize: 11.5,
+    fontWeight: FontWeight.w500,
+    fontFeatures: [FontFeature.tabularFigures()],
+  );
 
   @override
   Widget build(BuildContext context) {
-    const timeStyle = TextStyle(
-      color: AppColors.textMuted,
-      fontSize: 12,
-      fontFeatures: [FontFeature.tabularFigures()],
-    );
-    return AnimatedBuilder(
-      animation:
-          Listenable.merge([widget.durationNotifier, widget.positionNotifier]),
+    return ListenableBuilder(
+      listenable: Listenable.merge([widget.duration, widget.position]),
       builder: (context, _) {
-        final streamedMs = widget.durationNotifier.value.inMilliseconds.toDouble();
-        final streamedSec = streamedMs / 1000.0;
-        final double maxSec =
-            widget.isActive && streamedSec > 0 ? streamedSec : widget.fallbackSeconds;
-        final double posSec = widget.isActive
-            ? (_dragValue ??
-                    widget.positionNotifier.value.inMilliseconds.toDouble() / 1000.0)
-                .clamp(0.0, maxSec)
-            : 0.0;
-        var remaining = Duration(milliseconds: ((maxSec - posSec) * 1000).round());
-        if (remaining < Duration.zero) remaining = Duration.zero;
+        final known = widget.duration.value;
+        final total =
+            (known > Duration.zero ? known : widget.fallback).inMilliseconds /
+                1000.0;
+        final max = total > 0 ? total : 1.0;
+        final at = (_drag ?? widget.position.value.inMilliseconds / 1000.0)
+            .clamp(0.0, max);
+        Duration seconds(double s) =>
+            Duration(milliseconds: (s * 1000).round());
 
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
-                trackHeight: 4,
-                activeTrackColor: AppColors.accent,
-                thumbColor: AppColors.accent,
-                overlayColor: AppColors.accent22,
-                thumbShape:
-                    const RoundSliderThumbShape(enabledThumbRadius: 6),
-                overlayShape:
-                    const RoundSliderOverlayShape(overlayRadius: 14),
-                disabledActiveTrackColor: AppColors.hairlineStrong,
-                disabledInactiveTrackColor: AppColors.hairline,
-                disabledThumbColor: AppColors.textFaint,
+                trackHeight: _drag == null ? 3 : 5,
+                activeTrackColor: AppColors.textPrimary,
+                inactiveTrackColor: AppColors.white24,
+                thumbColor: AppColors.textPrimary,
+                overlayColor: AppColors.white12,
+                trackShape: const _FullWidthTrack(),
+                thumbShape: RoundSliderThumbShape(
+                  enabledThumbRadius: _drag == null ? 4 : 7,
+                  elevation: 0,
+                  pressedElevation: 0,
+                ),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
               ),
-              child: Slider(
-                value: posSec,
-                max: maxSec,
-                label: formatDuration(Duration(milliseconds: (posSec * 1000).round())),
-                onChanged: widget.isActive
-                    ? (v) => setState(() => _dragValue = v)
-                    : null,
-                onChangeStart: (v) => setState(() => _dragValue = v),
-                onChangeEnd: (v) {
-                  Haptics.light();
-                  widget.onSeek(Duration(milliseconds: (v * 1000).round()));
-                  setState(() => _dragValue = null);
-                },
+              child: SizedBox(
+                height: 28,
+                child: Slider(
+                  value: at,
+                  max: max,
+                  semanticFormatterCallback: (v) => formatDuration(seconds(v)),
+                  onChangeStart: (v) => setState(() => _drag = v),
+                  onChanged: (v) => setState(() => _drag = v),
+                  onChangeEnd: (v) {
+                    Haptics.light();
+                    widget.onSeek(seconds(v));
+                    setState(() => _drag = null);
+                  },
+                ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(formatDuration(Duration(milliseconds: (posSec * 1000).round())),
-                      style: timeStyle),
-                  Text('-${formatDuration(remaining)}', style: timeStyle),
-                ],
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(formatDuration(seconds(at)), style: _time),
+                Text('-${formatDuration(seconds(max - at))}', style: _time),
+              ],
             ),
           ],
         );
       },
     );
+  }
+}
+
+/// A slider track that spans the whole width, so the bar lines up with the
+/// title above and the times below instead of being inset by the thumb.
+class _FullWidthTrack extends RoundedRectSliderTrackShape {
+  const _FullWidthTrack();
+
+  @override
+  Rect getPreferredRect({
+    required RenderBox parentBox,
+    Offset offset = Offset.zero,
+    required SliderThemeData sliderTheme,
+    bool isEnabled = false,
+    bool isDiscrete = false,
+  }) {
+    final height = sliderTheme.trackHeight ?? 3;
+    final top = offset.dy + (parentBox.size.height - height) / 2;
+    return Rect.fromLTWH(offset.dx, top, parentBox.size.width, height);
   }
 }

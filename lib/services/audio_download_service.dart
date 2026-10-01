@@ -109,7 +109,7 @@ class AudioDownloadService {
   ///
   /// Playback calls this on every start, with whatever `Track` object the
   /// caller happens to be holding — which may predate an edit the user made in
-  /// 信息与歌词. Writing that unconditionally silently reverted the edit on
+  /// 编辑信息. Writing that unconditionally silently reverted the edit on
   /// disk, so by default this only *creates* the file. Deliberate edits pass
   /// [force] to overwrite.
   static Future<void> saveTrackMetadata(Track track,
@@ -147,7 +147,8 @@ class AudioDownloadService {
   static const int _memoCap = 1024;
 
   /// True when a complete, verified audio file exists on disk for [track].
-  static Future<bool> isDownloaded(Track track) => isDownloadedById(_key(track));
+  static Future<bool> isDownloaded(Track track) =>
+      isDownloadedById(_key(track));
 
   /// String-id variant of [isDownloaded] for callers that only hold an id.
   static Future<bool> isDownloadedById(String id) async {
@@ -284,6 +285,8 @@ class AudioDownloadService {
     if (url == null || url.isEmpty) {
       final info = await BilibiliSdk.fetchAudioStream(track.bvid, track.cid);
       url = info?['url'];
+      final loudness = double.tryParse(info?['loudness'] ?? '');
+      if (loudness != null) track = track.copyWith(loudness: loudness);
     }
     if (url == null || url.isEmpty) {
       _emit(DownloadProgress(track.id, 0, null, false, '无法获取音源下载链接'));
@@ -309,9 +312,9 @@ class AudioDownloadService {
       }
 
       final res = await req.close().timeout(
-        const Duration(seconds: 15),
-        onTimeout: () => throw TimeoutException('CDN close timeout'),
-      );
+            const Duration(seconds: 15),
+            onTimeout: () => throw TimeoutException('CDN close timeout'),
+          );
       // A .part that already covers the whole file (e.g. a crash between the
       // rename and the .ready marker) makes the CDN answer 416. The bytes on
       // disk are complete — finalize them instead of failing the download.
@@ -346,7 +349,7 @@ class AudioDownloadService {
         } catch (e) {
           debugPrint('416 ready create failed: $e');
         }
-        await saveTrackMetadata(track);
+        await saveTrackMetadata(track, force: track.loudness != null);
         _downloadedMemo[_key(track)] = true;
         _emit(DownloadProgress(track.id, existing, existing, true, null));
         await DatabaseService.saveDownloadedTrack(track);
@@ -388,7 +391,8 @@ class AudioDownloadService {
       // idle timeout once headers arrived; chunk stream can hang forever.
       final timeoutRes = res.timeout(
         const Duration(seconds: 30),
-        onTimeout: (sink) => sink.addError(TimeoutException('CDN chunk timeout')),
+        onTimeout: (sink) =>
+            sink.addError(TimeoutException('CDN chunk timeout')),
       );
       await for (final chunk in timeoutRes) {
         sink.add(chunk);
@@ -443,7 +447,7 @@ class AudioDownloadService {
       } catch (e) {
         debugPrint('ready create failed: $e');
       }
-      await saveTrackMetadata(track);
+      await saveTrackMetadata(track, force: track.loudness != null);
       _downloadedMemo[_key(track)] = true;
 
       _emit(DownloadProgress(track.id, received, total, true, null));

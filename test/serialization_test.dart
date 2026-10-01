@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:bilibeat/models/lyric_line.dart';
+import 'package:bilibeat/models/lyrics.dart';
 import 'package:bilibeat/models/playlist.dart';
 import 'package:bilibeat/models/track.dart';
 
@@ -38,7 +38,8 @@ void main() {
       expect(rt.coverUrl, t.coverUrl);
       expect(rt.duration, t.duration);
       expect(rt.audioUrl, t.audioUrl);
-      expect(rt, t); // identity is the id — rehydrated tracks must compare equal
+      expect(
+          rt, t); // identity is the id — rehydrated tracks must compare equal
     });
 
     test('null audioUrl survives the round-trip', () {
@@ -111,7 +112,8 @@ void main() {
 
   group('LyricLine', () {
     test('JSON round-trip preserves time, text and translation', () {
-      final line = LyricLine(time: 72.5, text: '歌词', translation: 'translation');
+      const line =
+          LyricLine(time: 72.5, text: '歌词', translation: 'translation');
       final rt = LyricLine.fromMap(throughJson(line.toMap()));
       expect(rt.time, 72.5);
       expect(rt.text, '歌词');
@@ -125,36 +127,77 @@ void main() {
     });
   });
 
-  group('LyricsResult', () {
-    test('JSON round-trip preserves source, titles and lines', () {
-      final res = LyricsResult(
+  group('Lyrics', () {
+    test('JSON round-trip preserves source, titles, lines, offset and pin', () {
+      const res = Lyrics(
         source: 'netease',
-        songTitle: '歌名',
-        artistName: '歌手',
+        title: '歌名',
+        artist: '歌手',
+        offset: -0.35,
+        pinned: true,
         lines: [
           LyricLine(time: 0, text: '第一行'),
           LyricLine(time: 12.34, text: '第二行', translation: '译'),
         ],
       );
-      final rt = LyricsResult.fromMap(throughJson(res.toMap()));
+      final rt = Lyrics.fromMap(throughJson(res.toMap()));
       expect(rt.source, 'netease');
-      expect(rt.songTitle, '歌名');
-      expect(rt.artistName, '歌手');
+      expect(rt.title, '歌名');
+      expect(rt.artist, '歌手');
+      expect(rt.offset, -0.35);
+      expect(rt.pinned, isTrue);
       expect(rt.lines, hasLength(2));
       expect(rt.lines[1].time, 12.34);
       expect(rt.lines[1].translation, '译');
     });
 
-    test('nullable titles survive and default source is none', () {
-      final rt = LyricsResult.fromMap(
-          throughJson(const LyricsResult(source: 'user', lines: []).toMap()));
-      expect(rt.source, 'user');
-      expect(rt.songTitle, isNull);
-      expect(rt.artistName, isNull);
-
-      final bare = LyricsResult.fromMap(throughJson({'lines': []}));
+    test('defaults: no source is none, unpinned, no offset', () {
+      final bare = Lyrics.fromMap(throughJson({'lines': []}));
       expect(bare.source, 'none');
       expect(bare.lines, isEmpty);
+      expect(bare.pinned, isFalse);
+      expect(bare.offset, 0.0);
+    });
+
+    test('files from before pinning existed keep deliberate choices', () {
+      // A paste used to be recognisable only by its source.
+      final pasted = Lyrics.fromMap(throughJson({
+        'source': 'user',
+        'songTitle': '自定义歌词',
+        'lines': [
+          {'time': 1, 'text': 'x'}
+        ],
+      }));
+      expect(pasted.pinned, isTrue);
+      final current =
+          Lyrics.fromMap(throughJson({'source': 'current', 'lines': []}));
+      expect(current.pinned, isTrue);
+      expect(current.source, 'user');
+      final automatic =
+          Lyrics.fromMap(throughJson({'source': 'netease', 'lines': []}));
+      expect(automatic.pinned, isFalse);
+    });
+
+    test('synced means timestamps, not just lines', () {
+      const timed = Lyrics(source: 'user', lines: [
+        LyricLine(time: 0, text: 'a'),
+        LyricLine(time: 4, text: 'b'),
+      ]);
+      const plain = Lyrics(source: 'user', lines: [
+        LyricLine(time: 0, text: 'a'),
+        LyricLine(time: 0, text: 'b'),
+      ]);
+      expect(timed.synced, isTrue);
+      expect(plain.synced, isFalse);
+    });
+  });
+
+  group('Track loudness', () {
+    test('survives the round-trip and is absent when unknown', () {
+      final measured = _track().copyWith(loudness: -9.5);
+      expect(Track.fromMap(throughJson(measured.toMap())).loudness, -9.5);
+      expect(_track().toMap().containsKey('loudness'), isFalse);
+      expect(Track.fromMap(throughJson(_track().toMap())).loudness, isNull);
     });
   });
 }

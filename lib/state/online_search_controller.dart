@@ -8,7 +8,6 @@ import '../services/database_service.dart';
 
 /// Bilibili search results with pagination and search history.
 ///
-/// Lives above the shared search bar so both tabs see the same results.
 /// Every request carries a token; a slow, older request can never write
 /// into a newer query's results or loading state.
 class OnlineSearchController extends ChangeNotifier {
