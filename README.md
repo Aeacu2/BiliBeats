@@ -138,4 +138,4 @@ tool/release.sh patch "修复了某某问题"   # 或 minor / major，可跟多�
 
 ## 许可证
 
-MIT
+本项目基于 [GNU General Public License v3.0 (GPL-3.0)](LICENSE) 开源。
