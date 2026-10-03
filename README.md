@@ -4,7 +4,7 @@
 
 ## 下载与安装
 
-- **[最新版本](https://github.com/Aeacu2/BiliBeat/releases/latest)**
+- **[最新版本](https://github.com/Aeacu2/BiliBeats/releases/latest)**
 
 ---
 
