@@ -18,7 +18,7 @@ import 'cached_cover_image.dart';
 /// With nothing playing and nothing on its way there is no card at all.
 /// Tap to open the player; swipe sideways to change song.
 class MiniPlayer extends StatelessWidget {
-  final BiliBeatAudioHandler handler;
+  final BiliBeatsAudioHandler handler;
   final VoidCallback onTap;
 
   const MiniPlayer({
@@ -27,12 +27,12 @@ class MiniPlayer extends StatelessWidget {
     required this.onTap,
   });
 
-  static const double _height = 60;
-  static const double _art = 42;
-  static const double _gutter = 8;
+  static const double _height = 72;
+  static const double _art = 52;
+  static const double _gutter = 10;
 
   static const BorderRadius cardRadius =
-      BorderRadius.all(Radius.circular(AppRadius.md));
+      BorderRadius.all(Radius.circular(AppRadius.lg));
 
   @override
   Widget build(BuildContext context) {
@@ -49,7 +49,7 @@ class MiniPlayer extends StatelessWidget {
         final visible = track != null || preparing != null;
         // Text can grow with the system font size; the card grows with it.
         final scaler = MediaQuery.textScalerOf(context);
-        final extra = (scaler.scale(15) - 15) + (scaler.scale(12) - 12);
+        final extra = (scaler.scale(16) - 16) + (scaler.scale(13) - 13);
 
         return AnimatedSize(
           duration: AppMotion.base,
@@ -96,11 +96,11 @@ class MiniPlayer extends StatelessWidget {
 
   Widget _preparingOnly(Track preparing) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
       child: Row(
         children: [
           ClipRRect(
-            borderRadius: BorderRadius.circular(AppRadius.sm - 2),
+            borderRadius: BorderRadius.circular(AppRadius.sm),
             child: CachedCoverImage(
               url: preparing.coverUrl,
               width: _art,
@@ -159,12 +159,12 @@ class MiniPlayer extends StatelessWidget {
                     child: InkWell(
                       onTap: onTap,
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(9, 0, 4, 0),
+                        padding: const EdgeInsets.fromLTRB(10, 0, 4, 0),
                         child: Row(
                           children: [
                             ClipRRect(
                               borderRadius:
-                                  BorderRadius.circular(AppRadius.sm - 2),
+                                  BorderRadius.circular(AppRadius.sm),
                               child: CachedCoverImage(
                                 url: track.coverUrl,
                                 width: _art,
@@ -182,15 +182,17 @@ class MiniPlayer extends StatelessWidget {
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: AppTypography.body.copyWith(
+                                      fontSize: 16,
                                       fontWeight: FontWeight.w600,
                                       height: 1.25,
                                     ),
                                   ),
-                                  const SizedBox(height: 2),
+                                  const SizedBox(height: 3),
                                   preparing != null
                                       ? _preparingLine(
                                           preparing,
                                           AppTypography.caption.copyWith(
+                                            fontSize: 13,
                                             color: AppColors.accent,
                                           ),
                                         )
@@ -198,7 +200,8 @@ class MiniPlayer extends StatelessWidget {
                                           artist,
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
-                                          style: AppTypography.caption,
+                                          style: AppTypography.caption
+                                              .copyWith(fontSize: 13),
                                         ),
                                 ],
                               ),
@@ -214,7 +217,7 @@ class MiniPlayer extends StatelessWidget {
             _button(
               tooltip: playing ? '暂停' : '播放',
               icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-              size: 30,
+              size: 36,
               onPressed: () {
                 Haptics.light();
                 handler.togglePlayPause();
@@ -223,13 +226,13 @@ class MiniPlayer extends StatelessWidget {
             _button(
               tooltip: '下一首',
               icon: Icons.skip_next_rounded,
-              size: 28,
+              size: 34,
               onPressed: () {
                 Haptics.selection();
                 handler.skipToNext();
               },
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 6),
           ],
         ),
         Positioned(
@@ -249,8 +252,8 @@ class MiniPlayer extends StatelessWidget {
     required VoidCallback onPressed,
   }) {
     return SizedBox(
-      width: 44,
-      height: 48,
+      width: 52,
+      height: 56,
       child: IconButton(
         tooltip: tooltip,
         padding: EdgeInsets.zero,
@@ -262,7 +265,7 @@ class MiniPlayer extends StatelessWidget {
 }
 
 class _Progress extends StatelessWidget {
-  final BiliBeatAudioHandler handler;
+  final BiliBeatsAudioHandler handler;
 
   const _Progress({required this.handler});
 

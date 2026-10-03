@@ -95,7 +95,9 @@ class AudioDownloadService {
     final tmp = File('$path.${DateTime.now().microsecondsSinceEpoch}.tmp');
     await tmp.writeAsString(content, flush: true);
     final target = File(path);
-    if (await target.exists()) {
+    // Only Windows needs the target gone before a rename (see
+    // DatabaseService._writeJsonAtomically).
+    if (Platform.isWindows && await target.exists()) {
       try {
         await target.delete();
       } catch (e) {

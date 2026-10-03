@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app/app_services.dart';
 import '../models/track.dart';
 import '../services/database_service.dart';
+import '../services/track_credit.dart';
 import '../services/track_naming.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
@@ -35,7 +36,7 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
   late final TextEditingController _title =
       TextEditingController(text: widget.track.title);
   late final TextEditingController _artist =
-      TextEditingController(text: widget.track.uploader);
+      TextEditingController(text: TrackCredit.artistOf(widget.track));
   late String _cover = widget.track.coverUrl;
 
   bool _identifying = false;
@@ -63,7 +64,7 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
     if (!mounted) return;
     setState(() => _identifying = false);
     if (found == null) {
-      showAppSnackBar(ScaffoldMessenger.of(context), message: '没有识别出这首歌');
+      showAppSnackBar(ScaffoldMessenger.of(context), message: '没有匹配到这首歌');
       return;
     }
     _title.text = found.title;
@@ -79,7 +80,7 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
     final track = widget.track;
     if (title.isEmpty ||
         (title == track.title &&
-            artist == track.uploader &&
+            artist == TrackCredit.artistOf(track) &&
             _cover == track.coverUrl)) {
       Navigator.pop(context);
       return;
@@ -88,8 +89,9 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
     setState(() => _saving = true);
     final updated = track.copyWith(
       title: title,
-      uploader: artist.isEmpty ? track.uploader : artist,
+      uploader: artist.isEmpty ? TrackCredit.artistOf(track) : artist,
       coverUrl: _cover,
+      named: true,
     );
     try {
       await DatabaseService.updateTrackMetadata(updated);
@@ -189,7 +191,7 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
                             color: AppColors.accent, size: 18),
                       const SizedBox(width: 6),
                       Text(
-                        '识别',
+                        '匹配',
                         style: AppTypography.bodyMedium
                             .copyWith(color: AppColors.accent),
                       ),

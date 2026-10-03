@@ -285,8 +285,11 @@ class DatabaseService {
         tmp = File('$path.$unique.tmp');
         await tmp.writeAsString(payload, flush: true);
         final target = File(path);
-        // Windows: rename fails if target exists. Remove first.
-        if (await target.exists()) {
+        // rename() replaces the target atomically everywhere but Windows,
+        // where it fails if the target exists. Only there is the old file
+        // removed first — elsewhere that would open a window in which a
+        // crash leaves no file at all.
+        if (Platform.isWindows && await target.exists()) {
           try {
             await target.delete();
           } catch (e) {

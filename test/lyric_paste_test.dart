@@ -1,9 +1,9 @@
-import 'package:bilibeat/app/app_services.dart';
-import 'package:bilibeat/models/lyrics.dart';
-import 'package:bilibeat/services/audio_player_handler.dart';
-import 'package:bilibeat/services/lyrics_store.dart';
-import 'package:bilibeat/state/lyrics_controller.dart';
-import 'package:bilibeat/widgets/lyrics_sheet.dart';
+import 'package:bilibeats/app/app_services.dart';
+import 'package:bilibeats/models/lyrics.dart';
+import 'package:bilibeats/services/audio_player_handler.dart';
+import 'package:bilibeats/services/lyrics_store.dart';
+import 'package:bilibeats/state/lyrics_controller.dart';
+import 'package:bilibeats/widgets/lyrics_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -30,7 +30,7 @@ void main() {
   testWidgetsWithHttp('paste after track switch saves the captured target',
       (tester) async {
     final fake = FakeAudioPlayer();
-    late BiliBeatAudioHandler handler;
+    late BiliBeatsAudioHandler handler;
     await tester.runAsync(() async {
       handler = await startPlaying(server, fake, ['lw-paste-a', 'lw-paste-b']);
     });
@@ -77,7 +77,7 @@ void main() {
   testWidgetsWithHttp('calibrating shifts the playing song and ends on skip',
       (tester) async {
     final fake = FakeAudioPlayer();
-    late BiliBeatAudioHandler handler;
+    late BiliBeatsAudioHandler handler;
     await tester.runAsync(() async {
       handler = await startPlaying(server, fake, ['lw-cal-a', 'lw-cal-b']);
     });

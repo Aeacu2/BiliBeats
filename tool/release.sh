@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: tool/release.sh <patch|minor|major> \"note\" [\"note\" ...]" >&2
+  echo "usage: tool/release.sh <patch|minor|major|X.Y.Z> \"note\" [\"note\" ...]" >&2
   exit 2
 }
 
@@ -32,6 +32,7 @@ usage() {
 BUMP="$1"; shift
 case "$BUMP" in
   patch|minor|major) ;;
+  [0-9]*.[0-9]*.[0-9]*) ;;
   *) usage ;;
 esac
 NOTES=("$@")
@@ -60,12 +61,26 @@ MINOR="${REST%%.*}"
 PATCH="${REST##*.}"
 
 case "$BUMP" in
-  major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-  minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-  patch) PATCH=$((PATCH + 1)) ;;
+  major)
+    MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+    NEW_SHORT="$MAJOR.$MINOR.$PATCH"
+    NEW_BUILD=$((BUILD + 1))
+    ;;
+  minor)
+    MINOR=$((MINOR + 1)); PATCH=0
+    NEW_SHORT="$MAJOR.$MINOR.$PATCH"
+    NEW_BUILD=$((BUILD + 1))
+    ;;
+  patch)
+    PATCH=$((PATCH + 1))
+    NEW_SHORT="$MAJOR.$MINOR.$PATCH"
+    NEW_BUILD=$((BUILD + 1))
+    ;;
+  *)
+    NEW_SHORT="$BUMP"
+    NEW_BUILD=1
+    ;;
 esac
-NEW_SHORT="$MAJOR.$MINOR.$PATCH"
-NEW_BUILD=$((BUILD + 1))
 NEW_VERSION="$NEW_SHORT+$NEW_BUILD"
 
 if git rev-parse "v$NEW_SHORT" >/dev/null 2>&1; then

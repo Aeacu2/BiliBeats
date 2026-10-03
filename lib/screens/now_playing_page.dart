@@ -28,9 +28,13 @@ import '../widgets/track_sheet.dart';
 /// The full-screen player.
 ///
 /// It only ever shows the song that is playing, and it keeps one shape:
-/// artwork (or lyrics) above; title, progress and three transport buttons
-/// below; one quiet row of secondary controls at the bottom. Everything
+/// artwork (or lyrics) above; title, progress and one row of five controls
+/// below — play mode and queue flanking previous / play / next. Everything
 /// else lives one tap away in a sheet.
+///
+/// Whatever height the screen has beyond the artwork and the controls is
+/// shared out between them ([_Spacing]), so a tall phone gets air around
+/// every row instead of a gap at the top and a pile at the bottom.
 ///
 /// Gestures: tap the artwork for lyrics, swipe it sideways to change song,
 /// pull down to close.
@@ -79,7 +83,7 @@ class NowPlayingPage extends StatefulWidget {
 }
 
 class _NowPlayingPageState extends State<NowPlayingPage> {
-  BiliBeatAudioHandler get _handler => AppServices.instance.handler;
+  BiliBeatsAudioHandler get _handler => AppServices.instance.handler;
   LyricsController get _lyrics => AppServices.instance.lyrics;
 
   late final ValueNotifier<Duration> _position =
@@ -219,51 +223,59 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   static const double _gutter = 28;
 
   Widget _player(Track track) {
-    return Column(
-      children: [
-        _topBar(track),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(_gutter, 8, _gutter, 16),
-            child: AnimatedSwitcher(
-              duration: AppMotion.base,
-              switchInCurve: AppMotion.standard,
-              switchOutCurve: AppMotion.standardReverse,
-              child: _showLyrics
-                  ? KeyedSubtree(
-                      key: const ValueKey('lyrics'),
-                      child: _lyricsPane(),
-                    )
-                  : _Artwork(
-                      key: const ValueKey('art'),
-                      track: track,
-                      handler: _handler,
-                      onTap: _toggleLyrics,
-                    ),
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: _gutter),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _titleRow(track),
-              const SizedBox(height: 10),
-              PlayerSeekBar(
-                position: _position,
-                duration: _handler.durationNotifier,
-                fallback: Duration(seconds: track.duration),
-                onSeek: _handler.seek,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final space = _Spacing.of(
+          constraints,
+          textScaler: MediaQuery.textScalerOf(context),
+        );
+        return Column(
+          children: [
+            _topBar(track),
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                    _gutter, space.aboveArt, _gutter, space.belowArt),
+                child: AnimatedSwitcher(
+                  duration: AppMotion.base,
+                  switchInCurve: AppMotion.standard,
+                  switchOutCurve: AppMotion.standardReverse,
+                  child: _showLyrics
+                      ? KeyedSubtree(
+                          key: const ValueKey('lyrics'),
+                          child: _lyricsPane(),
+                        )
+                      : _Artwork(
+                          key: const ValueKey('art'),
+                          track: track,
+                          handler: _handler,
+                          onTap: _toggleLyrics,
+                        ),
+                ),
               ),
-              const SizedBox(height: 4),
-              _transport(),
-              const SizedBox(height: 6),
-              _secondary(),
-            ],
-          ),
-        ),
-      ],
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: _gutter),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _titleRow(track),
+                  SizedBox(height: space.aboveSeek),
+                  PlayerSeekBar(
+                    position: _position,
+                    duration: _handler.durationNotifier,
+                    fallback: Duration(seconds: track.duration),
+                    onSeek: _handler.seek,
+                  ),
+                  SizedBox(height: space.aboveTransport),
+                  _transport(),
+                  SizedBox(height: space.belowTransport),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -276,7 +288,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         child: Row(
           children: [
             SizedBox(
-              width: 96,
+              width: 144,
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: calibrating
@@ -310,7 +322,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
               ),
             ),
             SizedBox(
-              width: 96,
+              width: 144,
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
@@ -333,6 +345,19 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
                         icon: const Icon(Icons.tune_rounded,
                             color: AppColors.textPrimary, size: 22),
                       ),
+                    IconButton(
+                      tooltip: '歌词',
+                      onPressed: _toggleLyrics,
+                      icon: Icon(
+                        _showLyrics
+                            ? Icons.lyrics_rounded
+                            : Icons.lyrics_outlined,
+                        color: _showLyrics
+                            ? AppColors.accent
+                            : AppColors.textPrimary,
+                        size: 23,
+                      ),
+                    ),
                     IconButton(
                       tooltip: '更多',
                       onPressed: () =>
@@ -433,46 +458,8 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     );
   }
 
+  /// Play mode · previous · play · next · queue, across the full width.
   Widget _transport() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      children: [
-        IconButton(
-          tooltip: '上一首',
-          iconSize: 42,
-          onPressed: () {
-            Haptics.selection();
-            _handler.skipToPrevious();
-          },
-          icon: const Icon(Icons.skip_previous_rounded,
-              color: AppColors.textPrimary),
-        ),
-        ValueListenableBuilder<bool>(
-          valueListenable: _handler.playingNotifier,
-          builder: (context, playing, _) => _PlayButton(
-            playing: playing,
-            onPressed: () {
-              Haptics.light();
-              _handler.togglePlayPause();
-            },
-          ),
-        ),
-        IconButton(
-          tooltip: '下一首',
-          iconSize: 42,
-          onPressed: () {
-            Haptics.selection();
-            _handler.skipToNext();
-          },
-          icon:
-              const Icon(Icons.skip_next_rounded, color: AppColors.textPrimary),
-        ),
-      ],
-    );
-  }
-
-  /// Lyrics · play mode · queue. Icons only; the active ones light up.
-  Widget _secondary() {
     return ValueListenableBuilder<PlaybackQueueSnapshot>(
       valueListenable: _handler.queueNotifier,
       builder: (context, queue, _) {
@@ -484,23 +471,43 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
         return Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            _QuietButton(
-              tooltip: '歌词',
-              icon: _showLyrics ? Icons.lyrics_rounded : Icons.lyrics_outlined,
-              active: _showLyrics,
-              alignment: Alignment.centerLeft,
-              onPressed: _toggleLyrics,
-            ),
-            _QuietButton(
+            _SideButton(
               tooltip: modeLabel,
               icon: modeIcon,
               active: queue.isShuffle || queue.loopMode == LoopMode.one,
+              alignment: Alignment.centerLeft,
               onPressed: () {
                 Haptics.medium();
                 _handler.cyclePlayMode();
               },
             ),
-            _QuietButton(
+            _SkipButton(
+              tooltip: '上一首',
+              icon: Icons.skip_previous_rounded,
+              onPressed: () {
+                Haptics.selection();
+                _handler.skipToPrevious();
+              },
+            ),
+            ValueListenableBuilder<bool>(
+              valueListenable: _handler.playingNotifier,
+              builder: (context, playing, _) => _PlayButton(
+                playing: playing,
+                onPressed: () {
+                  Haptics.light();
+                  _handler.togglePlayPause();
+                },
+              ),
+            ),
+            _SkipButton(
+              tooltip: '下一首',
+              icon: Icons.skip_next_rounded,
+              onPressed: () {
+                Haptics.selection();
+                _handler.skipToNext();
+              },
+            ),
+            _SideButton(
               tooltip: '播放队列',
               icon: Icons.queue_music_rounded,
               alignment: Alignment.centerRight,
@@ -513,10 +520,47 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
   }
 }
 
+/// How the player's spare height is shared out.
+///
+/// The artwork is as wide as the page allows; the rows below it have fixed
+/// heights. What is left over goes mostly around the controls — that is
+/// where thumbs work — and the rest above and below the artwork, a little
+/// more below so the cover sits high rather than floating mid-screen.
+class _Spacing {
+  final double aboveArt;
+  final double belowArt;
+  final double aboveSeek;
+  final double aboveTransport;
+  final double belowTransport;
+
+  const _Spacing._(
+    this.aboveArt,
+    this.belowArt,
+    this.aboveSeek,
+    this.aboveTransport,
+    this.belowTransport,
+  );
+
+  /// Top bar, title, seek bar and transport, before any spacing.
+  static const double _rows = 48 + 52 + 46 + _PlayButton.size;
+
+  static _Spacing of(BoxConstraints box, {required TextScaler textScaler}) {
+    final art = box.maxWidth - 2 * _NowPlayingPageState._gutter;
+    // Text rows grow with the system font size.
+    final text = (textScaler.scale(22) - 22) * 1.2 +
+        (textScaler.scale(16) - 16) * 1.4 +
+        (textScaler.scale(11.5) - 11.5) * 1.2;
+    final spare = box.maxHeight - _rows - text - art;
+    // A short screen keeps comfortable gaps and lets the artwork shrink.
+    final s = spare < 96 ? 96.0 : spare;
+    return _Spacing._(s * 0.16, s * 0.24, s * 0.16, s * 0.20, s * 0.24);
+  }
+}
+
 /// The cover. Breathes with play/pause; tap for lyrics, swipe to skip.
 class _Artwork extends StatelessWidget {
   final Track track;
-  final BiliBeatAudioHandler handler;
+  final BiliBeatsAudioHandler handler;
   final VoidCallback onTap;
 
   const _Artwork({
@@ -652,7 +696,7 @@ class _LyricsEmpty extends StatelessWidget {
 
 /// Shown at the top only while a sleep timer runs.
 class _SleepBadge extends StatelessWidget {
-  final BiliBeatAudioHandler handler;
+  final BiliBeatsAudioHandler handler;
 
   const _SleepBadge({required this.handler});
 
@@ -701,6 +745,8 @@ class _PlayButton extends StatelessWidget {
 
   const _PlayButton({required this.playing, required this.onPressed});
 
+  static const double size = 76;
+
   @override
   Widget build(BuildContext context) {
     return Material(
@@ -710,8 +756,8 @@ class _PlayButton extends StatelessWidget {
         customBorder: const CircleBorder(),
         onTap: onPressed,
         child: SizedBox(
-          width: 72,
-          height: 72,
+          width: size,
+          height: size,
           child: Tooltip(
             message: playing ? '暂停' : '播放',
             child: AnimatedSwitcher(
@@ -721,7 +767,7 @@ class _PlayButton extends StatelessWidget {
               child: Icon(
                 playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
                 key: ValueKey(playing),
-                size: 40,
+                size: 42,
                 color: AppColors.background,
               ),
             ),
@@ -732,22 +778,47 @@ class _PlayButton extends StatelessWidget {
   }
 }
 
-class _QuietButton extends StatelessWidget {
+/// Previous / next.
+class _SkipButton extends StatelessWidget {
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  const _SkipButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 60, height: 60),
+      icon: Icon(icon, size: 44, color: AppColors.textPrimary),
+    );
+  }
+}
+
+/// Play mode and queue, at the two ends of the transport row.
+class _SideButton extends StatelessWidget {
   final String tooltip;
   final IconData icon;
   final bool active;
   final VoidCallback onPressed;
 
-  /// Where the glyph sits in its 48pt target, so the outer two line up with
-  /// the edges of the title and the progress bar.
+  /// Where the glyph sits in its target, so the two line up with the edges
+  /// of the title and the progress bar.
   final Alignment alignment;
 
-  const _QuietButton({
+  const _SideButton({
     required this.tooltip,
     required this.icon,
     required this.onPressed,
+    required this.alignment,
     this.active = false,
-    this.alignment = Alignment.center,
   });
 
   @override
@@ -757,11 +828,11 @@ class _QuietButton extends StatelessWidget {
       onPressed: onPressed,
       padding: EdgeInsets.zero,
       alignment: alignment,
-      constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+      constraints: const BoxConstraints.tightFor(width: 52, height: 60),
       icon: Icon(
         icon,
-        size: 23,
-        color: active ? AppColors.accent : AppColors.textMuted,
+        size: 28,
+        color: active ? AppColors.accent : AppColors.textSecondary,
       ),
     );
   }

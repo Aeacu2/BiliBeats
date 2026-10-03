@@ -1,8 +1,8 @@
-import 'package:bilibeat/models/lyrics.dart';
-import 'package:bilibeat/models/track.dart';
-import 'package:bilibeat/services/audio_player_handler.dart';
-import 'package:bilibeat/services/lyrics_engine.dart';
-import 'package:bilibeat/state/library_controller.dart';
+import 'package:bilibeats/models/lyrics.dart';
+import 'package:bilibeats/models/track.dart';
+import 'package:bilibeats/services/audio_player_handler.dart';
+import 'package:bilibeats/services/lyrics_engine.dart';
+import 'package:bilibeats/state/library_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fake_audio_player.dart';
@@ -22,7 +22,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('Loudness normalization', () {
-    BiliBeatAudioHandler handler() => BiliBeatAudioHandler(
+    BiliBeatsAudioHandler handler() => BiliBeatsAudioHandler(
           player: FakeAudioPlayer(),
           manageAudioSession: false,
         );

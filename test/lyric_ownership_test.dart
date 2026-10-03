@@ -1,7 +1,7 @@
 import 'dart:io';
 
-import 'package:bilibeat/models/lyrics.dart';
-import 'package:bilibeat/services/lyrics_store.dart';
+import 'package:bilibeats/models/lyrics.dart';
+import 'package:bilibeats/services/lyrics_store.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 

@@ -95,7 +95,7 @@ build_android() {
 
   # Publish under a name that says what it is, rather than "app-release.apk".
   cp build/app/outputs/flutter-apk/app-release.apk \
-     "build/app/outputs/flutter-apk/bilibeat-${SHORT_VERSION}-arm64-v8a.apk"
+     "build/app/outputs/flutter-apk/bilibeats-${SHORT_VERSION}-arm64-v8a.apk"
 
   echo
   echo "==> APK"
@@ -118,7 +118,7 @@ build_ios() {
   # export method and therefore a signing identity) is what lets an unsigned
   # build be produced at all.
   local out_dir="build/ios/ipa"
-  local ipa="$out_dir/bilibeat-${SHORT_VERSION}-unsigned.ipa"
+  local ipa="$out_dir/bilibeats-${SHORT_VERSION}-unsigned.ipa"
   rm -rf "$out_dir"
   mkdir -p "$out_dir/Payload"
   cp -R build/ios/iphoneos/Runner.app "$out_dir/Payload/"
@@ -142,7 +142,7 @@ build_macos() {
     --split-debug-info="$SYMBOLS_DIR"
 
   local app_path="build/macos/Build/Products/Release/BiliBeats.app"
-  local dmg="build/macos/bilibeat-${SHORT_VERSION}-macos.dmg"
+  local dmg="build/macos/bilibeats-${SHORT_VERSION}-macos.dmg"
   hdiutil create -volname "BiliBeats" -srcfolder "$app_path" -ov -format UDZO "$dmg"
 
   echo

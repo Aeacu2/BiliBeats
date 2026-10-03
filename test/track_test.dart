@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:bilibeat/models/track.dart';
+import 'package:bilibeats/models/track.dart';
+import 'package:bilibeats/services/track_credit.dart';
 
 void main() {
   test('rawTitle survives serialization round-trip', () {
@@ -45,5 +46,53 @@ void main() {
       'duration': 300,
     });
     expect(t.rawTitle, '音乐缘计划');
+  });
+
+  group('naming', () {
+    const raw = '【周深】《大鱼》现场';
+    const video = Track(
+      id: 'x',
+      bvid: 'BV1',
+      cid: 1,
+      title: raw,
+      rawTitle: raw,
+      uploader: '某UP主',
+      coverUrl: '',
+      duration: 300,
+    );
+
+    test('an untouched download is not named; its artist is parsed', () {
+      expect(video.isNamed, isFalse);
+      expect(TrackCredit.artistOf(video), '周深');
+    });
+
+    test('editing only the artist still counts as naming', () {
+      // The title is unchanged, so nothing but the flag says the artist
+      // field is now the listener's.
+      final edited = video.copyWith(uploader: '周深 & 郭沁', named: true);
+      expect(edited.isNamed, isTrue);
+      expect(TrackCredit.artistOf(edited), '周深 & 郭沁');
+      expect(Track.fromMap(edited.toMap()).isNamed, isTrue);
+    });
+
+    test('a library saved before the flag: a changed title means named', () {
+      final legacy = Track.fromMap({
+        ...video.toMap(),
+        'title': '大鱼',
+        'uploader': '周深',
+      });
+      expect(legacy.named, isFalse);
+      expect(legacy.isNamed, isTrue);
+    });
+
+    test('a part of a multi-part video is not named, and knows its name', () {
+      final part = Track.fromMap({
+        ...video.toMap(),
+        'title': '$raw - P3: 晴天',
+      });
+      expect(part.partTitle, '晴天');
+      expect(part.isNamed, isFalse);
+      expect(video.partTitle, isNull);
+    });
   });
 }

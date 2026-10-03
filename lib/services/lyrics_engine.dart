@@ -31,19 +31,16 @@ class SongIdentity {
 class LyricsEngine {
   static final HttpClient _client = biliHttpClient();
 
+  static const Duration _timeout = Duration(seconds: 10);
+
   static Future<String?> _httpGet(String urlStr,
       {Map<String, String>? headers}) async {
     try {
-      final req = await _client
-          .getUrl(Uri.parse(urlStr))
-          .timeout(const Duration(seconds: 10));
+      final req = await _client.getUrl(Uri.parse(urlStr)).timeout(_timeout);
       headers?.forEach((k, v) => req.headers.set(k, v));
-      final res = await req.close().timeout(const Duration(seconds: 10));
+      final res = await req.close().timeout(_timeout);
       if (res.statusCode == 200) {
-        return await res
-            .transform(utf8.decoder)
-            .join()
-            .timeout(const Duration(seconds: 10));
+        return await res.transform(utf8.decoder).join().timeout(_timeout);
       }
       // Drain non-200 bodies so the connection returns to the pool; with
       // maxConnectionsPerHost = 4, a few un-drained 4xx/5xx responses would
@@ -471,25 +468,54 @@ class LyricsEngine {
   ///    separates a studio cut from a live one and an original from a cover;
   ///  * it is, or is not, a live version, like the title says.
   ///
+  /// A name on its own is not enough: unless the artist or the length agrees,
+  /// the title must set the name apart (《》, "A - B", or little else in it),
+  /// so a vlog that happens to contain 回忆 is not renamed after the song.
+  /// Compilations (【合集】, or anything longer than [_longestSong]) are never
+  /// one song.
+  ///
   /// The best-scoring song with enough evidence is the answer. When the song
   /// is certain but its artist is not in the title, the video is a cover:
   /// the name comes from the database, the singer from the title.
   ///
-  /// Returns null when nothing is confirmed (or the network is down); only
-  /// confirmed answers are remembered.
+  /// [context] is the video's title when [rawTitle] is the name of one of
+  /// its parts (an album uploaded as P1, P2, …): artists named there count.
+  ///
+  /// Returns null when nothing is confirmed (or the network is down); see
+  /// [identitySettled] to tell the two apart.
   static Future<SongIdentity?> identify(
     String rawTitle, {
     String uploader = '',
     int durationSeconds = 0,
+    String context = '',
   }) async {
-    final memoKey = '$rawTitle\x00$uploader\x00$durationSeconds';
+    final memoKey = _memoKey(rawTitle, uploader, durationSeconds, context);
     if (_identityMemo.containsKey(memoKey)) return _identityMemo[memoKey];
+
+    // A compilation is many songs, not one: 【合集】, 歌单, or simply too long
+    // to be a single track. (One part of a multi-part video is judged on its
+    // own name and length, with the video's title as [context].)
+    final category = bracketContent
+        .allMatches(_preprocess(rawTitle))
+        .any((m) => bracketCategory.hasMatch(m.group(1)!));
+    if (category || durationSeconds > _longestSong) {
+      _remember(memoKey, null);
+      return null;
+    }
 
     final parsed = cleanTitle(rawTitle, defaultArtist: uploader);
     final parsedArtist = (parsed['artist'] ?? '').trim();
-    // An artist the title itself names (as opposed to the uploader default).
-    final titleArtist = parsedArtist != uploader.trim() ? parsedArtist : '';
+    // An artist the title itself names (as opposed to the uploader default);
+    // for a part of a multi-part video, one the video's title names.
+    var titleArtist = parsedArtist != uploader.trim() ? parsedArtist : '';
+    if (titleArtist.isEmpty && context.isNotEmpty) {
+      final named = (cleanTitle(context)['artist'] ?? '').trim();
+      if (_looksLikeBareName(named)) titleArtist = named;
+    }
     final normRaw = _normalize(_preprocess(rawTitle));
+    // Where an artist may be named: the title itself, or — for one part of
+    // a multi-part video — the title of the video it belongs to.
+    final normCredits = normRaw + _normalize(_preprocess(context));
     final normUploader = _normalize(uploader);
     final rawIsLive = _liveMarker.hasMatch(rawTitle);
 
@@ -545,16 +571,20 @@ class LyricsEngine {
           })),
     );
 
+    // "夜曲", "小明 夜曲": little else in the title but the name.
+    final shortTitle = _noisyClean(_preprocess(rawTitle))
+            .split(' ')
+            .where((t) => t.isNotEmpty && !pureSeparatorToken.hasMatch(t))
+            .length <=
+        2;
+
     Map? best;
     var bestScore = 0.0;
     var bestExact = false;
     var anyResponse = false;
     final seen = <Object?>{};
 
-    var qi = 0;
-    for (final entry in queries.entries) {
-      final candidate = entry.value;
-      final songs = results[qi++];
+    void consider(Map<String, String> candidate, List<Map> songs) {
       if (songs.isNotEmpty) anyResponse = true;
       final candNorm = _normalize(candidate['song']!);
       final bookIdx = int.tryParse(candidate['bookIdx'] ?? '') ?? -1;
@@ -571,8 +601,8 @@ class LyricsEngine {
         final specific = RegExp(r'[一-龥]').hasMatch(nameNorm)
             ? nameNorm.length >= 2
             : nameNorm.length >= 4;
-        final named =
-            nameNorm == candNorm || (specific && normRaw.contains(nameNorm));
+        final isolated = nameNorm == candNorm;
+        final named = isolated || (specific && normRaw.contains(nameNorm));
         if (!named) continue;
         if (settledSong != null && nameNorm != _normalize(settledSong)) {
           continue;
@@ -582,7 +612,7 @@ class LyricsEngine {
         final inTitle = [
           for (final a in artists)
             if (_normalize(a).isNotEmpty &&
-                (normRaw.contains(_normalize(a)) ||
+                (normCredits.contains(_normalize(a)) ||
                     _normalize(a) == normUploader))
               a,
         ];
@@ -597,8 +627,20 @@ class LyricsEngine {
             ? (seconds - durationSeconds).abs()
             : double.infinity;
 
+        // A name alone proves little: common words are song names too
+        // (经典, 回忆, 故事…). Without the artist or the length agreeing,
+        // the title has to set the name apart structurally — in 《》, as
+        // one side of "A - B", or by being nearly all there is.
+        final corroborated = inTitle.isNotEmpty ||
+            gap <= 6 ||
+            bookIdx >= 0 ||
+            settledSong != null;
+        final structural = isolated &&
+            ((candidate['artistHint'] ?? '').isNotEmpty || shortTitle);
+        if (!corroborated && !structural) continue;
+
         var score = 2.0 + (nameNorm.length.clamp(1, 8)) * 0.25;
-        if (nameNorm == candNorm) score += 1.0;
+        if (isolated) score += 1.0;
         if (inTitle.isNotEmpty) score += 4.0;
         if (inTitle.length == artists.length && artists.length > 1) {
           score += 1.0;
@@ -609,6 +651,10 @@ class LyricsEngine {
           score += 2.0;
         } else if (gap <= 15) {
           score += 0.5;
+        } else if (gap != double.infinity && gap > 45 && !rawIsLive) {
+          // Another recording of the same name (a remix, a cover, a live
+          // cut) when the title promises none of those.
+          score -= 1.5;
         }
         final isLive = _liveMarker.hasMatch(name) ||
             _liveMarker.hasMatch('${song['album']?['name'] ?? ''}');
@@ -630,20 +676,24 @@ class LyricsEngine {
       }
     }
 
+    var qi = 0;
+    for (final candidate in queries.values) {
+      consider(candidate, results[qi++]);
+    }
     if (best == null) {
       // Offline or blocked is not "unknown song": stay retryable.
       if (anyResponse) _remember(memoKey, null);
       return null;
     }
 
-    final name = ((best['name'] ?? '') as String).trim();
+    final name = ((best!['name'] ?? '') as String).trim();
     final cleanName = name.replaceAll(parenSubtitle, '').trim();
-    final artists = _artistsOf(best);
+    final artists = _artistsOf(best!);
     final String artist;
     if (bestExact) {
       final named = [
         for (final a in artists)
-          if (normRaw.contains(_normalize(a))) a,
+          if (normCredits.contains(_normalize(a))) a,
       ];
       artist = (named.isNotEmpty ? named : artists).join(' & ');
     } else {
@@ -657,7 +707,7 @@ class LyricsEngine {
     }
 
     String? cover;
-    if (bestExact) cover = await _netEaseCover(best['id']);
+    if (bestExact) cover = await _netEaseCover(best!['id']);
 
     final identity = SongIdentity(
       title: cleanName,
@@ -687,6 +737,25 @@ class LyricsEngine {
     }
     return null;
   }
+
+  /// Longer than this is a concert or a compilation, not a song.
+  static const int _longestSong = 15 * 60;
+
+  static String _memoKey(
+          String rawTitle, String uploader, int seconds, String context) =>
+      '$rawTitle\x00$uploader\x00$seconds\x00$context';
+
+  /// Whether [identify] has already settled this question (found the song,
+  /// or established that the databases do not know it). False after a lookup
+  /// that failed for lack of a connection — that one is worth asking again.
+  static bool identitySettled(
+    String rawTitle, {
+    String uploader = '',
+    int durationSeconds = 0,
+    String context = '',
+  }) =>
+      _identityMemo.containsKey(
+          _memoKey(rawTitle, uploader, durationSeconds, context));
 
   static void _remember(String key, SongIdentity? identity) {
     if (_identityMemo.length > 300) _identityMemo.clear();
@@ -934,7 +1003,7 @@ class LyricsEngine {
           'https://lrclib.net/api/search?q=${Uri.encodeComponent(query)}';
       try {
         final body =
-            await _httpGet(url, headers: {'User-Agent': 'bilibeat/1.0.0'});
+            await _httpGet(url, headers: {'User-Agent': 'bilibeats/1.0.0'});
         if (body != null) {
           final items = jsonDecode(body) as List? ?? [];
           for (final item in items) {
@@ -1195,7 +1264,7 @@ class LyricsEngine {
       try {
         final body = await _httpGet(
           'https://lrclib.net/api/search?q=${Uri.encodeComponent(q)}',
-          headers: {'User-Agent': 'bilibeat/1.0.0'},
+          headers: {'User-Agent': 'bilibeats/1.0.0'},
         );
         if (body == null) return const [];
         final out = <Lyrics>[];

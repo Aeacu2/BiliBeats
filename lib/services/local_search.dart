@@ -1,4 +1,5 @@
 import '../models/track.dart';
+import 'track_credit.dart';
 
 /// In-memory search over the downloaded library.
 ///
@@ -42,7 +43,7 @@ class LocalSearch {
   /// 0 when some term matches nothing.
   static int _score(Track track, List<String> terms) {
     final title = normalize(track.title);
-    final artist = normalize(track.uploader);
+    final artist = normalize(TrackCredit.artistOf(track));
     final raw = normalize(track.rawTitle);
 
     var total = 0;

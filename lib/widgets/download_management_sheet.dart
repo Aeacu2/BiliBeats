@@ -8,12 +8,11 @@ import '../services/database_service.dart';
 import '../services/download_manager.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
+import '../utils/format.dart';
 import 'empty_state.dart';
 import 'sheet.dart';
 import 'song_tile.dart';
 import 'track_download_button.dart';
-import '../utils/format.dart';
-
 
 /// Downloads in one list: what is in flight, what failed (retry or dismiss),
 /// and what is stored, with its size and a way to remove it.
@@ -65,8 +64,14 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
     if (!mounted) return;
     final active = DownloadManager.instance.activeTasks;
     final failed = DownloadManager.instance.failedTasks;
-    // Progress ticks are drawn by each row's own ring.
-    if (active.length == _active.length && failed.length == _failed.length) {
+    // Progress ticks are drawn by each row's own ring; only membership
+    // matters here. Compared by id: one download finishing as another
+    // starts leaves the counts equal and the rows wrong.
+    bool same<T>(List<T> a, List<T> b, String Function(T) id) =>
+        a.length == b.length &&
+        Iterable<int>.generate(a.length).every((i) => id(a[i]) == id(b[i]));
+    if (same(active, _active, (t) => t.track.id) &&
+        same(failed, _failed, (f) => f.track.id)) {
       return;
     }
     setState(() {

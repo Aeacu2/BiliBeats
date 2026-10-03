@@ -1,8 +1,8 @@
-import 'package:bilibeat/models/track.dart';
-import 'package:bilibeat/services/audio_download_service.dart';
-import 'package:bilibeat/services/database_service.dart';
-import 'package:bilibeat/services/download_manager.dart';
-import 'package:bilibeat/utils/format.dart';
+import 'package:bilibeats/models/track.dart';
+import 'package:bilibeats/services/audio_download_service.dart';
+import 'package:bilibeats/services/database_service.dart';
+import 'package:bilibeats/services/download_manager.dart';
+import 'package:bilibeats/utils/format.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';

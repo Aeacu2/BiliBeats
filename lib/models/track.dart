@@ -32,6 +32,11 @@ class Track {
   /// when unknown. Playback evens tracks out against this.
   final double? loudness;
 
+  /// The listener (or the automatic matcher) has settled this song's name
+  /// and artist: [title] and [uploader] are then the song's, not the
+  /// video's. See [isNamed].
+  final bool named;
+
   const Track({
     required this.id,
     required this.bvid,
@@ -43,7 +48,26 @@ class Track {
     required this.duration,
     this.audioUrl,
     this.loudness,
+    this.named = false,
   });
+
+  static final RegExp _partSuffix = RegExp(r'^ - P\d+: (.+)$');
+
+  /// For one part of a multi-part video, that part's own name (often the
+  /// song, where the video is an album or a concert); otherwise null.
+  String? get partTitle {
+    if (rawTitle.isEmpty || !title.startsWith(rawTitle)) return null;
+    final name = _partSuffix
+        .firstMatch(title.substring(rawTitle.length))
+        ?.group(1)
+        ?.trim();
+    return name == null || name.isEmpty ? null : name;
+  }
+
+  /// Whether [title] and [uploader] name the song rather than the video.
+  /// Libraries saved before [named] existed are recognised by a title that
+  /// no longer matches the video's.
+  bool get isNamed => named || (title != rawTitle && partTitle == null);
 
   Map<String, dynamic> toMap() {
     return {
@@ -57,6 +81,7 @@ class Track {
       'duration': duration,
       'audioUrl': audioUrl,
       if (loudness != null) 'loudness': loudness,
+      if (named) 'named': true,
     };
   }
 
@@ -123,6 +148,7 @@ class Track {
       duration: duration,
       audioUrl: audioUrl,
       loudness: rawLoudness is num ? rawLoudness.toDouble() : null,
+      named: map['named'] == true,
     );
   }
 
@@ -133,6 +159,7 @@ class Track {
     int? duration,
     String? audioUrl,
     double? loudness,
+    bool? named,
   }) {
     return Track(
       id: id,
@@ -145,6 +172,7 @@ class Track {
       duration: duration ?? this.duration,
       audioUrl: audioUrl ?? this.audioUrl,
       loudness: loudness ?? this.loudness,
+      named: named ?? this.named,
     );
   }
 

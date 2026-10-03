@@ -1,4 +1,4 @@
-package com.bilibeat.bilibeat
+package com.bilibeats.app
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -19,7 +19,7 @@ class MainActivity : AudioServiceActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            "bilibeat/permissions",
+            "bilibeats/permissions",
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "requestNotifications" -> {

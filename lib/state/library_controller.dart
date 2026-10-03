@@ -6,7 +6,7 @@ import '../models/playlist.dart';
 import '../models/track.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
-import '../services/lyrics_engine.dart';
+import '../services/track_credit.dart';
 import '../services/track_naming.dart';
 
 /// How the song list is ordered.
@@ -121,28 +121,8 @@ class LibraryController extends ChangeNotifier {
   static final RegExp _artistSeparators =
       RegExp(r'\s*(?:[&、,，/／×]|\bfeat\.?|\bft\.?)\s*', caseSensitive: false);
 
-  static final Map<String, String> _artistCache = {};
-
-  /// Who performs [track].
-  ///
-  /// A song the listener has named carries its artist in [Track.uploader].
-  /// For an untouched download that field is only the UP主, so the video
-  /// title is consulted first (【周深】大鱼 → 周深), falling back to the UP主.
-  static String artistOf(Track track) {
-    if (track.title != track.rawTitle) return track.uploader.trim();
-    final key = '${track.rawTitle}\n${track.uploader}';
-    final cached = _artistCache[key];
-    if (cached != null) return cached;
-    final parsed = LyricsEngine.cleanTitle(
-      track.rawTitle,
-      defaultArtist: track.uploader,
-    )['artist'];
-    final artist =
-        (parsed == null || parsed.trim().isEmpty ? track.uploader : parsed)
-            .trim();
-    if (_artistCache.length > 2000) _artistCache.clear();
-    return _artistCache[key] = artist;
-  }
+  /// Who performs [track] (see [TrackCredit.artistOf]).
+  static String artistOf(Track track) => TrackCredit.artistOf(track);
 
   /// Individual names in a credit like `黄绮珊 & 周深`.
   static List<String> artistNamesOf(Track track) => artistOf(track)

@@ -12,7 +12,7 @@ import 'package:flutter/services.dart';
 class BackgroundProtection {
   BackgroundProtection._();
 
-  static const MethodChannel _channel = MethodChannel('bilibeat/permissions');
+  static const MethodChannel _channel = MethodChannel('bilibeats/permissions');
 
   static bool get supported => !kIsWeb && Platform.isAndroid;
 

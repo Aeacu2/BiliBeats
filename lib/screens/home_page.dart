@@ -14,6 +14,7 @@ import '../theme/haptics.dart';
 import '../theme/motion.dart';
 import '../widgets/cached_cover_image.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/sheet.dart';
 import '../widgets/song_tile.dart';
 import 'artist_page.dart';
 import 'playlist_page.dart';
@@ -21,8 +22,11 @@ import 'playlist_page.dart';
 /// Home: your music.
 ///
 /// What you played lately across the top, then the library through one of
-/// three lenses — 歌曲, 歌单, 歌手 — switched in place. Finding and
-/// downloading new music lives in the search bar above.
+/// three lenses — 歌曲, 歌单, 歌手 — switched in place by a full-width
+/// switch that stays pinned under the search bar. Each lens carries its own
+/// actions inside its content (play / shuffle / sort above the songs, a
+/// 新建 tile among the playlists), so the switch looks the same in all
+/// three. Finding and downloading new music lives in the search bar above.
 class HomePage extends StatefulWidget {
   /// Puts the cursor in the search bar (the empty library's way forward).
   final VoidCallback onSearch;
@@ -89,11 +93,7 @@ class _HomePageState extends State<HomePage> {
               SliverToBoxAdapter(child: _RecentRail(tracks: _library.recent)),
             SliverPersistentHeader(
               pinned: true,
-              delegate: _LensBar(
-                lens: _lens,
-                onSelect: _select,
-                trailing: _lensActions(songs),
-              ),
+              delegate: _LensBar(lens: _lens, onSelect: _select),
             ),
             ..._lensBody(songs),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
@@ -101,36 +101,6 @@ class _HomePageState extends State<HomePage> {
         );
       },
     );
-  }
-
-  Widget _lensActions(List<Track> songs) {
-    switch (_lens) {
-      case _Lens.songs:
-        if (songs.isEmpty) return const SizedBox.shrink();
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _SortButton(library: _library),
-            IconButton(
-              tooltip: '随机播放',
-              onPressed: () => playCollection(songs, shuffle: true),
-              icon: const Icon(Icons.shuffle_rounded,
-                  color: AppColors.textSecondary, size: 22),
-            ),
-            const SizedBox(width: 4),
-            _PlayAllButton(onPressed: () => playCollection(songs)),
-          ],
-        );
-      case _Lens.playlists:
-        return IconButton(
-          tooltip: '新建歌单',
-          onPressed: () => createAndOpenPlaylist(context),
-          icon: const Icon(Icons.add_rounded,
-              color: AppColors.textSecondary, size: 26),
-        );
-      case _Lens.artists:
-        return const SizedBox.shrink();
-    }
   }
 
   List<Widget> _lensBody(List<Track> songs) {
@@ -154,6 +124,9 @@ class _HomePageState extends State<HomePage> {
           ];
         }
         return [
+          SliverToBoxAdapter(
+            child: _SongActions(library: _library, songs: songs),
+          ),
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
             sliver: SliverFixedExtentList.builder(
@@ -175,7 +148,7 @@ class _HomePageState extends State<HomePage> {
         final playlists = _library.playlists;
         return [
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
             sliver: SliverGrid.builder(
               gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
                 maxCrossAxisExtent: 220,
@@ -183,9 +156,10 @@ class _HomePageState extends State<HomePage> {
                 crossAxisSpacing: 16,
                 childAspectRatio: 0.76,
               ),
-              itemCount: playlists.length,
-              itemBuilder: (context, index) =>
-                  _PlaylistCard(playlist: playlists[index]),
+              itemCount: playlists.length + 1,
+              itemBuilder: (context, index) => index < playlists.length
+                  ? _PlaylistCard(playlist: playlists[index])
+                  : const _NewPlaylistCard(),
             ),
           ),
         ];
@@ -204,7 +178,7 @@ class _HomePageState extends State<HomePage> {
         }
         return [
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
             sliver: SliverGrid.builder(
               gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
                 maxCrossAxisExtent: 130,
@@ -222,17 +196,13 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-/// 歌曲 · 歌单 · 歌手 — pinned under the search bar once scrolled to.
+/// 歌曲 · 歌单 · 歌手 — one switch across the full width, pinned under the
+/// search bar once scrolled to.
 class _LensBar extends SliverPersistentHeaderDelegate {
   final _Lens lens;
   final ValueChanged<_Lens> onSelect;
-  final Widget trailing;
 
-  _LensBar({
-    required this.lens,
-    required this.onSelect,
-    required this.trailing,
-  });
+  _LensBar({required this.lens, required this.onSelect});
 
   static const _labels = {
     _Lens.songs: '歌曲',
@@ -240,32 +210,61 @@ class _LensBar extends SliverPersistentHeaderDelegate {
     _Lens.artists: '歌手',
   };
 
-  @override
-  double get minExtent => 56;
+  static const double _height = 44;
 
   @override
-  double get maxExtent => 56;
+  double get minExtent => _height + 16;
 
   @override
-  bool shouldRebuild(covariant _LensBar old) => true;
+  double get maxExtent => _height + 16;
+
+  @override
+  bool shouldRebuild(covariant _LensBar old) => old.lens != lens;
 
   @override
   Widget build(BuildContext context, double shrinkOffset, bool overlaps) {
-    return SizedBox.expand(
-      child: ColoredBox(
-        color: AppColors.background,
-        child: Padding(
-          padding: const EdgeInsets.only(left: 12, right: 8),
-          child: Row(
+    return ColoredBox(
+      color: AppColors.background,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: AppColors.fieldFill,
+            borderRadius: BorderRadius.circular(AppRadius.pill),
+          ),
+          child: Stack(
             children: [
-              for (final entry in _labels.entries)
-                _LensLabel(
-                  label: entry.value,
-                  selected: entry.key == lens,
-                  onTap: () => onSelect(entry.key),
+              // The selected segment's pill slides between positions.
+              AnimatedAlign(
+                duration: AppMotion.base,
+                curve: AppMotion.standard,
+                alignment: Alignment(lens.index - 1.0, 0),
+                child: FractionallySizedBox(
+                  widthFactor: 1 / _Lens.values.length,
+                  heightFactor: 1,
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: AppColors.white12,
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                      ),
+                    ),
+                  ),
                 ),
-              const Spacer(),
-              trailing,
+              ),
+              Row(
+                children: [
+                  for (final entry in _labels.entries)
+                    Expanded(
+                      child: _LensLabel(
+                        label: entry.value,
+                        selected: entry.key == lens,
+                        onTap: () => onSelect(entry.key),
+                      ),
+                    ),
+                ],
+              ),
             ],
           ),
         ),
@@ -290,19 +289,18 @@ class _LensLabel extends StatelessWidget {
     return Semantics(
       button: true,
       selected: selected,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(AppRadius.sm),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        child: Center(
           child: AnimatedDefaultTextStyle(
             duration: AppMotion.fast,
             curve: AppMotion.standard,
-            style: AppTypography.titleLarge.copyWith(
-              fontSize: 22,
-              color: selected ? AppColors.textPrimary : AppColors.white30,
+            style: AppTypography.headline.copyWith(
+              fontSize: 16,
+              color: selected ? AppColors.textPrimary : AppColors.textMuted,
             ),
-            child: Text(label),
+            child: Text(label, maxLines: 1),
           ),
         ),
       ),
@@ -310,31 +308,38 @@ class _LensLabel extends StatelessWidget {
   }
 }
 
-class _PlayAllButton extends StatelessWidget {
-  final VoidCallback onPressed;
+/// 播放 · 随机 · sort, above the song list.
+class _SongActions extends StatelessWidget {
+  final LibraryController library;
+  final List<Track> songs;
 
-  const _PlayAllButton({required this.onPressed});
+  const _SongActions({required this.library, required this.songs});
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: Material(
-        color: AppColors.textPrimary,
-        shape: const CircleBorder(),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onPressed,
-          child: const Tooltip(
-            message: '播放全部',
-            child: SizedBox(
-              width: 36,
-              height: 36,
-              child: Icon(Icons.play_arrow_rounded,
-                  color: AppColors.background, size: 24),
+      padding: const EdgeInsets.fromLTRB(20, 2, 8, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: PrimaryButton(
+              icon: Icons.play_arrow_rounded,
+              label: '播放',
+              onPressed: () => playCollection(songs),
             ),
           ),
-        ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: PrimaryButton(
+              icon: Icons.shuffle_rounded,
+              label: '随机',
+              secondary: true,
+              onPressed: () => playCollection(songs, shuffle: true),
+            ),
+          ),
+          const SizedBox(width: 2),
+          _SortButton(library: library),
+        ],
       ),
     );
   }
@@ -358,7 +363,7 @@ class _SortButton extends StatelessWidget {
       initialValue: library.sort,
       onSelected: library.setSort,
       icon: const Icon(Icons.swap_vert_rounded,
-          color: AppColors.textSecondary, size: 22),
+          color: AppColors.textSecondary, size: 24),
       itemBuilder: (context) => [
         for (final entry in _labels.entries)
           PopupMenuItem(value: entry.key, child: Text(entry.value)),
@@ -492,6 +497,47 @@ class _PlaylistCard extends StatelessWidget {
             style: AppTypography.body.copyWith(fontWeight: FontWeight.w500),
           ),
           Text('${playlist.tracks.length} 首', style: AppTypography.caption),
+        ],
+      ),
+    );
+  }
+}
+
+/// The last tile among the playlists: make another.
+class _NewPlaylistCard extends StatelessWidget {
+  const _NewPlaylistCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(AppRadius.md),
+      onTap: () => createAndOpenPlaylist(context),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AspectRatio(
+            aspectRatio: 1,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppRadius.md),
+                border: Border.all(color: AppColors.hairlineStrong),
+              ),
+              child: const Center(
+                child: Icon(Icons.add_rounded,
+                    size: 36, color: AppColors.textMuted),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '新建歌单',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppTypography.body.copyWith(
+              fontWeight: FontWeight.w500,
+              color: AppColors.textSecondary,
+            ),
+          ),
         ],
       ),
     );

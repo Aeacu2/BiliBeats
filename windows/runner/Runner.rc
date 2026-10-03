@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.bilibeat" "\0"
-            VALUE "FileDescription", "bilibeat" "\0"
+            VALUE "CompanyName", "com.bilibeats" "\0"
+            VALUE "FileDescription", "BiliBeats" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "bilibeat" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.bilibeat. All rights reserved." "\0"
-            VALUE "OriginalFilename", "bilibeat.exe" "\0"
-            VALUE "ProductName", "bilibeat" "\0"
+            VALUE "InternalName", "BiliBeats" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.bilibeats. All rights reserved." "\0"
+            VALUE "OriginalFilename", "bilibeats.exe" "\0"
+            VALUE "ProductName", "BiliBeats" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

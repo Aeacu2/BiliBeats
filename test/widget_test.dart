@@ -1,17 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:bilibeat/models/lyrics.dart';
-import 'package:bilibeat/services/audio_player_handler.dart';
-import 'package:bilibeat/services/local_search.dart';
-import 'package:bilibeat/services/lyrics_engine.dart';
-import 'package:bilibeat/services/recommendation_engine.dart';
-import 'package:bilibeat/models/playlist.dart';
-import 'package:bilibeat/models/track.dart';
-import 'package:bilibeat/widgets/marquee_text.dart';
-import 'package:bilibeat/widgets/expand_from_card.dart';
-import 'package:bilibeat/widgets/mini_player.dart';
-import 'package:bilibeat/widgets/lyrics_view.dart';
+import 'package:bilibeats/models/lyrics.dart';
+import 'package:bilibeats/services/audio_player_handler.dart';
+import 'package:bilibeats/services/local_search.dart';
+import 'package:bilibeats/services/lyrics_engine.dart';
+import 'package:bilibeats/services/recommendation_engine.dart';
+import 'package:bilibeats/models/playlist.dart';
+import 'package:bilibeats/models/track.dart';
+import 'package:bilibeats/widgets/marquee_text.dart';
+import 'package:bilibeats/widgets/expand_from_card.dart';
+import 'package:bilibeats/widgets/mini_player.dart';
+import 'package:bilibeats/widgets/lyrics_view.dart';
 
 import 'fake_audio_player.dart';
 
@@ -589,7 +589,7 @@ void main() {
   group('MiniPlayer', () {
     Widget wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
-    BiliBeatAudioHandler handler() => BiliBeatAudioHandler(
+    BiliBeatsAudioHandler handler() => BiliBeatsAudioHandler(
           player: FakeAudioPlayer(),
           manageAudioSession: false,
         );

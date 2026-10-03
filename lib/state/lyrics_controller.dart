@@ -24,7 +24,7 @@ class LyricsState {
 
 /// Lyrics for whatever the player is actually playing.
 ///
-/// Follows [BiliBeatAudioHandler.nowPlaying]; every track change invalidates
+/// Follows [BiliBeatsAudioHandler.nowPlaying]; every track change invalidates
 /// earlier work (including A→B→A). Everything the listener does to lyrics —
 /// choosing, pasting, calibrating — goes through here with the track it is
 /// meant for, so it is saved for that song even if playback has moved on,
@@ -35,7 +35,7 @@ class LyricsController {
     _onTrackChanged();
   }
 
-  final BiliBeatAudioHandler _handler;
+  final BiliBeatsAudioHandler _handler;
 
   final ValueNotifier<LyricsState> state = ValueNotifier(LyricsState.empty);
 
@@ -59,13 +59,13 @@ class LyricsController {
 
   /// The song named by the listener (edited title), if they named it.
   static ({String? song, String? artist}) _namedBy(Track track) =>
-      track.title != track.rawTitle
+      track.isNamed
           ? (song: track.title, artist: track.uploader)
-          : (song: null, artist: null);
+          : (song: track.partTitle, artist: null);
 
   /// The search a person would type for [track].
   static String defaultQuery(Track track) {
-    if (track.title != track.rawTitle) {
+    if (track.isNamed) {
       return '${track.uploader} ${track.title}'.trim();
     }
     final parsed = LyricsEngine.cleanTitle(track.rawTitle);

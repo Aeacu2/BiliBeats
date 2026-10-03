@@ -29,7 +29,7 @@ class PlaybackQueueSheet extends StatefulWidget {
 }
 
 class _PlaybackQueueSheetState extends State<PlaybackQueueSheet> {
-  BiliBeatAudioHandler get _handler => AppServices.instance.handler;
+  BiliBeatsAudioHandler get _handler => AppServices.instance.handler;
 
   // Open at the current song, not the top of a possibly very long queue.
   late final ScrollController _scroll = ScrollController(

@@ -33,9 +33,9 @@ Future<void> main() async {
   ));
 
   final handler = await AudioService.init(
-    builder: BiliBeatAudioHandler.new,
+    builder: BiliBeatsAudioHandler.new,
     config: const AudioServiceConfig(
-      androidNotificationChannelId: 'com.bilibeat.channel.audio',
+      androidNotificationChannelId: 'com.bilibeats.channel.audio',
       androidNotificationChannelName: 'BiliBeats',
       // Keep the media service in the foreground while paused. With the
       // default (demote on pause), resuming after an interruption — a
@@ -56,17 +56,17 @@ Future<void> main() async {
   // Android 13+ gates notifications behind a runtime grant on stricter OEM
   // builds. Fire-and-forget.
   if (!kIsWeb && Platform.isAndroid) {
-    const channel = MethodChannel('bilibeat/permissions');
+    const channel = MethodChannel('bilibeats/permissions');
     unawaited(channel.invokeMethod<void>('requestNotifications').catchError(
           (Object _) {},
         ));
   }
 
-  runApp(const BiliBeatApp());
+  runApp(const BiliBeatsApp());
 }
 
-class BiliBeatApp extends StatelessWidget {
-  const BiliBeatApp({super.key});
+class BiliBeatsApp extends StatelessWidget {
+  const BiliBeatsApp({super.key});
 
   @override
   Widget build(BuildContext context) {

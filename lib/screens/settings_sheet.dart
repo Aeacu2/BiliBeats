@@ -70,7 +70,7 @@ class _SettingsSheetState extends State<SettingsSheet>
         ),
         _Toggle(
           icon: Icons.auto_awesome_outlined,
-          label: '自动识别歌名',
+          label: '自动匹配歌曲信息',
           value: TrackNaming.enabled,
           onChanged: (on) async {
             await TrackNaming.setEnabled(on);

@@ -1,10 +1,10 @@
 import 'dart:io';
 
-import 'package:bilibeat/app/app_services.dart';
-import 'package:bilibeat/models/track.dart';
-import 'package:bilibeat/screens/now_playing_page.dart';
-import 'package:bilibeat/services/audio_download_service.dart';
-import 'package:bilibeat/services/audio_player_handler.dart';
+import 'package:bilibeats/app/app_services.dart';
+import 'package:bilibeats/models/track.dart';
+import 'package:bilibeats/screens/now_playing_page.dart';
+import 'package:bilibeats/services/audio_download_service.dart';
+import 'package:bilibeats/services/audio_player_handler.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_test/flutter_test.dart' as ft;
@@ -23,7 +23,7 @@ void testWidgetsWithHttp(String description, WidgetTesterCallback body) {
 /// [fake], registers it with [AppServices] and starts the first track.
 ///
 /// Run inside `tester.runAsync`: this is real IO.
-Future<BiliBeatAudioHandler> startPlaying(
+Future<BiliBeatsAudioHandler> startPlaying(
   LocalAudioServer server,
   FakeAudioPlayer fake,
   List<String> names, {
@@ -40,7 +40,7 @@ Future<BiliBeatAudioHandler> startPlaying(
     await AudioDownloadService.ensureDownloaded(track);
     tracks.add(track);
   }
-  final handler = BiliBeatAudioHandler(player: fake, manageAudioSession: false);
+  final handler = BiliBeatsAudioHandler(player: fake, manageAudioSession: false);
   AppServices.init(handler);
   await handler.playTrack(tracks.first, queue: tracks);
   return handler;

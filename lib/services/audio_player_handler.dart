@@ -12,6 +12,7 @@ import '../models/track.dart';
 import 'audio_download_service.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
+import 'track_credit.dart';
 
 export '../models/playback_state.dart';
 
@@ -43,24 +44,24 @@ export '../models/playback_state.dart';
 /// **Even loudness.** Each track carries Bilibili's own EBU R128 loudness
 /// measurement; playback is levelled to one target ([_targetLufs]) so a
 /// quiet live recording and a loud studio master sit at the same volume.
-class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
+class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
   /// [loudnessLookup] fetches a missing loudness figure for older downloads;
   /// it defaults to Bilibili for the real player and to nothing when a
   /// [player] is injected (tests stay offline).
-  factory BiliBeatAudioHandler({
+  factory BiliBeatsAudioHandler({
     ja.AudioPlayer? player,
     bool manageAudioSession = true,
     Future<double?> Function(String bvid, int cid)? loudnessLookup,
   }) {
     if (player != null) {
-      return BiliBeatAudioHandler._(
+      return BiliBeatsAudioHandler._(
           player, null, manageAudioSession, loudnessLookup);
     }
     // Android cannot raise a player's volume above 1.0; quiet tracks are
     // lifted by the platform's loudness enhancer instead.
     final enhancer =
         !kIsWeb && Platform.isAndroid ? ja.AndroidLoudnessEnhancer() : null;
-    return BiliBeatAudioHandler._(
+    return BiliBeatsAudioHandler._(
       ja.AudioPlayer(
         // Interruptions are handled below so a resume can be cancelled
         // once the service has been stopped.
@@ -77,7 +78,7 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
-  BiliBeatAudioHandler._(
+  BiliBeatsAudioHandler._(
     this._player,
     this._enhancer,
     bool manageAudioSession,
@@ -384,7 +385,7 @@ class BiliBeatAudioHandler extends BaseAudioHandler with SeekHandler {
       id: track.id,
       album: 'BiliBeats',
       title: track.title,
-      artist: track.uploader,
+      artist: TrackCredit.artistOf(track),
       duration: known ??
           (track.duration > 0 ? Duration(seconds: track.duration) : null),
       artUri: track.coverUrl.isEmpty

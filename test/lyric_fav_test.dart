@@ -1,5 +1,5 @@
-import 'package:bilibeat/services/audio_player_handler.dart';
-import 'package:bilibeat/services/database_service.dart';
+import 'package:bilibeats/services/audio_player_handler.dart';
+import 'package:bilibeats/services/database_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -26,7 +26,7 @@ void main() {
       'favorite started before a switch never touches the new track',
       (tester) async {
     final fake = FakeAudioPlayer();
-    late BiliBeatAudioHandler handler;
+    late BiliBeatsAudioHandler handler;
     await tester.runAsync(() async {
       handler = await startPlaying(server, fake, ['lw-fav-a', 'lw-fav-b']);
     });

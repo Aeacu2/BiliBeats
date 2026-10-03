@@ -10,15 +10,18 @@
 
 ### Android 安装
 
-1. 在 Latest Release 页面下载 `bilibeat-x.x.x-arm64-v8a.apk` 安装包。
+1. 在 Latest Release 页面下载 `bilibeats-x.x.x-arm64-v8a.apk` 安装包。
 2. 在 Android 设备上打开下载的 `.apk` 文件（需 Android 6.0 及以上版本）。
 3. 如系统提示，请在系统设置中允许"安装未知来源应用"以完成安装。
+
+> 自 6.0.0 之后的版本起，应用包名由 `com.bilibeat.bilibeat` 更改为 `com.bilibeats.app`。
+> 系统会将其视为另一款应用：旧版本不会被覆盖升级，资料库亦不会迁移，请卸载旧版本后重新安装。
 
 ---
 
 ### iOS 安装
 
-BiliBeats 未上架 Apple App Store，发布构建以未签名归档包（`bilibeat-x.x.x-unsigned.ipa`）形式提供。iOS 安装前需使用个人开发者证书进行签名（需 iOS 13.0 及以上版本）。
+BiliBeats 未上架 Apple App Store，发布构建以未签名归档包（`bilibeats-x.x.x-unsigned.ipa`）形式提供。iOS 安装前需使用个人开发者证书进行签名（需 iOS 13.0 及以上版本）。
 
 #### 方式一：通过 AltStore 安装（推荐）
 
@@ -31,7 +34,7 @@ AltStore 支持本地安装，并可通过 Wi-Fi 自动续签后台证书。
    - 使用 Apple ID 登录以签发免费开发证书。
 3. **信任描述文件**：在 iOS 设备上进入 `设置` > `通用` > `VPN 与设备管理`，在"开发者 App"下找到您的 Apple ID 并选择`信任`。
 4. **安装 BiliBeats**：
-   - 使用 iOS 设备上的 Safari 下载 `bilibeat-x.x.x-unsigned.ipa`。
+   - 使用 iOS 设备上的 Safari 下载 `bilibeats-x.x.x-unsigned.ipa`。
    - 打开 AltStore，进入"我的 App"页面，点击 `+` 图标并选择已下载的 `.ipa` 文件。
    - *自动续签*：只要主机电脑与设备处于同一 Wi-Fi 网络且保持运行，AltServer 会自动续签 7 天有效期的证书。
 
@@ -42,7 +45,7 @@ Sideloadly 是一款基于桌面端的直装工具，可通过 USB 直接安装�
 1. **安装 Sideloadly**：在 macOS 或 Windows 上从 [sideloadly.io](https://sideloadly.io) 下载并安装 Sideloadly。
 2. **部署安装包**：
    - 通过 USB 连接 iOS 设备至电脑。
-   - 启动 Sideloadly，将 `bilibeat-x.x.x-unsigned.ipa` 拖入应用窗口。
+   - 启动 Sideloadly，将 `bilibeats-x.x.x-unsigned.ipa` 拖入应用窗口。
    - 在 `Apple Account` 一栏输入您的 Apple ID，点击 `Start` 开始签名安装。
 3. **信任描述文件**：安装完成后，在 iOS 设备的 `设置` > `通用` > `VPN 与设备管理` 中信任与您 Apple ID 关联的证书。
 
@@ -98,6 +101,14 @@ flutter symbolize -i trace.txt -d symbols/<版本号>/app.android-arm64.symbols
 flutter analyze   # 静态检查（未使用的成员与死代码在本项目中按错误处理）
 flutter test      # 单元测试与 widget 测试
 ```
+
+调整界面后，可在无设备的情况下将主要页面渲染为图片（输出至 `build/screens/`，需 macOS 自带的中文字体）：
+
+```bash
+flutter test test/render_screens.dart --update-goldens
+```
+
+代码结构、约定与注意事项见 [CLAUDE.md](CLAUDE.md)。`docs/archive/` 中为历史评审与旧版功能清单，仅供查阅，不再维护。
 
 歌词标题解析（`LyricsEngine.cleanTitle`）的回归语料位于
 `test/fixtures/real_bilibili_titles.json`（540 条真实 B 站标题）。

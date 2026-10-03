@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:bilibeat/theme/app_theme.dart';
+import 'package:bilibeats/theme/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

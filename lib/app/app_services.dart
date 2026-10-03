@@ -22,7 +22,7 @@ class AppServices {
 
   /// Called once at launch. Calling it again replaces the services with
   /// ones bound to [handler] (tests build a fresh player per case).
-  static void init(BiliBeatAudioHandler handler) {
+  static void init(BiliBeatsAudioHandler handler) {
     final previous = _instance;
     if (previous != null) {
       if (identical(previous.handler, handler)) return;
@@ -31,7 +31,7 @@ class AppServices {
     _instance = AppServices._(handler);
   }
 
-  final BiliBeatAudioHandler handler;
+  final BiliBeatsAudioHandler handler;
   final LyricsController lyrics;
   final OnlineSearchController onlineSearch = OnlineSearchController();
   final RecommendationsController recommendations = RecommendationsController();

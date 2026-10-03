@@ -1,9 +1,9 @@
 import 'dart:async';
 
-import 'package:bilibeat/models/track.dart';
-import 'package:bilibeat/services/audio_download_service.dart';
-import 'package:bilibeat/services/audio_player_handler.dart';
-import 'package:bilibeat/services/database_service.dart';
+import 'package:bilibeats/models/track.dart';
+import 'package:bilibeats/services/audio_download_service.dart';
+import 'package:bilibeats/services/audio_player_handler.dart';
+import 'package:bilibeats/services/database_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:just_audio/just_audio.dart' as ja;
 
@@ -41,10 +41,10 @@ void main() {
     return tracks;
   }
 
-  BiliBeatAudioHandler handlerFor(FakeAudioPlayer fake) =>
-      BiliBeatAudioHandler(player: fake, manageAudioSession: false);
+  BiliBeatsAudioHandler handlerFor(FakeAudioPlayer fake) =>
+      BiliBeatsAudioHandler(player: fake, manageAudioSession: false);
 
-  List<String> queueIds(BiliBeatAudioHandler handler) =>
+  List<String> queueIds(BiliBeatsAudioHandler handler) =>
       [for (final t in handler.queueSnapshot.tracks) t.id];
 
   test('shows exactly the item the native player is on', () async {
@@ -363,7 +363,7 @@ void main() {
     final t = await downloaded(['pb-backfill-a']);
     final fake = FakeAudioPlayer();
     var lookups = 0;
-    final handler = BiliBeatAudioHandler(
+    final handler = BiliBeatsAudioHandler(
       player: fake,
       manageAudioSession: false,
       loudnessLookup: (bvid, cid) async {
