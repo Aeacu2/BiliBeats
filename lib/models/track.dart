@@ -37,6 +37,17 @@ class Track {
   /// video's. See [isNamed].
   final bool named;
 
+  /// The UP主 who uploaded the video, kept once [uploader] becomes the
+  /// song's artist. Null while [uploader] still is the UP主 (and in
+  /// libraries named before this was recorded).
+  final String? rawUploader;
+
+  /// Who named the song: 0 for the listener, otherwise the version of the
+  /// automatic matcher (`TrackNaming.matcher`) that did, so a better matcher
+  /// can look again at its own earlier answers — and never at the
+  /// listener's. Null when not named, or named before this was recorded.
+  final int? matcher;
+
   const Track({
     required this.id,
     required this.bvid,
@@ -49,6 +60,8 @@ class Track {
     this.audioUrl,
     this.loudness,
     this.named = false,
+    this.rawUploader,
+    this.matcher,
   });
 
   static final RegExp _partSuffix = RegExp(r'^ - P\d+: (.+)$');
@@ -82,6 +95,8 @@ class Track {
       'audioUrl': audioUrl,
       if (loudness != null) 'loudness': loudness,
       if (named) 'named': true,
+      if (rawUploader != null) 'rawUploader': rawUploader,
+      if (matcher != null) 'matcher': matcher,
     };
   }
 
@@ -137,6 +152,8 @@ class Track {
     final audioUrl =
         rawAudioUrl is String ? rawAudioUrl : rawAudioUrl?.toString();
     final rawLoudness = map['loudness'];
+    final rawOwner = map['rawUploader'];
+    final rawMatcher = map['matcher'];
     return Track(
       id: id,
       bvid: bvid,
@@ -149,6 +166,8 @@ class Track {
       audioUrl: audioUrl,
       loudness: rawLoudness is num ? rawLoudness.toDouble() : null,
       named: map['named'] == true,
+      rawUploader: rawOwner is String && rawOwner.isNotEmpty ? rawOwner : null,
+      matcher: rawMatcher is num ? rawMatcher.toInt() : null,
     );
   }
 
@@ -160,6 +179,8 @@ class Track {
     String? audioUrl,
     double? loudness,
     bool? named,
+    String? rawUploader,
+    int? matcher,
   }) {
     return Track(
       id: id,
@@ -173,6 +194,8 @@ class Track {
       audioUrl: audioUrl ?? this.audioUrl,
       loudness: loudness ?? this.loudness,
       named: named ?? this.named,
+      rawUploader: rawUploader ?? this.rawUploader,
+      matcher: matcher ?? this.matcher,
     );
   }
 

@@ -65,6 +65,12 @@ docs/archive/               old review notes and a superseded feature list — h
   which searches NetEase for structural readings of the title and accepts a song only
   with evidence: artist in the title/uploader, matching length, or a title that
   isolates the name. Compilations and anything over 15 minutes are never one song.
+  Evidence also comes from Bilibili (`BilibiliSdk.fetchVideoHints`: tags, description,
+  zone) — on a cover the tags name the original singer, so they confirm the song but
+  not who is heard — and from the singer's NetEase catalogue. Named artists in the
+  library feed the offline parser (`LyricsEngine.knownArtists`). `Track.matcher` records
+  who named a song (0 = the listener, else `TrackNaming.matcher`): raise that constant
+  when matching improves and older automatic answers are re-checked on next play.
   The title corpus for the offline parser is `test/fixtures/real_bilibili_titles.json`.
 - **Lyrics.** `LyricsController` follows the playing track. Lyrics the listener chose,
   pasted or calibrated are pinned in `LyricsStore` and never overwritten automatically.

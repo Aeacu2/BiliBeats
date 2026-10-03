@@ -6,6 +6,7 @@ import '../models/playlist.dart';
 import '../models/track.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
+import '../services/lyrics_engine.dart';
 import '../services/track_credit.dart';
 import '../services/track_naming.dart';
 
@@ -195,6 +196,7 @@ class LibraryController extends ChangeNotifier {
     final known = _downloadedIds;
     _downloaded = List.unmodifiable(results[0] as List<Track>);
     _downloadedIds = {for (final t in _downloaded) t.id};
+    _teachArtists();
     if (_loaded) {
       // A song that just arrived gets its real name looked up.
       for (final track in _downloaded) {
@@ -207,6 +209,23 @@ class LibraryController extends ChangeNotifier {
     _failedCount = DownloadManager.instance.failedTasks.length;
     _loaded = true;
     notifyListeners();
+  }
+
+  Set<String> _taught = const {};
+
+  /// The artists of songs already named are names the title parser can
+  /// recognise in the next video, with or without a connection.
+  void _teachArtists() {
+    final names = {
+      for (final track in _downloaded)
+        if (track.isNamed) ...artistNamesOf(track),
+    };
+    if (setEquals(names, _taught)) return;
+    _taught = names;
+    LyricsEngine.knownArtists = names;
+    TrackCredit.reset();
+    _artistsCache = null;
+    _sortedCache = null;
   }
 
   Future<void> _loadRecent() async {

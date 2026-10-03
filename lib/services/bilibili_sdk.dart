@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../models/track.dart';
+import '../models/video_hints.dart';
 import 'bili_http.dart';
 import 'fingerprint_service.dart';
 import 'wbi_signer.dart';
@@ -200,6 +201,68 @@ class BilibiliSdk {
     }
 
     return [];
+  }
+
+  static final Map<String, VideoHints> _hintsMemo = {};
+
+  /// The tags, description, zone and uploader of [bvid] — evidence for
+  /// naming the song when the title alone does not settle it. Never throws:
+  /// offline (or refused) is [VideoHints.none], and is asked again next time.
+  static Future<VideoHints> fetchVideoHints(String bvid) async {
+    if (bvid.isEmpty) return VideoHints.none;
+    final cached = _hintsMemo[bvid];
+    if (cached != null) return cached;
+
+    Object? data(String? body) {
+      if (body == null) return null;
+      try {
+        final json = jsonDecode(body);
+        return json is Map && json['code'] == 0 ? json['data'] : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    Future<Object?> ask(String path) async {
+      final url = '$_baseUrl/x/web-interface/$path?bvid=$bvid';
+      final plain = data(await _httpGet(url));
+      if (plain != null) return plain;
+      // Risk control (412) lets an identified device through more readily.
+      try {
+        final cookies = await FingerprintService.getCookieString();
+        return data(await _httpGet(url, cookies: cookies));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final answers = await Future.wait([ask('view'), ask('view/detail/tag')]);
+    final view = answers[0];
+    final tags = answers[1];
+    if (view is! Map && tags is! List) return VideoHints.none;
+
+    final hints = VideoHints(
+      tags: [
+        // Topic tags name a campaign (音乐分享官), not the video's content.
+        if (tags is List)
+          for (final t in tags)
+            if (t is Map && t['tag_type'] != 'topic' && t['tag_name'] is String)
+              (t['tag_name'] as String).trim(),
+      ],
+      description: view is Map ? '${view['desc'] ?? ''}'.trim() : '',
+      zone: view is Map
+          ? '${view['tname'] ?? ''} ${view['tname_v2'] ?? ''}'.trim()
+          : '',
+      owner: view is Map && view['owner'] is Map
+          ? '${view['owner']['name'] ?? ''}'.trim()
+          : '',
+    );
+    // Half an answer (one request failed) is used but not kept.
+    if (view is Map && tags is List) {
+      if (_hintsMemo.length > 300) _hintsMemo.clear();
+      _hintsMemo[bvid] = hints;
+    }
+    return hints;
   }
 
   // Fetch audio stream URL (prefers standard MP4/M4A container for native MediaPlayer compatibility)

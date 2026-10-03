@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/track_credit.dart';
+import 'package:bilibeats/services/track_naming.dart';
 
 void main() {
   test('rawTitle survives serialization round-trip', () {
@@ -83,6 +84,41 @@ void main() {
       });
       expect(legacy.named, isFalse);
       expect(legacy.isNamed, isTrue);
+    });
+
+    test('who named a song, and who uploaded it, survive a save', () {
+      final auto = video.copyWith(
+        title: '大鱼',
+        uploader: '周深',
+        named: true,
+        rawUploader: '某UP主',
+        matcher: TrackNaming.matcher,
+      );
+      final restored = Track.fromMap(auto.toMap());
+      expect(restored.rawUploader, '某UP主');
+      expect(restored.matcher, TrackNaming.matcher);
+      // Neither is invented for a library saved before they existed.
+      final legacy = Track.fromMap(video.toMap());
+      expect(legacy.rawUploader, isNull);
+      expect(legacy.matcher, isNull);
+      expect(video.toMap().containsKey('matcher'), isFalse);
+    });
+
+    test('the matcher revisits its own older answers, never the listener\'s',
+        () {
+      final named = video.copyWith(title: '大鱼', uploader: '周深', named: true);
+      expect(TrackNaming.settled(video), isFalse);
+      expect(TrackNaming.settled(named.copyWith(matcher: 0)), isTrue);
+      expect(
+        TrackNaming.settled(named.copyWith(matcher: TrackNaming.matcher)),
+        isTrue,
+      );
+      expect(
+        TrackNaming.settled(named.copyWith(matcher: TrackNaming.matcher - 1)),
+        isFalse,
+      );
+      // Named before the record was kept: worth one look (see _name).
+      expect(TrackNaming.settled(named), isFalse);
     });
 
     test('a part of a multi-part video is not named, and knows its name', () {

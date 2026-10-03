@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../models/lyrics.dart';
+import '../models/video_hints.dart';
 import 'bili_http.dart';
 
 /// What [LyricsEngine.identify] concluded about a video.
@@ -113,6 +114,51 @@ class LyricsEngine {
       r'^(.+?)\s+(?:feat\.?|ft\.?|with|by)\s+(.+)$',
       caseSensitive: false);
 
+  /// "在百万豪装录音棚大声听", "百万级录音棚试听", "用顶级音响听": where the
+  /// uploader played the song, written without a space before the singer
+  /// ("…大声听周深《大鱼》"). It has to come out *of* the token — dropping the
+  /// token as noise takes the singer with it, and the UP主 gets the credit.
+  static final RegExp listeningPhrase = RegExp(
+    r'(?:[在用戴][^\s《》「」『』【】\[\]()（）|｜丨︱,，、]{0,8}?|'
+    r'(?:价值|百万|千万|顶级|专业|豪华)[^\s《》「」『』【】\[\]()（）|｜丨︱,，、]{0,6}?)?'
+    r'(?:录音棚|音响|音箱|耳机|装备|设备|声卡)'
+    r'[^\s《》「」『』【】\[\]()（）|｜丨︱,，、]{0,5}?(?:试听|聆听|听)',
+  );
+
+  static Map<String, String> _knownArtists = const {};
+
+  /// Artists already in the library. A title that names one of them and
+  /// gives the parser no structure to go by ("周深 大鱼 无损", or a name run
+  /// into the words around it) is credited to them rather than the UP主.
+  static set knownArtists(Iterable<String> names) {
+    _knownArtists = {
+      for (final name in names)
+        if (_isLearnableName(name.trim())) _normalize(name): name.trim(),
+    };
+  }
+
+  static bool _isLearnableName(String name) {
+    final n = _normalize(name);
+    if (n.length > 16) return false;
+    // Short Latin names are ordinary words too often (JJ, Eve, Air).
+    return RegExp(r'[\u4e00-\u9fa5]').hasMatch(n)
+        ? n.length >= 2
+        : n.length >= 4;
+  }
+
+  /// The longest [knownArtists] name [title] contains, other than [song].
+  static String? _knownArtistIn(String title, {String song = ''}) {
+    if (_knownArtists.isEmpty) return null;
+    final norm = _normalize(title);
+    final songNorm = _normalize(song);
+    String? best;
+    for (final key in _knownArtists.keys) {
+      if (key == songNorm || !norm.contains(key)) continue;
+      if (best == null || key.length > best.length) best = key;
+    }
+    return best == null ? null : _knownArtists[best];
+  }
+
   static String _preprocess(String raw) {
     return raw
         .trim()
@@ -122,6 +168,12 @@ class LyricsEngine {
         .replaceAll('&gt;', '>')
         .replaceAll('&quot;', '"')
         .replaceAll('&#39;', "'")
+        // "《大梦归（《兰香如故》主题曲）》": a note inside the song's own
+        // brackets would end them early.
+        .replaceAll(RegExp(r'[（(][^（）()]*《[^《》]*》[^（）()]*[）)]'), '')
+        .replaceAll(listeningPhrase, ' ')
+        // "周深的《大鱼》": the particle is not part of the name.
+        .replaceAll(RegExp(r'的(?=[《「『])'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
   }
@@ -317,7 +369,12 @@ class LyricsEngine {
         }
       }
       if (artist.isEmpty || artist == defaultArtist) {
-        final after = _noisyClean(title.substring(songPair.end));
+        // "《告白气球》周杰伦丨Hi-Res丨": the name ends at the first bar.
+        final after = title
+            .substring(songPair.end)
+            .split(RegExp(r'[|｜丨︱]'))
+            .map((p) => _noisyClean(p).replaceFirst(RegExp(r'^[-–—/_\s]+'), ''))
+            .firstWhere((p) => p.isNotEmpty, orElse: () => '');
         final leading =
             RegExp(r'^([\u4e00-\u9fa5A-Za-z0-9_·•.]{2,12})').firstMatch(after);
         if (leading != null && !tokenNoise.hasMatch(leading.group(1)!)) {
@@ -345,6 +402,21 @@ class LyricsEngine {
         }
       }
       song ??= clean;
+    }
+
+    // 5. Nothing structural named an artist: one the library already
+    //    knows, anywhere in the title, is better than the UP主.
+    if (artist.isEmpty || artist == defaultArtist.trim()) {
+      final known = _knownArtistIn(title, song: song);
+      if (known != null) {
+        artist = known;
+        final rest = song
+            .split(' ')
+            .where((t) => _normalize(t) != _normalize(known))
+            .join(' ')
+            .trim();
+        if (rest.isNotEmpty) song = rest;
+      }
     }
 
     final finalSong = song.trim();
@@ -431,6 +503,30 @@ class LyricsEngine {
     caseSensitive: false,
   );
 
+  /// Says the video is somebody's rendition (or a lesson, or an instrumental)
+  /// rather than the release itself. Its tags then name the *original*
+  /// singer, and prove nothing about who is heard.
+  static final RegExp _coverMarker = RegExp(
+    r'翻唱|翻弹|翻奏|翻自|弹唱|扒谱|教学|教程|伴奏|纯音乐|钢琴|吉他|尤克里里|古筝|'
+    r'小提琴|演奏|指弹|合唱|改编|填词|二创|戏腔|\bcover\b|\bremix\b|\bdj\b|\bAI\b',
+    caseSensitive: false,
+  );
+
+  /// Tags that describe the upload, not the music.
+  static final RegExp _tagNoise = RegExp(
+    r'^(?:音乐|歌曲|经典|经典歌曲|流行|流行音乐|华语|华语MV|电台|音响|听歌|歌单|单曲|'
+    r'高音质|无损音质|高清无损|现场|音乐现场|演唱会|翻唱|古风|国风|治愈|天籁|好听|'
+    r'必听|宝藏|推荐|分享|动感视频|BGM|MV|LIVE|4K|HIFI|Hi-?Fi|Hi-?res|.*打卡.*|.*挑战.*|'
+    r'.*大赛.*|.*征集.*|.*音乐季.*|.*分享官.*)$',
+    caseSensitive: false,
+  );
+
+  /// Who the description says is singing ("演唱：周深", "Vocal: Aimer").
+  static final RegExp _describedSinger = RegExp(
+    r'(?:演唱|歌手|主唱|vocal|singer|artist)\s*[:：]\s*([^\s,，。;；/|｜]{2,20})',
+    caseSensitive: false,
+  );
+
   static Future<List<Map>> _netEaseSearch(String query,
       {int limit = 10}) async {
     final body = await _httpGet(
@@ -481,6 +577,12 @@ class LyricsEngine {
   /// [context] is the video's title when [rawTitle] is the name of one of
   /// its parts (an album uploaded as P1, P2, …): artists named there count.
   ///
+  /// [hints] is what Bilibili knows beyond the title. Its tags usually name
+  /// the singer and the song outright, so they are searched as candidates
+  /// and — unless the video is a cover ([_coverMarker]) — count as credits
+  /// just as the title does. With a singer known, their catalogue is also
+  /// searched for a song the title names without setting it apart.
+  ///
   /// Returns null when nothing is confirmed (or the network is down); see
   /// [identitySettled] to tell the two apart.
   static Future<SongIdentity?> identify(
@@ -488,8 +590,10 @@ class LyricsEngine {
     String uploader = '',
     int durationSeconds = 0,
     String context = '',
+    VideoHints hints = VideoHints.none,
   }) async {
-    final memoKey = _memoKey(rawTitle, uploader, durationSeconds, context);
+    final memoKey =
+        _memoKey(rawTitle, uploader, durationSeconds, context, hints);
     if (_identityMemo.containsKey(memoKey)) return _identityMemo[memoKey];
 
     // A compilation is many songs, not one: 【合集】, 歌单, or simply too long
@@ -515,9 +619,71 @@ class LyricsEngine {
     final normRaw = _normalize(_preprocess(rawTitle));
     // Where an artist may be named: the title itself, or — for one part of
     // a multi-part video — the title of the video it belongs to.
-    final normCredits = normRaw + _normalize(_preprocess(context));
+    var normCredits = normRaw + _normalize(_preprocess(context));
     final normUploader = _normalize(uploader);
     final rawIsLive = _liveMarker.hasMatch(rawTitle);
+
+    // What the video's tags and description add. On a cover they name the
+    // original singer, so there they only help find the song.
+    final tags = [
+      for (final t in hints.tags)
+        if (_normalize(t).length >= 2 &&
+            !_tagNoise.hasMatch(t) &&
+            !tokenNoise.hasMatch(t) &&
+            !bracketCategory.hasMatch(t))
+          t,
+    ];
+    final tagNorms = {for (final t in tags) _normalize(t)};
+    final isCover = _coverMarker.hasMatch(rawTitle) ||
+        _coverMarker.hasMatch(context) ||
+        _coverMarker.hasMatch(hints.zone) ||
+        hints.tags.any(_coverMarker.hasMatch) ||
+        RegExp(r'原唱\s*[:：]|翻唱|cover', caseSensitive: false)
+            .hasMatch(hints.description);
+    if (!isCover) {
+      normCredits += '\x00${tagNorms.join('\x00')}';
+      for (final m in _describedSinger.allMatches(hints.description)) {
+        normCredits += '\x00${_normalize(m.group(1)!)}';
+      }
+    }
+    // A tag that is an artist tells the searches whose song to look for.
+    var tagArtist = '';
+    if (titleArtist.isEmpty) {
+      final names = tags.where(_looksLikeBareName).take(4).toList();
+      final known = await Future.wait(names.map(_netEaseArtistExists));
+      final i = known.indexOf(true);
+      if (i >= 0) tagArtist = names[i];
+    }
+    final searchArtist = titleArtist.isNotEmpty ? titleArtist : tagArtist;
+    // "翻唱周深《大鱼》", "Cover：买辣椒也用券": named as the one covered.
+    final pre = _preprocess(rawTitle);
+    bool coveredInTitle(String a) =>
+        a.trim().isNotEmpty &&
+        RegExp(
+          '(?:翻唱|翻自|原唱|cover)(?:自)?[\\s:：]*${RegExp.escape(a.trim())}',
+          caseSensitive: false,
+        ).hasMatch(pre);
+    // Whether the video credits [a]: named in the title, the uploader, or
+    // the catalogue's fuller form of the name the title uses ("G.E.M.邓紫棋"
+    // for 邓紫棋, "冯沁苑(买辣椒也用券)"). The title's name must stand apart
+    // in the fuller one: 周深 does not credit the cover account 周深的水壶.
+    final fullerName = titleArtist.length >= 2
+        ? RegExp(
+            '(?<![\\u4e00-\\u9fa5A-Za-z])${RegExp.escape(titleArtist)}'
+            '(?![\\u4e00-\\u9fa5A-Za-z])',
+            caseSensitive: false,
+          )
+        : null;
+    bool credited(String a) {
+      final n = _normalize(a);
+      if (n.isEmpty) return false;
+      if (coveredInTitle(a) || coveredInTitle(titleArtist)) {
+        return n == normUploader;
+      }
+      return normCredits.contains(n) ||
+          n == normUploader ||
+          (fullerName != null && fullerName.hasMatch(a));
+    }
 
     final candidates = _generateCandidates(rawTitle);
     final hasUnmarkedBook =
@@ -559,17 +725,50 @@ class LyricsEngine {
       }
       final hint = (c['artistHint'] ?? '').isNotEmpty
           ? c['artistHint']!
-          : (titleArtist != song ? titleArtist : '');
+          : (searchArtist != song ? searchArtist : '');
       queries.putIfAbsent('$hint $song'.trim(), () => c);
       if (queries.length == 5) break;
+    }
+    // Tags as songs: those the title also contains first — they say which
+    // of its words is the name.
+    final tagSongs = [
+      for (final t in tags)
+        if (_normalize(t) != _normalize(searchArtist) &&
+            _normalize(t) != normUploader)
+          t,
+    ]..sort((a, b) {
+        int absent(String t) => normRaw.contains(_normalize(t)) ? 0 : 1;
+        return absent(a).compareTo(absent(b));
+      });
+    if (settledSong == null) {
+      final asked = {for (final c in queries.values) _normalize(c['song']!)};
+      for (final t
+          in tagSongs.where((t) => !asked.contains(_normalize(t))).take(2)) {
+        queries.putIfAbsent(
+            '$searchArtist $t'.trim(), () => {'song': t, 'tag': '1'});
+      }
+    }
+    // The singer's own catalogue, for a name the title runs into its other
+    // words ("周深再唱成名曲大鱼震撼全场").
+    final catalogue = <String, String>{'song': '', 'catalogue': '1'};
+    if (_looksLikeBareName(searchArtist) &&
+        settledSong == null &&
+        !hasUnmarkedBook) {
+      queries.putIfAbsent(searchArtist, () => catalogue);
     }
     if (queries.isEmpty) return null;
 
     final results = await Future.wait(
-      queries.keys.map((q) => _netEaseSearch(q).catchError((Object _) {
+      queries.entries.map((q) => _netEaseSearch(
+            q.key,
+            limit: identical(q.value, catalogue) ? 30 : 10,
+          ).catchError((Object _) {
             return const <Map>[];
           })),
     );
+    final titleTokens = {
+      for (final t in _noisyClean(pre).split(' ')) _normalize(t),
+    };
 
     // "夜曲", "小明 夜曲": little else in the title but the name.
     final shortTitle = _noisyClean(_preprocess(rawTitle))
@@ -581,6 +780,7 @@ class LyricsEngine {
     Map? best;
     var bestScore = 0.0;
     var bestExact = false;
+    var bestRendition = false;
     var anyResponse = false;
     final seen = <Object?>{};
 
@@ -602,7 +802,10 @@ class LyricsEngine {
             ? nameNorm.length >= 2
             : nameNorm.length >= 4;
         final isolated = nameNorm == candNorm;
-        final named = isolated || (specific && normRaw.contains(nameNorm));
+        final inRaw = specific && normRaw.contains(nameNorm);
+        final fromTag = candidate['tag'] == '1';
+        final fromCatalogue = candidate['catalogue'] == '1';
+        final named = isolated || inRaw || tagNorms.contains(nameNorm);
         if (!named) continue;
         if (settledSong != null && nameNorm != _normalize(settledSong)) {
           continue;
@@ -611,11 +814,13 @@ class LyricsEngine {
         final artists = _artistsOf(song);
         final inTitle = [
           for (final a in artists)
-            if (_normalize(a).isNotEmpty &&
-                (normCredits.contains(_normalize(a)) ||
-                    _normalize(a) == normUploader))
-              a,
+            if (credited(a)) a,
         ];
+        // On a cover the tags name the original singer: that confirms the
+        // song, though not who is heard.
+        final original = isCover &&
+            inTitle.isEmpty &&
+            artists.any((a) => tagNorms.contains(_normalize(a)));
         // Search-farm uploads are named like the query itself ("遥遥 周深").
         final echo = artists.isNotEmpty &&
             inTitle.isEmpty &&
@@ -632,16 +837,39 @@ class LyricsEngine {
         // the title has to set the name apart structurally — in 《》, as
         // one side of "A - B", or by being nearly all there is.
         final corroborated = inTitle.isNotEmpty ||
+            original ||
             gap <= 6 ||
             bookIdx >= 0 ||
             settledSong != null;
         final structural = isolated &&
             ((candidate['artistHint'] ?? '').isNotEmpty || shortTitle);
         if (!corroborated && !structural) continue;
+        // A song only the tags name needs its artist credited too: tags are
+        // full of ordinary words that are also song names.
+        final onlyTags = !inRaw && (fromTag || !isolated);
+        if (onlyTags && inTitle.isEmpty && !original) continue;
+        if (fromCatalogue) {
+          // Whatever the singer has recorded is not thereby in this video:
+          // their name must be credited, and a two-character name has to
+          // stand as a word of its own (or the length has to agree).
+          if ((inTitle.isEmpty && !original) ||
+              nameNorm == _normalize(searchArtist)) {
+            continue;
+          }
+          if (nameNorm.length <= 2 &&
+              !titleTokens.contains(nameNorm) &&
+              !tagNorms.contains(nameNorm) &&
+              gap > 15) {
+            continue;
+          }
+        }
 
         var score = 2.0 + (nameNorm.length.clamp(1, 8)) * 0.25;
-        if (isolated) score += 1.0;
+        // A tag is not the title setting a name apart: 大鱼海棠 (the film)
+        // is tagged beside 大鱼 (the song).
+        if (isolated && !fromTag) score += 1.0;
         if (inTitle.isNotEmpty) score += 4.0;
+        if (original) score += 2.0;
         if (inTitle.length == artists.length && artists.length > 1) {
           score += 1.0;
         }
@@ -671,7 +899,11 @@ class LyricsEngine {
           // Only the title (or the uploader) can vouch for the artist: a
           // matching length makes a hit likelier, never certain — covers
           // run as long as the songs they cover.
-          bestExact = inTitle.isNotEmpty;
+          // Nor can it on a cover whose title sets no song apart: there
+          // the name is the original singer's ("这是周深唱的大鱼？").
+          final apart = bookIdx >= 0 || (isolated && !fromTag);
+          bestRendition = isCover && !apart && gap > 6;
+          bestExact = inTitle.isNotEmpty && !bestRendition;
         }
       }
     }
@@ -693,17 +925,23 @@ class LyricsEngine {
     if (bestExact) {
       final named = [
         for (final a in artists)
-          if (normCredits.contains(_normalize(a))) a,
+          if (credited(a) && _normalize(a) != normUploader) a,
       ];
-      artist = (named.isNotEmpty ? named : artists).join(' & ');
+      // A collaboration the title spells its own way (米津玄师 for 米津玄師)
+      // is credited in full, as the catalogue lists it.
+      final collab = RegExp(r'[&、,，]').hasMatch(titleArtist);
+      artist = (named.isEmpty || collab ? artists : named).join(' & ');
     } else {
       // A cover: the database knows the song, the title knows the singer.
-      artist = settledArtist ??
+      final singer = settledArtist ??
+          (bestRendition ? uploader : null) ??
           await _singerInTitle(rawTitle, song: cleanName) ??
           (titleArtist.isNotEmpty &&
                   _normalize(titleArtist) != _normalize(cleanName)
               ? titleArtist
               : uploader);
+      // The one being covered is not the one singing.
+      artist = coveredInTitle(singer) ? uploader : singer;
     }
 
     String? cover;
@@ -730,7 +968,8 @@ class LyricsEngine {
         .split(RegExp(r'\s+'))
         .where((t) =>
             RegExp(r'^[\u4e00-\u9fa5·]{2,7}$').hasMatch(t) &&
-            _normalize(t) != songNorm)
+            // 大鱼海棠 beside 大鱼 is the film, not a singer.
+            !_normalize(t).contains(songNorm))
         .take(3);
     for (final name in names) {
       if (await _netEaseArtistExists(name)) return name;
@@ -741,9 +980,9 @@ class LyricsEngine {
   /// Longer than this is a concert or a compilation, not a song.
   static const int _longestSong = 15 * 60;
 
-  static String _memoKey(
-          String rawTitle, String uploader, int seconds, String context) =>
-      '$rawTitle\x00$uploader\x00$seconds\x00$context';
+  static String _memoKey(String rawTitle, String uploader, int seconds,
+          String context, VideoHints hints) =>
+      '$rawTitle\x00$uploader\x00$seconds\x00$context\x00${hints.key}';
 
   /// Whether [identify] has already settled this question (found the song,
   /// or established that the databases do not know it). False after a lookup
@@ -753,9 +992,10 @@ class LyricsEngine {
     String uploader = '',
     int durationSeconds = 0,
     String context = '',
+    VideoHints hints = VideoHints.none,
   }) =>
       _identityMemo.containsKey(
-          _memoKey(rawTitle, uploader, durationSeconds, context));
+          _memoKey(rawTitle, uploader, durationSeconds, context, hints));
 
   static void _remember(String key, SongIdentity? identity) {
     if (_identityMemo.length > 300) _identityMemo.clear();

@@ -7,6 +7,10 @@ class TrackCredit {
 
   static final Map<String, String> _cache = {};
 
+  /// Forgets parsed credits; call when what the parser knows has changed
+  /// ([LyricsEngine.knownArtists]).
+  static void reset() => _cache.clear();
+
   /// A song that has been named carries its artist in [Track.uploader].
   /// For an untouched download that field is only the UP主, so the video
   /// title is consulted first (【周深】大鱼 → 周深), falling back to the UP主.

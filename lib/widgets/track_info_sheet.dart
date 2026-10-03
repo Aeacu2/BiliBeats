@@ -92,6 +92,9 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
       uploader: artist.isEmpty ? TrackCredit.artistOf(track) : artist,
       coverUrl: _cover,
       named: true,
+      // The listener's own answer: the matcher never revisits it.
+      matcher: 0,
+      rawUploader: track.isNamed ? null : track.uploader,
     );
     try {
       await DatabaseService.updateTrackMetadata(updated);

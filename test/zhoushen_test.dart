@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:bilibeats/models/video_hints.dart';
 import 'package:bilibeats/services/lyrics_engine.dart';
 
 bool? _networkChecked;
@@ -45,6 +46,147 @@ void main() {
     );
     expect(res['songTitle'], '画绢');
     expect(res['artist'], '周深');
+  });
+
+  // "在百万豪装录音棚大声听周深《大鱼》": the singer is glued to the phrase
+  // saying where the uploader played the song, and must not be dropped with
+  // it (the UP主 was credited instead).
+  group('cleanTitle: studio-listening uploads credit the singer', () {
+    const titles = {
+      '在百万豪装录音棚大声听周深《大鱼》【Hi-res】': ['周深', '大鱼'],
+      '在百万豪装录音棚大声听周深的《光亮》【Hi-res】': ['周深', '光亮'],
+      '在百万豪装录音棚大声听 周深《起风了》【Hi-res】': ['周深', '起风了'],
+      '周深《花开忘忧》百万豪装录音棚大声听【Hi-res】': ['周深', '花开忘忧'],
+      '【周深】在百万豪装录音棚大声听《小美满》': ['周深', '小美满'],
+      '百万级装备听《大鱼》- 周深【Hi-Res无损】': ['周深', '大鱼'],
+      '用百万级音响听周深《浮光》是什么体验': ['周深', '浮光'],
+      '戴上耳机听周深《璀璨冒险人》【Hi-Res】': ['周深', '璀璨冒险人'],
+      '《告白气球》周杰伦丨百万级录音棚试听丨【Hi-Res无损】': ['周杰伦', '告白气球'],
+      '在百万豪装录音棚大声听Aimer《Ref:rain》【Hi-res】': ['Aimer', 'Ref:rain'],
+      '在百万豪装录音棚大声听买辣椒也用券《起风了》【Hi-res】': ['买辣椒也用券', '起风了'],
+    };
+    titles.forEach((title, expected) {
+      test(title, () {
+        final res = LyricsEngine.cleanTitle(title, defaultArtist: 'JLRS-LeoFM');
+        expect(res['artist'], expected[0]);
+        expect(res['songTitle'], expected[1]);
+      });
+    });
+  });
+
+  test('identify: studio-listening upload is the singer\'s, not the UP主\'s',
+      () async {
+    await _skipIfOffline();
+    for (final title in [
+      '在百万豪装录音棚大声听周深《大鱼》【Hi-res】',
+      '周深《花开忘忧》百万豪装录音棚大声听【Hi-res】',
+    ]) {
+      final id = await LyricsEngine.identify(title, uploader: 'JLRS-LeoFM');
+      expect(id?.artist, '周深', reason: title);
+    }
+  });
+
+  test('cleanTitle: a note inside the song brackets does not end them', () {
+    final res = LyricsEngine.cleanTitle(
+      '周深《大梦归（《兰香如故》主题曲）》百万豪装录音棚大声听',
+      defaultArtist: 'JLRS-LeoFM',
+    );
+    expect(res['artist'], '周深');
+    expect(res['songTitle'], '大梦归');
+  });
+
+  group('cleanTitle: artists the library already knows', () {
+    setUp(() => LyricsEngine.knownArtists = ['周深', '毛不易']);
+    tearDown(() => LyricsEngine.knownArtists = const []);
+
+    test('a title with no structure is credited to them', () {
+      final res = LyricsEngine.cleanTitle(
+        '周深 大鱼 百万豪装录音棚大声听',
+        defaultArtist: 'JLRS-LeoFM',
+      );
+      expect(res['artist'], '周深');
+      expect(res['songTitle'], '大鱼');
+    });
+
+    test('even run into the words around them', () {
+      final res = LyricsEngine.cleanTitle(
+        '周深再唱成名曲大鱼震撼全场',
+        defaultArtist: '夕照影音',
+      );
+      expect(res['artist'], '周深');
+    });
+
+    test('an artist the title names structurally is not overridden', () {
+      final res = LyricsEngine.cleanTitle(
+        '【郁可唯】《路过人间》致敬周深',
+        defaultArtist: '某UP主',
+      );
+      expect(res['artist'], '郁可唯');
+    });
+
+    test('a title naming nobody known stays with the UP主', () {
+      final res = LyricsEngine.cleanTitle('今晚月色真美', defaultArtist: '某UP主');
+      expect(res['artist'], '某UP主');
+    });
+  });
+
+  group('identify: what Bilibili knows beyond the title', () {
+    const studio = VideoHints(
+      tags: ['大鱼', '高音质', '周深', '大鱼海棠', '动感视频', '录音棚', '音响', 'Hi-Fi'],
+    );
+    const amateur = VideoHints(
+      tags: ['大鱼', '周深', '大鱼海棠', '女生翻唱', '国庆快乐', '学生翻唱', 'ktv翻唱'],
+    );
+
+    test('tags name the song and singer a title leaves out', () async {
+      await _skipIfOffline();
+      final id = await LyricsEngine.identify(
+        '这首歌一开口就跪了，建议戴耳机',
+        uploader: 'JLRS-LeoFM',
+        durationSeconds: 316,
+        hints: studio,
+      );
+      expect(id?.title, '大鱼');
+      expect(id?.artist, '周深');
+      expect(id?.exact, isTrue);
+    });
+
+    test('without them such a title is not guessed at', () async {
+      await _skipIfOffline();
+      final id = await LyricsEngine.identify(
+        '这首歌一开口就跪了，建议戴耳机',
+        uploader: 'JLRS-LeoFM',
+        durationSeconds: 316,
+      );
+      expect(id, isNull);
+    });
+
+    test('on a cover the tags name the song, the UP主 sings it', () async {
+      await _skipIfOffline();
+      for (final title in ['宿舍随便唱唱', '这是周深唱的大鱼？？！！！']) {
+        final id = await LyricsEngine.identify(
+          title,
+          uploader: '半生已熟的米',
+          durationSeconds: 168,
+          hints: amateur,
+        );
+        expect(id?.title, '大鱼', reason: title);
+        expect(id?.artist, '半生已熟的米', reason: title);
+        expect(id?.exact, isFalse, reason: title);
+      }
+    });
+
+    test('the singer\'s catalogue finds a name run into the title', () async {
+      await _skipIfOffline();
+      final id = await LyricsEngine.identify(
+        '周深再唱成名曲大鱼神级吟唱震撼全场',
+        uploader: '夕照影音',
+        durationSeconds: 312,
+        hints: const VideoHints(tags: ['天籁', '吟唱', '大鱼', '周深', '神级']),
+      );
+      expect(id?.title, '大鱼');
+      expect(id?.artist, '周深');
+    });
   });
 
   test('cleanTitle: simple Artist - Song with spaces', () {

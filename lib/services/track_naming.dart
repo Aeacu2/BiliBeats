@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../models/track.dart';
+import '../models/video_hints.dart';
 import 'audio_player_handler.dart';
+import 'bilibili_sdk.dart';
 import 'database_service.dart';
 import 'lyrics_engine.dart';
 
@@ -19,6 +21,11 @@ class TrackNaming {
   TrackNaming._();
 
   static bool enabled = true;
+
+  /// The matcher's generation, recorded on every song it names
+  /// ([Track.matcher]). Raise it when matching gets better: songs named by
+  /// an older generation are then looked at again the next time they play.
+  static const int matcher = 2;
   static BiliBeatsAudioHandler? _handler;
 
   /// Tried this session; a title the catalogues do not know is not asked
@@ -43,15 +50,29 @@ class TrackNaming {
     await DatabaseService.setPref('autoName', on);
   }
 
-  /// What the lyric databases say [track] is, or null when they do not
+  /// What the music catalogues say [track] is, or null when they do not
   /// recognise it.
-  static Future<SongIdentity?> identify(Track track) {
+  static Future<SongIdentity?> identify(Track track) async {
+    final hints = await BilibiliSdk.fetchVideoHints(track.bvid);
+    return _ask(track, hints, _uploaderOf(track, hints));
+  }
+
+  /// The UP主. Once a song is named, [Track.uploader] is its artist; the
+  /// uploader is then the one recorded at naming or, for songs named before
+  /// that was kept, whoever Bilibili says owns the video.
+  static String _uploaderOf(Track track, VideoHints hints) =>
+      track.rawUploader ??
+      (track.isNamed && hints.owner.isNotEmpty ? hints.owner : track.uploader);
+
+  static Future<SongIdentity?> _ask(
+      Track track, VideoHints hints, String uploader) {
     final q = _question(track);
     return LyricsEngine.identify(
       q.title,
-      uploader: track.uploader,
+      uploader: uploader,
       durationSeconds: track.duration,
       context: q.context,
+      hints: hints,
     );
   }
 
@@ -66,9 +87,18 @@ class TrackNaming {
     );
   }
 
-  /// Names [track] in the background if it still carries its video title.
+  /// Whether the matcher has nothing more to say about [track]: the listener
+  /// named it, or this generation of the matcher already did.
+  @visibleForTesting
+  static bool settled(Track track) => _settled(track);
+
+  static bool _settled(Track track) =>
+      track.isNamed && (track.matcher == 0 || track.matcher == matcher);
+
+  /// Names [track] in the background if it still carries its video title,
+  /// or was named by an earlier generation of the matcher.
   static void autoName(Track track) {
-    if (!enabled || track.isNamed || !_attempted.add(track.id)) {
+    if (!enabled || _settled(track) || !_attempted.add(track.id)) {
       return;
     }
     _queue = _queue.then((_) => _name(track)).catchError((Object error) {
@@ -76,36 +106,92 @@ class TrackNaming {
     });
   }
 
+  static Future<Track?> _stored(String id) async =>
+      (await DatabaseService.getDownloadedTracks())
+          .where((t) => t.id == id)
+          .firstOrNull;
+
+  static Future<void> _save(Track track) async {
+    await DatabaseService.updateTrackMetadata(track);
+    _handler?.updateTrackMetadata(track);
+  }
+
   static Future<void> _name(Track track) async {
-    final found = await identify(track);
-    if (found == null) {
-      // Offline is not "unknown": ask again the next time it plays.
-      final q = _question(track);
-      if (!LyricsEngine.identitySettled(
-        q.title,
-        uploader: track.uploader,
-        durationSeconds: track.duration,
-        context: q.context,
-      )) {
+    // Only a downloaded song is named, and as the library has it now.
+    final before = await _stored(track.id);
+    if (before == null || _settled(before)) return;
+
+    final hints = await BilibiliSdk.fetchVideoHints(before.bvid);
+    final wasNamed = before.isNamed;
+    // Named before [Track.matcher] was recorded: by the listener, or by the
+    // first matcher — which credited the UP主 whenever it could not read the
+    // singer. Only that mistake is worth a second look; any other artist
+    // stands as the listener's.
+    final legacy = wasNamed && before.matcher == null;
+    if (legacy) {
+      // Offline: who uploaded it is not known yet. Ask again next time.
+      if (hints.owner.isEmpty && before.rawUploader == null) {
         _attempted.remove(track.id);
+        return;
+      }
+      final owner = before.rawUploader ?? hints.owner;
+      if (before.uploader.trim() != owner.trim()) {
+        await _save(before.copyWith(rawUploader: owner, matcher: 0));
+        return;
+      }
+    }
+
+    final uploader = _uploaderOf(before, hints);
+    final found = await _ask(before, hints, uploader);
+    final q = _question(before);
+    final settled = LyricsEngine.identitySettled(
+      q.title,
+      uploader: uploader,
+      durationSeconds: before.duration,
+      context: q.context,
+      hints: hints,
+    );
+    if (found == null && !settled) {
+      // Offline is not "unknown": ask again the next time it plays.
+      _attempted.remove(track.id);
+      return;
+    }
+
+    // The listener may have edited (or deleted) it while the lookup ran.
+    final stored = await _stored(track.id);
+    if (stored == null ||
+        stored.title != before.title ||
+        stored.uploader != before.uploader ||
+        stored.matcher != before.matcher ||
+        stored.named != before.named) {
+      return;
+    }
+
+    // Nothing better to offer: a named song keeps its name, and is not
+    // asked about again until the matcher improves.
+    final same = found != null &&
+        found.title == stored.title &&
+        found.artist == stored.uploader;
+    final noBetter =
+        found == null || same || (legacy && found.artist.trim() == uploader);
+    if (noBetter) {
+      if (wasNamed) {
+        await _save(stored.copyWith(
+          rawUploader: uploader,
+          matcher: legacy ? 0 : matcher,
+        ));
       }
       return;
     }
 
-    // Only a downloaded song still wearing its video title is renamed: the
-    // listener may have edited (or deleted) it while the lookup ran.
-    final stored = (await DatabaseService.getDownloadedTracks())
-        .where((t) => t.id == track.id)
-        .firstOrNull;
-    if (stored == null || stored.isNamed) return;
-    final named = stored.copyWith(
+    await _save(stored.copyWith(
       title: found.title,
       uploader: found.artist,
       // The original release's artwork replaces a video thumbnail.
       coverUrl: found.coverUrl,
       named: true,
-    );
-    await DatabaseService.updateTrackMetadata(named);
-    _handler?.updateTrackMetadata(named);
+      rawUploader: uploader,
+      matcher: matcher,
+    ));
   }
 }
