@@ -136,6 +136,37 @@ class BilibiliSdk {
     return null;
   }
 
+  /// One of the video endpoints (`view`, `view/detail/tag`). The plain form
+  /// is tried first; when risk control refuses it (412) the WBI-signed form,
+  /// sent as an identified device, usually still answers.
+  static Future<String?> _viewBody(
+      String path, String paramKey, String id) async {
+    final plain =
+        await _httpGet('$_baseUrl/x/web-interface/$path?$paramKey=$id');
+    if (plain != null && !_riskControlled(plain)) return plain;
+    try {
+      final cookies = await FingerprintService.getCookieString();
+      final signed = await WbiSigner.signParams({
+        paramKey: id,
+        ...FingerprintService.getDmImgParams(),
+      });
+      final query = signed.entries
+          .map((e) => '${e.key}=${Uri.encodeComponent(e.value.toString())}')
+          .join('&');
+      return await _httpGet(
+        '$_baseUrl/x/web-interface/wbi/$path?$query',
+        cookies: cookies,
+      );
+    } catch (e) {
+      debugPrint('Signed $path request failed: $e');
+      return null;
+    }
+  }
+
+  /// Music zones whose name says the video is a rendition. Bilibili no
+  /// longer sends zone names, only these ids.
+  static const Map<int, String> _renditionZones = {31: '翻唱', 59: '演奏'};
+
   // Fetch Video Info by BV or AV ID.
   //
   // Contract: transport/API failure throws [BiliApiException]; an
@@ -143,9 +174,7 @@ class BilibiliSdk {
   static Future<List<Track>> fetchVideoInfo(String idInput) async {
     final id = extractBvOrAvId(idInput) ?? idInput.trim();
     final paramKey = id.toLowerCase().startsWith('bv') ? 'bvid' : 'aid';
-    final url = '$_baseUrl/x/web-interface/view?$paramKey=$id';
-
-    final body = await _httpGet(url);
+    final body = await _viewBody('view', paramKey, id);
     if (body == null) {
       throw const BiliApiException('video info request failed');
     }
@@ -223,22 +252,12 @@ class BilibiliSdk {
       }
     }
 
-    Future<Object?> ask(String path) async {
-      final url = '$_baseUrl/x/web-interface/$path?bvid=$bvid';
-      final plain = data(await _httpGet(url));
-      if (plain != null) return plain;
-      // Risk control (412) lets an identified device through more readily.
-      try {
-        final cookies = await FingerprintService.getCookieString();
-        return data(await _httpGet(url, cookies: cookies));
-      } catch (_) {
-        return null;
-      }
-    }
-
-    final answers = await Future.wait([ask('view'), ask('view/detail/tag')]);
-    final view = answers[0];
-    final tags = answers[1];
+    final bodies = await Future.wait([
+      _viewBody('view', 'bvid', bvid),
+      _httpGet('$_baseUrl/x/web-interface/view/detail/tag?bvid=$bvid'),
+    ]);
+    final view = data(bodies[0]);
+    final tags = data(bodies[1]);
     if (view is! Map && tags is! List) return VideoHints.none;
 
     final hints = VideoHints(
@@ -251,7 +270,9 @@ class BilibiliSdk {
       ],
       description: view is Map ? '${view['desc'] ?? ''}'.trim() : '',
       zone: view is Map
-          ? '${view['tname'] ?? ''} ${view['tname_v2'] ?? ''}'.trim()
+          ? '${view['tname'] ?? ''} ${view['tname_v2'] ?? ''} '
+                  '${_renditionZones[view['tid']] ?? ''}'
+              .trim()
           : '',
       owner: view is Map && view['owner'] is Map
           ? '${view['owner']['name'] ?? ''}'.trim()

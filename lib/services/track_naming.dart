@@ -25,7 +25,7 @@ class TrackNaming {
   /// The matcher's generation, recorded on every song it names
   /// ([Track.matcher]). Raise it when matching gets better: songs named by
   /// an older generation are then looked at again the next time they play.
-  static const int matcher = 2;
+  static const int matcher = 3;
   static BiliBeatsAudioHandler? _handler;
 
   /// Tried this session; a title the catalogues do not know is not asked

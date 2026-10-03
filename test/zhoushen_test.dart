@@ -124,9 +124,58 @@ void main() {
       expect(res['artist'], '郁可唯');
     });
 
+    test('but not the one a cover says it is of', () {
+      final res = LyricsEngine.cleanTitle('女生翻唱周深大鱼', defaultArtist: '某UP主');
+      expect(res['artist'], '某UP主');
+    });
+
     test('a title naming nobody known stays with the UP主', () {
       final res = LyricsEngine.cleanTitle('今晚月色真美', defaultArtist: '某UP主');
       expect(res['artist'], '某UP主');
+    });
+  });
+
+  group('identify: titles that used to mislead it', () {
+    Future<void> check(String title, String uploader, String? song,
+        [String? artist]) async {
+      await _skipIfOffline();
+      final id = await LyricsEngine.identify(title, uploader: uploader);
+      expect(id?.title, song, reason: title);
+      if (artist != null) expect(id?.artist, artist, reason: title);
+    }
+
+    test('the bracketed name is the song, not a word beside it', () async {
+      await check('致敬先烈 《如愿》', '脸圆霸学习版', '如愿', '脸圆霸学习版');
+      await check('以爱之名 你还愿意吗｜《起风了》', 'MoreLight室内乐团', '起风了', 'MoreLight室内乐团');
+      await check('【史诗版】《漠河舞厅》——Epic Symphony Cover', '北极星电台', '漠河舞厅', '北极星电台');
+    });
+
+    test('words before the brackets do not spoil the search', () async {
+      await check('奥特曼限定版《孤勇者》，致那黑夜中的呜咽与怒吼', '大古音乐', '孤勇者', '大古音乐');
+    });
+
+    test('a word glued to the name is not part of it', () async {
+      await check('周深 - 光亮MV', '红色希望之队', '光亮', '周深');
+    });
+
+    test('the singer the title labels beats a word that is also an artist',
+        () async {
+      await check('【张杰】北斗星空22周年《也许你就在对岸》生日快乐', 'JASON-张杰音乐馆', '也许你就在对岸', '张杰');
+    });
+
+    test('a singer covering a bracketed song is still found', () async {
+      await check('【步束】《海底》翻唱，悠扬婉转的治愈之歌（补档）', '语丶冰FrozenWord', '海底', '步束');
+      await check('王菲&amp;窦靖童合唱《誓言》', '有怪兽Biu', '誓言', '王菲 & 窦靖童');
+      await check('【从前从前有个人爱你很久】周杰伦-晴天MV', '烤鱼老椰', '晴天', '周杰伦');
+    });
+
+    test('a date is not a song', () async {
+      await check('2026 8.2李荣浩录屏', '小杨爱c辣', null);
+    });
+
+    test('a sentence ending in a word is not a title about that word',
+        () async {
+      await check('邓紫棋也是被逼得没办法了 哈哈', '逍遥炎龙o', null);
     });
   });
 
@@ -174,6 +223,84 @@ void main() {
         expect(id?.artist, '半生已熟的米', reason: title);
         expect(id?.exact, isFalse, reason: title);
       }
+    });
+
+    // A cover is not thereby the UP主's: it may be a clip of a singer
+    // covering someone else's song.
+    test('a clipped cover is the singer\'s, named in the title', () async {
+      await _skipIfOffline();
+      for (final title in [
+        '【周深】《不舍》cover 2025生日直播',
+        '周深翻唱《不舍》2025生日直播',
+        '单依纯翻唱周深《大鱼》',
+      ]) {
+        final id = await LyricsEngine.identify(title, uploader: '某剪辑站');
+        expect(id?.artist, title.startsWith('单依纯') ? '单依纯' : '周深',
+            reason: title);
+      }
+    });
+
+    test('a clipped cover is the singer\'s, named only in the tags', () async {
+      await _skipIfOffline();
+      final id = await LyricsEngine.identify(
+        '生日直播唱的这首不舍也太好哭了',
+        uploader: '某剪辑站',
+        durationSeconds: 200,
+        hints: const VideoHints(tags: ['周深', '不舍', '翻唱', '生日直播']),
+      );
+      expect(id?.title, '不舍');
+      expect(id?.artist, '周深');
+    });
+
+    test('a fan channel\'s clip is the singer it is named after', () async {
+      await _skipIfOffline();
+      LyricsEngine.knownArtists = ['周深'];
+      addTearDown(() => LyricsEngine.knownArtists = const []);
+      final id = await LyricsEngine.identify(
+        '生日直播唱的这首不舍也太好哭了',
+        uploader: 'ForCharlie_周深图文站',
+        durationSeconds: 200,
+        hints: const VideoHints(tags: ['不舍', '翻唱', '生日直播']),
+      );
+      expect(id?.title, '不舍');
+      expect(id?.artist, '周深');
+    });
+
+    test(
+        'nobody covers their own song: the original artist named on a '
+        'rendition is the one covered', () async {
+      await _skipIfOffline();
+      final cover = await LyricsEngine.identify(
+        '周深《大鱼》钢琴翻弹',
+        uploader: '某钢琴UP',
+        durationSeconds: 200,
+      );
+      expect(cover?.title, '大鱼');
+      expect(cover?.artist, '某钢琴UP');
+      expect(cover?.exact, isFalse);
+    });
+
+    test('a singer\'s own cover of someone else\'s song is theirs', () async {
+      await _skipIfOffline();
+      final id = await LyricsEngine.identify(
+        '周深 漂洋过海来看你 cover',
+        uploader: '某剪辑站',
+        durationSeconds: 183,
+      );
+      expect(id?.title, '漂洋过海来看你');
+      expect(id?.artist, '周深');
+    });
+
+    test('tags do not overrule the singer the title names', () async {
+      await _skipIfOffline();
+      final id = await LyricsEngine.identify(
+        '【单依纯】大鱼 歌手2025',
+        uploader: '某剪辑站',
+        durationSeconds: 250,
+        hints: const VideoHints(tags: ['周深', '大鱼', '单依纯', '歌手2025']),
+      );
+      expect(id?.title, '大鱼');
+      expect(id?.artist, '单依纯');
     });
 
     test('the singer\'s catalogue finds a name run into the title', () async {
