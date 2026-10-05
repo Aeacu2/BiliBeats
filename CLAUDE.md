@@ -103,8 +103,8 @@ docs/archive/               old review notes and a superseded feature list — h
 - External HTTP is blocked in most tests (`useHermeticHttp`); the `live`-tagged files
   (`zhoushen_test.dart`, `recognition_live_test.dart`) use the real network on purpose
   and CI leaves them out.
-- The Android keystore is `android/bilibeats-release.jks`; the key inside it still has
-  the alias `bilibeat` (an install is tied to the key, not to either name). It and
+- The Android keystore is `android/bilibeats-release.jks` (key alias `bilibeats`). An
+  install is tied to the key inside, not to either name. It and
   `android/key.properties` are gitignored; never commit them.
 - iOS has no CocoaPods — plugins integrate through Swift Package Manager.
 - Release notes read like an Apple update note: formal, concise, no hype.

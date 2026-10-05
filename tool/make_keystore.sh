@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 
 KEYSTORE="android/bilibeats-release.jks"
 PROPS="android/key.properties"
-ALIAS="bilibeat"
+ALIAS="bilibeats"
 
 if [ -e "$KEYSTORE" ] || [ -e "$PROPS" ]; then
   echo "error: $KEYSTORE or $PROPS already exists." >&2
