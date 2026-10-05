@@ -5,7 +5,7 @@
 # Run this ONCE, ever. Then back up BOTH files somewhere you will still have
 # them in five years:
 #
-#     android/bilibeat-release.jks
+#     android/bilibeats-release.jks
 #     android/key.properties
 #
 # Losing the keystore is unrecoverable: Android identifies an app by its
@@ -19,7 +19,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-KEYSTORE="android/bilibeat-release.jks"
+KEYSTORE="android/bilibeats-release.jks"
 PROPS="android/key.properties"
 ALIAS="bilibeat"
 
@@ -58,7 +58,7 @@ umask 077
 # one in the password is doubled.
 ESCAPED="${PASS//\\/\\\\}"
 {
-  printf 'storeFile=%s\n' "bilibeat-release.jks"
+  printf 'storeFile=%s\n' "bilibeats-release.jks"
   printf 'storePassword=%s\n' "$ESCAPED"
   printf 'keyAlias=%s\n' "$ALIAS"
   printf 'keyPassword=%s\n' "$ESCAPED"

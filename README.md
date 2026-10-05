@@ -57,7 +57,7 @@ Sideloadly 是一款基于桌面端的直装工具，可通过 USB 直接安装�
 tool/make_keystore.sh
 ```
 
-请务必妥善备份 `android/bilibeat-release.jks` 与 `android/key.properties` 两个文件，且切勿提交至仓库（两者均已被 gitignore 排除）。密钥一旦丢失将无法找回——更换密钥将无法对既有安装进行升级。
+请务必妥善备份 `android/bilibeats-release.jks` 与 `android/key.properties` 两个文件，且切勿提交至仓库（两者均已被 gitignore 排除）。密钥一旦丢失将无法找回——更换密钥将无法对既有安装进行升级。
 
 如缺少上述文件，构建将回退使用调试密钥并给出警告。可使用以下命令核验实际发布产物所使用的签名：
 
