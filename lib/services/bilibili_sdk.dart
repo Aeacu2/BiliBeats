@@ -55,24 +55,28 @@ class BilibiliSdk {
     return null;
   }
 
+  /// A BV number standing on its own: every one starts `BV1` and is twelve
+  /// characters. Without the boundaries any word holding "bv" plus ten
+  /// letters ("subversiveness") read as a video id.
+  static final RegExp _bvId = RegExp(
+    r'(?<![A-Za-z0-9])BV(1[A-Za-z0-9]{9})(?![A-Za-z0-9])',
+    caseSensitive: false,
+  );
+
+  /// An av number standing on its own ("av170001", not "wav24bit").
+  static final RegExp _avId = RegExp(
+    r'(?<![A-Za-z0-9])av(\d+)(?![A-Za-z0-9])',
+    caseSensitive: false,
+  );
+
   // Extract BV or AV ID from input query
   static String? extractBvOrAvId(String input) {
-    final trimmed = input.trim();
-    final bvMatch = RegExp(r'(BV[a-zA-Z0-9]{10})', caseSensitive: false)
-        .firstMatch(trimmed);
-    if (bvMatch != null) {
-      final raw = bvMatch.group(1)!;
-      // Normalize prefix to upper-case BV, keep the 10-char suffix case-sensitive
-      if (raw.length == 12) return 'BV${raw.substring(2)}';
-      return raw;
-    }
+    // Upper-case prefix; the rest of a BV number is case-sensitive.
+    final bvMatch = _bvId.firstMatch(input);
+    if (bvMatch != null) return 'BV${bvMatch.group(1)}';
 
-    final avMatch =
-        RegExp(r'av(\d+)', caseSensitive: false).firstMatch(trimmed);
     // The API's `aid` parameter expects bare digits, not the "av" prefix.
-    if (avMatch != null) return avMatch.group(1);
-
-    return null;
+    return _avId.firstMatch(input)?.group(1);
   }
 
   /// Resolve Bilibili short links (b23.tv / bili2233.cn / acg.tv) that do not
@@ -111,19 +115,12 @@ class BilibiliSdk {
           .catchError((_) => '');
       // Check redirect history
       if (res.redirects.isNotEmpty) {
-        final finalLoc = res.redirects.last.location.toString();
-        final bv = extractBvOrAvId(finalLoc);
+        final bv = extractBvOrAvId(res.redirects.last.location.toString());
         if (bv != null) return bv;
-        // Also try body regex in case redirect landed on HTML
-        final bvInBody = RegExp(r'(BV[a-zA-Z0-9]{10})', caseSensitive: false)
-            .firstMatch(finalLoc);
-        if (bvInBody != null) return bvInBody.group(1);
-        return finalLoc;
       }
       // Some short links return 200 with HTML containing canonical BV
-      final bvInBody =
-          RegExp(r'(BV[a-zA-Z0-9]{10})', caseSensitive: false).firstMatch(body);
-      if (bvInBody != null) return bvInBody.group(1);
+      final bvInBody = _bvId.firstMatch(body);
+      if (bvInBody != null) return 'BV${bvInBody.group(1)}';
       // Fallback: Location header even when not in redirects list
       final loc = res.headers.value(HttpHeaders.locationHeader);
       if (loc != null) {
@@ -141,9 +138,9 @@ class BilibiliSdk {
   /// sent as an identified device, usually still answers.
   static Future<String?> _viewBody(
       String path, String paramKey, String id) async {
-    final plain =
-        await _httpGet('$_baseUrl/x/web-interface/$path?$paramKey=$id');
-    if (plain != null && !_riskControlled(plain)) return plain;
+    final plain = await _httpGet('$_baseUrl/x/web-interface/$path'
+        '?$paramKey=${Uri.encodeQueryComponent(id)}');
+    if (plain != null && !isRiskControlled(plain)) return plain;
     try {
       final cookies = await FingerprintService.getCookieString();
       final signed = await WbiSigner.signParams({
@@ -184,6 +181,17 @@ class BilibiliSdk {
     } catch (e) {
       throw BiliApiException('video info parse failed: $e');
     }
+    try {
+      return _tracksOfView(json);
+    } catch (e) {
+      // An answer in a shape this build does not know is a failed lookup,
+      // not a crash and not "no such video".
+      throw BiliApiException('video info in an unexpected shape: $e');
+    }
+  }
+
+  static List<Track> _tracksOfView(dynamic json) {
+    if (json is! Map) throw const FormatException('not an object');
     if (json['code'] == 0 && json['data'] != null) {
       final data = json['data'];
       final bvid = data['bvid'] as String;
@@ -234,31 +242,31 @@ class BilibiliSdk {
 
   static final Map<String, VideoHints> _hintsMemo = {};
 
-  /// The tags, description, zone and uploader of [bvid] — evidence for
-  /// naming the song when the title alone does not settle it. Never throws:
-  /// offline (or refused) is [VideoHints.none], and is asked again next time.
-  static Future<VideoHints> fetchVideoHints(String bvid) async {
+  /// The tags, description, zone and uploader of [bvid], and the music
+  /// Bilibili recognised in the part [cid] — evidence for naming the song
+  /// when the title alone does not settle it. Never throws: offline (or
+  /// refused) is [VideoHints.none], and is asked again next time.
+  static Future<VideoHints> fetchVideoHints(String bvid, {int cid = 0}) async {
     if (bvid.isEmpty) return VideoHints.none;
-    final cached = _hintsMemo[bvid];
+    final memoKey = '$bvid/$cid';
+    final cached = _hintsMemo[memoKey];
     if (cached != null) return cached;
-
-    Object? data(String? body) {
-      if (body == null) return null;
-      try {
-        final json = jsonDecode(body);
-        return json is Map && json['code'] == 0 ? json['data'] : null;
-      } catch (_) {
-        return null;
-      }
-    }
 
     final bodies = await Future.wait([
       _viewBody('view', 'bvid', bvid),
       _httpGet('$_baseUrl/x/web-interface/view/detail/tag?bvid=$bvid'),
     ]);
-    final view = data(bodies[0]);
-    final tags = data(bodies[1]);
+    final view = _dataOf(bodies[0]);
+    final tags = _dataOf(bodies[1]);
     if (view is! Map && tags is! List) return VideoHints.none;
+
+    // A track that came from a search carries no cid; it is the first part.
+    final part = cid != 0
+        ? cid
+        : view is Map && view['cid'] is int
+            ? view['cid'] as int
+            : 0;
+    final music = part == 0 ? null : await _recognisedMusic(bvid, part);
 
     final hints = VideoHints(
       tags: [
@@ -277,13 +285,77 @@ class BilibiliSdk {
       owner: view is Map && view['owner'] is Map
           ? '${view['owner']['name'] ?? ''}'.trim()
           : '',
+      musicTitle: music?.title ?? '',
+      musicArtists: music?.artists ?? const [],
     );
     // Half an answer (one request failed) is used but not kept.
-    if (view is Map && tags is List) {
+    if (view is Map && tags is List && music != null) {
       if (_hintsMemo.length > 300) _hintsMemo.clear();
-      _hintsMemo[bvid] = hints;
+      _hintsMemo[memoKey] = hints;
     }
     return hints;
+  }
+
+  /// The `data` of a code-0 answer, or null.
+  static Object? _dataOf(String? body) {
+    if (body == null) return null;
+    try {
+      final json = jsonDecode(body);
+      return json is Map && json['code'] == 0 ? json['data'] : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The song Bilibili's own recognition found in one part of a video — the
+  /// "发现《…》" card under its player. An empty title when it found none;
+  /// null when it could not be asked.
+  static Future<({String title, List<String> artists})?> _recognisedMusic(
+      String bvid, int cid) async {
+    const nothing = (title: '', artists: <String>[]);
+    try {
+      final cookies = await FingerprintService.getCookieString();
+      final signed = await WbiSigner.signParams({'bvid': bvid, 'cid': cid});
+      final query = signed.entries
+          .map((e) => '${e.key}=${Uri.encodeComponent(e.value.toString())}')
+          .join('&');
+      final player = _dataOf(await _httpGet(
+        '$_baseUrl/x/player/wbi/v2?$query',
+        cookies: cookies,
+      ));
+      if (player is! Map) return null;
+      final card = player['bgm_info'];
+      final id = card is Map ? card['music_id'] : null;
+      if (id is! String || id.isEmpty) return nothing;
+
+      final detail = _dataOf(await _httpGet(
+        '$_baseUrl/x/copyright-music-publicity/bgm/detail'
+        '?music_id=${Uri.encodeQueryComponent(id)}',
+        cookies: cookies,
+      ));
+      if (detail is! Map) return null;
+      return parseRecognisedMusic(detail);
+    } catch (e) {
+      debugPrint('Recognised music lookup failed: $e');
+      return null;
+    }
+  }
+
+  /// Reads a `bgm/detail` answer: the title, and the artists it lists as
+  /// one string ("五月天,周深", "宋雨琦/五月天").
+  @visibleForTesting
+  static ({String title, List<String> artists}) parseRecognisedMusic(
+      Map detail) {
+    final title = detail['music_title'];
+    final artists = detail['origin_artist'];
+    return (
+      title: title is String ? title.trim() : '',
+      artists: [
+        if (artists is String)
+          for (final name in artists.split(RegExp(r'[,，/／、]')))
+            if (name.trim().isNotEmpty) name.trim(),
+      ],
+    );
   }
 
   // Fetch audio stream URL (prefers standard MP4/M4A container for native MediaPlayer compatibility)
@@ -390,9 +462,12 @@ class BilibiliSdk {
 
     // A BV number or a link never goes through the keyword search: asking for
     // something by id means you want exactly it, whatever zone it lives in.
+    // When there is no such video the text was not an id after all ("AV1
+    // 编码"), and is searched for like any other.
     final directId = extractBvOrAvId(query);
     if (directId != null) {
-      return await fetchVideoInfo(directId);
+      final direct = await fetchVideoInfo(directId);
+      if (direct.isNotEmpty) return direct;
     }
     // Handle Bilibili short share links (b23.tv / bili2233.cn) that hide the BV
     // behind a redirect. The pasted share text is often `【标题】 https://b23.tv/xxx`
@@ -403,12 +478,8 @@ class BilibiliSdk {
         final resolved =
             await _resolveShortLink(query).timeout(const Duration(seconds: 6));
         if (resolved != null) {
-          final resolvedId = extractBvOrAvId(resolved) ?? resolved;
-          // Avoid infinite loop if resolved is same as original
-          if (resolvedId != query.trim()) {
-            final viaResolved = await fetchVideoInfo(resolvedId);
-            if (viaResolved.isNotEmpty) return viaResolved;
-          }
+          final viaResolved = await fetchVideoInfo(resolved);
+          if (viaResolved.isNotEmpty) return viaResolved;
         }
       } catch (e) {
         debugPrint('Short link resolve error: $e');
@@ -464,7 +535,7 @@ class BilibiliSdk {
       var primary = await _httpGet(searchUrl, cookies: cookieStr);
       // -352 / 412 are B站 risk-control codes; check them on the decoded JSON
       // rather than string-matching (which breaks on whitespace variations).
-      if (_riskControlled(primary)) {
+      if (isRiskControlled(primary)) {
         primary = null;
       }
       if (primary != null) {
@@ -484,6 +555,11 @@ class BilibiliSdk {
     if (body == null) {
       throw const BiliApiException('all search attempts failed');
     }
+    // A refusal carries no results; reading it as "nothing found" told the
+    // listener their song does not exist.
+    if (isRiskControlled(body)) {
+      throw const BiliApiException('search refused by risk control');
+    }
 
     final dynamic json;
     try {
@@ -492,7 +568,11 @@ class BilibiliSdk {
       throw BiliApiException('search parse failed: $e');
     }
 
-    final dynamic rawResult = json['data']?['result'];
+    if (json is! Map) {
+      throw const BiliApiException('search answer in an unexpected shape');
+    }
+    final data = json['data'];
+    final dynamic rawResult = data is Map ? data['result'] : null;
     List? resultsList;
     if (rawResult is List) {
       resultsList = rawResult;
@@ -504,8 +584,9 @@ class BilibiliSdk {
       final tracks = <Track>[];
 
       for (final item in resultsList) {
-        final bvid = item['bvid'] as String?;
-        if (bvid == null || bvid.isEmpty) continue;
+        if (item is! Map) continue;
+        final bvid = item['bvid'];
+        if (bvid is! String || bvid.isEmpty) continue;
 
         final rawTitle = item['title'] as String? ?? '';
         final cleanTitle = rawTitle.replaceAll(_htmlTagRegex, '');
@@ -549,15 +630,19 @@ class BilibiliSdk {
     return [];
   }
 
-  /// True when the response is B站's risk-control rejection (-352 / 412),
-  /// which should trigger the unfiltered fallback search API.
-  static bool _riskControlled(String? body) {
+  /// True when the response is B站's risk-control rejection: code -352 or
+  /// 412, or — the quiet form — code 0 with a `v_voucher` to solve a captcha
+  /// with and no results. Either should trigger the fallback API.
+  @visibleForTesting
+  static bool isRiskControlled(String? body) {
     if (body == null) return false;
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map) {
         final code = decoded['code'];
-        return code == -352 || code == 412;
+        if (code == -352 || code == 412) return true;
+        final data = decoded['data'];
+        return data is Map && data['v_voucher'] != null;
       }
     } catch (_) {
       // Not JSON at all — not a clean rejection, treat as a normal response.

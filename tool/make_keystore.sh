@@ -52,15 +52,19 @@ read -rs PASS
 echo
 
 umask 077
-# Quoted delimiter: a password containing $, backticks or backslashes must be
-# written verbatim, not shell-expanded.
-cat > "$PROPS" <<'PROPEOF'
-storeFile=bilibeat-release.jks
-storePassword=$PASS
-keyAlias=$ALIAS
-keyPassword=$PASS
-PROPEOF
-unset PASS
+# printf '%s', not a heredoc: an unquoted heredoc would shell-expand a
+# password containing $ or backticks, and a quoted one writes the literal
+# text "$PASS". A .properties file reads a backslash as an escape, so each
+# one in the password is doubled.
+ESCAPED="${PASS//\\/\\\\}"
+{
+  printf 'storeFile=%s\n' "bilibeat-release.jks"
+  printf 'storePassword=%s\n' "$ESCAPED"
+  printf 'keyAlias=%s\n' "$ALIAS"
+  printf 'keyPassword=%s\n' "$ESCAPED"
+} > "$PROPS"
+unset PASS ESCAPED
+chmod 600 "$KEYSTORE"
 
 echo
 echo "Wrote $PROPS (mode $(stat -f '%Lp' "$PROPS"))."

@@ -702,10 +702,15 @@ class LyricsEngine {
     // A compilation is many songs, not one: 【合集】, 歌单, or simply too long
     // to be a single track. (One part of a multi-part video is judged on its
     // own name and length, with the video's title as [context].)
-    final category = bracketContent
-        .allMatches(_preprocess(rawTitle))
-        .any((m) => bracketCategory.hasMatch(m.group(1)!));
-    if (category || durationSeconds > _longestSong) {
+    // (珍藏 on something song-length is a word for the quality — 【4K珍藏】
+    // — not for a collection.)
+    final songLength = durationSeconds > 0 && durationSeconds <= 8 * 60;
+    final category = bracketContent.allMatches(_preprocess(rawTitle)).any((m) =>
+        bracketCategory.hasMatch(
+            songLength ? m.group(1)!.replaceAll('珍藏', '') : m.group(1)!));
+    if (category ||
+        _severalSongs.hasMatch(rawTitle) ||
+        durationSeconds > _longestSong) {
       _remember(memoKey, null);
       return null;
     }
@@ -798,6 +803,36 @@ class LyricsEngine {
       return normCredits.contains(n) ||
           n == normUploader ||
           (fullerName != null && fullerName.hasMatch(a));
+    }
+
+    // Bilibili heard a song in the video, and the video names that song:
+    // that is which song it is, however the title is worded. Who performs
+    // it is read from the title against who the song belongs to.
+    final recognised = _recognisedSong(hints, pre + context, normRaw);
+    if (recognised != null) {
+      final who = await _performers(
+        title: '$pre $context',
+        uploader: uploader,
+        song: recognised,
+        originals: hints.musicArtists,
+        tags: tags,
+        allTags: hints.tags,
+        titleArtist: titleArtist,
+      );
+      // Offline is not an answer: ask again next time.
+      if (who.incomplete) return null;
+      final own = who.own && !who.rendition;
+      final identity = SongIdentity(
+        title: recognised,
+        artist: who.artist.isEmpty ? uploader : who.artist,
+        // The release's artwork, where the video is the song's own artist
+        // performing it.
+        coverUrl:
+            own ? await _releaseCover(recognised, hints.musicArtists) : null,
+        exact: own,
+      );
+      _remember(memoKey, identity);
+      return identity;
     }
 
     final candidates = _generateCandidates(rawTitle);
@@ -905,6 +940,7 @@ class LyricsEngine {
     var bestScore = 0.0;
     var bestExact = false;
     var bestRendition = false;
+    var bestApart = false;
     var bestCredited = const <String>[];
     var bestGap = double.infinity;
     var anyResponse = false;
@@ -1041,6 +1077,7 @@ class LyricsEngine {
           // there may be the original singer's ("这是周深唱的大鱼？") or the
           // one covering — settled below, against who the song belongs to.
           final apart = bookIdx >= 0 || (isolated && !fromTag);
+          bestApart = apart;
           bestRendition = isRendition && !apart && gap > 6;
           bestCredited = inTitle;
           bestGap = gap;
@@ -1056,6 +1093,14 @@ class LyricsEngine {
     if (best == null) {
       // Offline or blocked is not "unknown song": stay retryable.
       if (anyResponse && !incomplete) _remember(memoKey, null);
+      return null;
+    }
+
+    // Bilibili heard some other song, one the title does not name. A word
+    // of the title that happens to be a song's name (情歌, 歌手) is then
+    // not believed unless the title sets it apart as the song.
+    if (hints.musicTitle.isNotEmpty && !bestApart) {
+      _remember(memoKey, null);
       return null;
     }
 
@@ -1090,7 +1135,7 @@ class LyricsEngine {
               originals.any((o) => o.contains(n) || n.contains(o)));
     }
 
-    final String artist;
+    String artist;
     if (bestExact) {
       final named = [
         for (final a in artists)
@@ -1160,6 +1205,29 @@ class LyricsEngine {
               : uploader);
     }
 
+    // Singers the title itself names settle who is heard: all of them on
+    // a duet the catalogue files under one (萨顶顶周深共唱《左手指月》), the
+    // one who is not the song's own on a cover the title does not call
+    // one, the UP主 where the title says whom it covers (cover周深).
+    final who = await _performers(
+      title: '$pre $context',
+      uploader: uploader,
+      song: cleanName,
+      originals: [
+        ...artists,
+        // (Normalised names: only those that read the same either way.)
+        ...originals.where(RegExp(r'^[\u4e00-\u9fa5·]+$').hasMatch),
+      ],
+      tags: tags,
+      allTags: hints.tags,
+      titleArtist: titleArtist,
+    );
+    if (who.incomplete) return null;
+    if (who.decisive && who.artist.isNotEmpty) {
+      artist = who.artist;
+      bestExact = who.own && !who.rendition;
+    }
+
     String? cover;
     if (bestExact) cover = await _netEaseCover(best!['id']);
 
@@ -1175,6 +1243,311 @@ class LyricsEngine {
     );
     _remember(memoKey, identity);
     return identity;
+  }
+
+  /// A video about several songs — a medley, a countdown, someone reacting
+  /// to a performance — is not one of them.
+  static final RegExp _severalSongs = RegExp(
+    r'串烧|联唱|盘点|排行榜|\breaction\b|\bmedley\b|\bmashup\b',
+    caseSensitive: false,
+  );
+
+  /// The song Bilibili recognised in the video ([VideoHints.musicTitle]),
+  /// if the video names it too. Recognition hears whatever music plays — in
+  /// a vlog or an awards clip that is the backing track — so on its own it
+  /// does not make the video that song; the title, or a tag, has to agree.
+  static String? _recognisedSong(
+      VideoHints hints, String title, String normTitle) {
+    final clean = hints.musicTitle
+        .replaceAll(parenSubtitle, '')
+        .replaceFirst(RegExp(r'\s*[-–—]\s*live\s*$', caseSensitive: false), '')
+        .trim();
+    final norm = _normalize(clean);
+    if (norm.isEmpty || !_isSaneOfficialTitle(clean)) return null;
+    // Set apart in brackets, any name will do (《问》, 《SM》 for S&M).
+    final bracketed = [
+      ...bookBracket.allMatches(title),
+      ...bracketContent.allMatches(title),
+    ].any((m) => _normalize(m.group(1)!) == norm);
+    if (bracketed) return clean;
+    // Run into other words, it has to be long enough not to be one of them.
+    final specific = RegExp(r'[\u4e00-\u9fa5]').hasMatch(norm)
+        ? norm.length >= 2
+        : norm.length >= 4;
+    if (!specific) return null;
+    final named = normTitle.contains(norm) ||
+        hints.tags.any((t) => _normalize(t) == norm);
+    return named ? clean : null;
+  }
+
+  /// Says the performance is somebody's version of another artist's song.
+  static final RegExp _versionMarker = RegExp(
+    r'翻唱|翻弹|翻奏|翻自|弹唱|扒谱|教学|教程|演奏|伴奏|纯音乐|合唱团|'
+    r'\bcover\b|\bremix\b',
+    caseSensitive: false,
+  );
+
+  /// Who is performing [song] in a video titled [title], given whose song
+  /// it is ([originals]).
+  ///
+  /// The singers a title names are found by looking for names that could be
+  /// one — the song's own artists, artists already in the library, tags,
+  /// the uploader — and keeping those NetEase knows as a singer. Then:
+  ///
+  ///  * a name introduced as the one covered ("翻唱周深", "原唱：王菲",
+  ///    "Cover 周深") is not performing;
+  ///  * where the video is somebody's version ([_versionMarker]), the
+  ///    performer is a singer named who is not the song's own (周深翻唱
+  ///    《人间》), else the UP主 (翻唱周深《吉量》);
+  ///  * otherwise everyone the title names is performing: the one who is
+  ///    not the song's own on an unmarked cover (周深《人间》), both on a
+  ///    duet (周深/五月天《如烟》);
+  ///  * a title that names nobody leaves it to the tags, and then to the
+  ///    song's own artists.
+  ///
+  /// [own] is whether every performer is one of the song's own artists;
+  /// [inTitle], whether the answer was read from the title itself;
+  /// [decisive], whether it would stand even if [originals] were only the
+  /// artists of some recording of the song rather than the song's own;
+  /// [incomplete], whether a name could not be looked up (offline).
+  static Future<
+      ({
+        String artist,
+        bool own,
+        bool inTitle,
+        bool rendition,
+        bool decisive,
+        bool incomplete
+      })> _performers({
+    required String title,
+    required String uploader,
+    required String song,
+    required List<String> originals,
+    required List<String> tags,
+    required List<String> allTags,
+    required String titleArtist,
+  }) async {
+    final normTitle = _normalize(title);
+    final songNorm = _normalize(song);
+    final originalNorms = {
+      for (final o in originals)
+        if (_normalize(o).length >= 2) _normalize(o),
+    };
+    // 邓紫棋 is "G.E.M. 邓紫棋"; 周深专辑 is not 周深.
+    bool isOwn(String norm) =>
+        norm.length >= 2 && originalNorms.any((o) => o.contains(norm));
+    bool covered(String name) => RegExp(
+          '(?:翻唱|翻自|原唱|cover|致敬|模仿|挑战|演绎|还原)(?:自|的)?'
+          '[\\s:：.．·]*${RegExp.escape(name)}',
+          caseSensitive: false,
+        ).hasMatch(title);
+
+    // A name NetEase could not be asked about may be a singer all the
+    // same: the answer is then missing someone, and is not to be kept.
+    var unasked = false;
+    Future<bool> isSinger(String name) async {
+      final norm = _normalize(name);
+      if (isOwn(norm) || _knownArtists.containsKey(norm)) return true;
+      final known = await (singerLookup ?? _netEaseSinger)(name);
+      if (known == null) unasked = true;
+      return known ?? false;
+    }
+
+    // Names worth looking for, most trusted first.
+    final names = <String, String>{};
+    void offer(String name) {
+      final n = name.trim().replaceAll(RegExp(r'^·+|·+$'), '');
+      final norm = _normalize(n);
+      final cjk = RegExp(r'[\u4e00-\u9fa5]').hasMatch(norm);
+      if (norm.length < (cjk ? 2 : 3) || norm.length > 16) return;
+      if (norm == songNorm || songNorm.contains(norm)) return;
+      names.putIfAbsent(norm, () => n);
+    }
+
+    originals.forEach(offer);
+    _knownArtists.values.forEach(offer);
+    // From here on, Chinese names only: a Latin word in a tag or a title
+    // is an artist's name too often to mean anything (Mayday, Melody).
+    final cjkName = RegExp(r'^[\u4e00-\u9fa5·]{2,7}$');
+    final tagNames = <String>[];
+    for (final tag in tags) {
+      if (cjkName.hasMatch(tag)) {
+        offer(tag);
+        tagNames.add(tag);
+      }
+    }
+    if (cjkName.hasMatch(uploader)) offer(uploader);
+    for (final word in _noisyClean(title)
+        .split(RegExp(r'[\s\-–—&×xX/／、,，|｜]+'))
+        .where(cjkName.hasMatch)
+        .take(8)) {
+      offer(word);
+    }
+    for (final partner in titleArtist.split(RegExp(r'\s*[&、,，/／×]\s*'))) {
+      if (cjkName.hasMatch(partner.trim())) offer(partner);
+    }
+
+    // Where each stands in the title, if it does.
+    final found = <({String name, String norm, int at})>[];
+    for (final entry in names.entries) {
+      final at = normTitle.indexOf(entry.key);
+      if (at < 0) continue;
+      // A Latin name has to be a word of its own, not letters inside one.
+      if (!RegExp(r'[\u4e00-\u9fa5]').hasMatch(entry.key) &&
+          !RegExp(
+            '(?<![A-Za-z])${RegExp.escape(entry.value)}(?![A-Za-z])',
+            caseSensitive: false,
+          ).hasMatch(title)) {
+        continue;
+      }
+      found.add((name: entry.value, norm: entry.key, at: at));
+    }
+    found.sort((a, b) => a.at.compareTo(b.at));
+    final verified = await Future.wait(found.map((m) => isSinger(m.name)));
+    final inTitle = [
+      for (var i = 0; i < found.length; i++)
+        if (verified[i]) found[i],
+    ];
+    // 五月天, not also 五月.
+    inTitle.removeWhere(
+        (m) => inTitle.any((o) => o.norm != m.norm && o.norm.contains(m.norm)));
+
+    final performing = [
+      for (final m in inTitle)
+        if (!covered(m.name)) m,
+    ];
+    // A tag says so when that is all it says (翻唱, 吉他弹唱), not when it
+    // is a sentence that happens to hold the word — and only of singing:
+    // 演奏 and 伴奏 are tagged on anything with a band in it.
+    final sungVersion = RegExp(r'翻唱|翻自|弹唱|\bcover\b', caseSensitive: false);
+    final rendition = _versionMarker.hasMatch(title) ||
+        allTags
+            .any((t) => _normalize(t).length <= 5 && sungVersion.hasMatch(t)) ||
+        inTitle.any((m) => covered(m.name));
+    final someoneElse = performing.any((m) => !isOwn(m.norm));
+
+    ({
+      String artist,
+      bool own,
+      bool inTitle,
+      bool rendition,
+      bool decisive,
+      bool incomplete
+    }) answer(
+      Iterable<String> who, {
+      required bool fromTitle,
+    }) =>
+        (
+          artist: who.join(' & '),
+          own: who.isNotEmpty && who.every((n) => isOwn(_normalize(n))),
+          inTitle: fromTitle,
+          rendition: rendition,
+          // What does not depend on [originals] being the song's true
+          // artists: a singer named who is not one of them, or the title
+          // saying outright whom it covers.
+          decisive: fromTitle &&
+              (rendition
+                  ? someoneElse || inTitle.any((m) => covered(m.name))
+                  : true),
+          incomplete: unasked,
+        );
+
+    // Singers the tags name, for a title that names none.
+    Future<List<String>> taggedSingers() async {
+      final candidates = [
+        for (final t in tagNames.take(6))
+          if (_normalize(t) != songNorm && !songNorm.contains(_normalize(t))) t,
+      ];
+      final known = await Future.wait(candidates.map(isSinger));
+      return [
+        for (var i = 0; i < candidates.length; i++)
+          if (known[i]) candidates[i],
+      ];
+    }
+
+    if (rendition) {
+      final others = [
+        for (final m in performing)
+          if (!isOwn(m.norm)) m.name,
+      ];
+      if (others.isNotEmpty) return answer(others, fromTitle: true);
+      // Named only as the ones covered, or not at all: a singer the tags
+      // name who is not the song's own, else whoever uploaded it.
+      if (inTitle.isEmpty) {
+        final tagged = [
+          for (final t in await taggedSingers())
+            if (!isOwn(_normalize(t))) t,
+        ];
+        if (tagged.isNotEmpty) return answer(tagged, fromTitle: false);
+      }
+      return answer([uploader], fromTitle: inTitle.isNotEmpty);
+    }
+
+    if (performing.isNotEmpty) {
+      return answer(performing.map((m) => m.name), fromTitle: true);
+    }
+    final tagged = await taggedSingers();
+    final others = [
+      for (final t in tagged)
+        if (!isOwn(_normalize(t))) t,
+    ];
+    if (others.isNotEmpty) return answer(tagged, fromTitle: false);
+    return answer(originals, fromTitle: false);
+  }
+
+  static final Map<String, bool> _singerMemo = {};
+
+  /// Whether [name] is a singer NetEase has music videos for. Nearly any
+  /// word is some account's artist name there (生米, 民乐, 女中音, 大合唱);
+  /// a name the title or the tags use is taken for a performer only when it
+  /// is an established one. Null when NetEase could not be asked.
+  static Future<bool?> _netEaseSinger(String name) async {
+    final key = _normalize(name);
+    if (key.isEmpty) return false;
+    final cached = _singerMemo[key];
+    if (cached != null) return cached;
+    final body = await _httpGet(
+      'https://music.163.com/api/search/get'
+      '?s=${Uri.encodeComponent(name)}&type=100&limit=5',
+      headers: {'Referer': 'https://music.163.com'},
+    );
+    if (body == null) return null;
+    try {
+      final artists = jsonDecode(body)['result']?['artists'] as List? ?? [];
+      final known = artists.whereType<Map>().any((a) =>
+          a['name'] is String &&
+          _normalize(a['name'] as String) == key &&
+          ((a['mvSize'] as num?) ?? 0) > 0);
+      if (_singerMemo.length > 300) _singerMemo.clear();
+      return _singerMemo[key] = known;
+    } catch (e) {
+      debugPrint('NetEase singer check error: $e');
+      return null;
+    }
+  }
+
+  /// Replaces the NetEase singer lookup in tests (null: could not ask).
+  @visibleForTesting
+  static Future<bool?> Function(String name)? singerLookup;
+
+  /// The artwork of [song] as released by one of [artists], or null.
+  static Future<String?> _releaseCover(
+      String song, List<String> artists) async {
+    if (artists.isEmpty) return null;
+    final songs = await _netEaseSearch('${artists.first} $song', limit: 5);
+    final songNorm = _normalize(song);
+    final artistNorms = {for (final a in artists) _normalize(a)};
+    for (final s in songs ?? const <Map>[]) {
+      final name = '${s['name'] ?? ''}'.replaceAll(parenSubtitle, '');
+      if (_normalize(name) != songNorm) continue;
+      final by = _artistsOf(s).map(_normalize);
+      if (!by
+          .any((a) => artistNorms.any((o) => o.contains(a) || a.contains(o)))) {
+        continue;
+      }
+      return _netEaseCover(s['id']);
+    }
+    return null;
   }
 
   /// A name in the title that NetEase knows as an artist (CJK names only:

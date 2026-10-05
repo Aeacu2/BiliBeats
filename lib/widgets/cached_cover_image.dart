@@ -52,6 +52,35 @@ class CachedCoverImage extends StatefulWidget {
     return '$url@${w}w_${h}h_1e_1c.webp';
   }
 
+  /// The cache keeps a file per cover per size and nothing ever removed
+  /// one. Once per launch, when it has outgrown [maxBytes], the covers
+  /// unused longest go until it is back under three quarters of that.
+  @visibleForTesting
+  static Future<void> trimCache(
+    Directory cacheDir, {
+    int maxBytes = 200 << 20,
+  }) async {
+    try {
+      final files = <(File, FileStat)>[];
+      var total = 0;
+      await for (final entity in cacheDir.list()) {
+        if (entity is! File) continue;
+        final stat = await entity.stat();
+        files.add((entity, stat));
+        total += stat.size;
+      }
+      if (total <= maxBytes) return;
+      files.sort((a, b) => a.$2.accessed.compareTo(b.$2.accessed));
+      for (final (file, stat) in files) {
+        if (total <= maxBytes * 3 ~/ 4) break;
+        await file.delete();
+        total -= stat.size;
+      }
+    } catch (_) {
+      // A cache that could not be trimmed is still a cache.
+    }
+  }
+
   static bool isLocalPath(String url) =>
       url.startsWith('/') || url.startsWith('file://');
 
@@ -154,6 +183,7 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       if (!await cacheDir.exists()) {
         await cacheDir.create(recursive: true);
       }
+      _trimOnce ??= CachedCoverImage.trimCache(cacheDir);
       final md5Key = md5.convert(utf8.encode(fetchUrl)).toString();
       final file = File('${cacheDir.path}/img_$md5Key.img');
 
@@ -181,14 +211,19 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
     }
   }
 
+  static Future<void>? _trimOnce;
+
   /// Downloads [fetchUrl] into [file] via a `.part` sibling + rename, so a
   /// kill mid-write can never leave a truncated file cached forever.
   static Future<File?> _downloadAndCache(String fetchUrl, File file) async {
     try {
-      final req = await _client.getUrl(Uri.parse(fetchUrl));
+      // Without these a stalled connection left the row on its placeholder
+      // (and its entry in [_inFlight]) for good.
+      const patience = Duration(seconds: 20);
+      final req = await _client.getUrl(Uri.parse(fetchUrl)).timeout(patience);
       req.headers.set('Referer', 'https://www.bilibili.com/');
       req.headers.set('User-Agent', kBiliUserAgent);
-      final res = await req.close();
+      final res = await req.close().timeout(patience);
 
       if (res.statusCode != 200) {
         await res.drain<void>();
@@ -199,7 +234,7 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       try {
         final sink = part.openWrite();
         try {
-          await res.pipe(sink);
+          await sink.addStream(res.timeout(patience));
         } finally {
           await sink.close();
         }

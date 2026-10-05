@@ -15,6 +15,10 @@ import 'theme/app_theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // debugPrint is not compiled out of release builds: titles and file paths
+  // would go to the system log, readable by anything with log access.
+  if (kReleaseMode) debugPrint = (String? message, {int? wrapWidth}) {};
+
   // Covers are decoded at display size, so many small entries fit in a
   // modest budget. A large cache is what gets a backgrounded app killed
   // first under memory pressure.

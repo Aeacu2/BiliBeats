@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   analyze-and-test:
     name: Analyze & test
@@ -27,8 +31,11 @@ jobs:
       - name: Analyze
         run: flutter analyze
 
+      # Tests tagged `live` ask NetEase for real; they are run on a
+      # developer's machine, where a failure can be looked into, and kept
+      # from failing a build because a third party was slow.
       - name: Test
-        run: flutter test
+        run: flutter test --exclude-tags live
 
   # analyze+test never compiled a single platform — whole-plugin breakage (a
   # bad SPM/CocoaPods file, a missing resource, a native API gone in a plugin

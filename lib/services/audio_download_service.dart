@@ -77,10 +77,19 @@ class AudioDownloadService {
   /// Stable per-part key. Falls back to bvid only for the (rare) track built
   /// without a usable id.
   static String _key(Track track) {
-    if (track.id.isNotEmpty) return track.id;
-    if (track.bvid.isNotEmpty) return track.bvid;
-    throw StateError('Track has empty id and bvid: $track');
+    final key = track.id.isNotEmpty ? track.id : track.bvid;
+    if (key.isEmpty) throw StateError('Track has empty id and bvid: $track');
+    if (!isSafeKey(key)) throw StateError('Track id is not a file name: $key');
+    return key;
   }
+
+  static final RegExp _safeKey = RegExp(r'^[A-Za-z0-9_-]{1,80}$');
+
+  /// Ids come from Bilibili's answers and end up in file names. A real one
+  /// is letters, digits and `_`; anything else (a path separator, `..`)
+  /// names no download and is never turned into a path.
+  @visibleForTesting
+  static bool isSafeKey(String key) => _safeKey.hasMatch(key);
 
   static String _audioPath(String dir, String key) => '$dir/audio_$key.m4a';
 
@@ -154,6 +163,7 @@ class AudioDownloadService {
 
   /// String-id variant of [isDownloaded] for callers that only hold an id.
   static Future<bool> isDownloadedById(String id) async {
+    if (!isSafeKey(id)) return false;
     final memo = _downloadedMemo[id];
     if (memo != null) return memo;
     final result = await _statDownloaded(id);
@@ -221,6 +231,7 @@ class AudioDownloadService {
       _audioPath(dir, id),
       _metaPath(dir, id),
       '${_audioPath(dir, id)}.part',
+      _partNotePath(_audioPath(dir, id)),
     ]) {
       final file = File(path);
       try {
@@ -295,129 +306,15 @@ class AudioDownloadService {
       throw Exception('无法获取音源下载链接');
     }
 
-    final tmp = File('$path.part');
-    IOSink? sink;
-    var lastEmitted = 0;
+    final part = File('$path.part');
+    final note = File(_partNotePath(path));
     try {
-      final req = await _client.getUrl(Uri.parse(url));
-      req.headers.set('Referer', 'https://www.bilibili.com/');
-      req.headers.set('User-Agent', kBiliUserAgent);
-      req.headers.set('Accept', '*/*');
-      req.headers.set('Accept-Encoding', 'identity');
-
-      // Resume an interrupted download when a .part file survived: ask for
-      // the remaining range. A server that ignores Range answers 200 with
-      // the whole file, which is detected below and starts from scratch.
-      final existing = await tmp.exists() ? await tmp.length() : 0;
-      if (existing > 0) {
-        req.headers.set('Range', 'bytes=$existing-');
-      }
-
-      final res = await req.close().timeout(
-            const Duration(seconds: 15),
-            onTimeout: () => throw TimeoutException('CDN close timeout'),
-          );
-      // A .part that already covers the whole file (e.g. a crash between the
-      // rename and the .ready marker) makes the CDN answer 416. The bytes on
-      // disk are complete — finalize them instead of failing the download.
-      if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable &&
-          existing > 0) {
-        await res.drain<void>();
-        final destination = File(path);
-        if (await destination.exists()) {
-          try {
-            await destination.delete();
-          } catch (e) {
-            debugPrint('416 finalize delete failed: $e');
-          }
-        }
-        // Atomic rename with Windows fallback.
-        try {
-          await tmp.rename(path);
-        } catch (e) {
-          // Windows: target exists or lock. Try copy+delete fallback.
-          debugPrint('416 rename failed, trying copy: $e');
-          await tmp.copy(path);
-          try {
-            await tmp.delete();
-          } catch (_) {}
-        }
-        // Ready marker: atomic create (empty file). Ensure after rename.
-        try {
-          final readyFile = File(_readyPath(dir, _key(track)));
-          if (!await readyFile.exists()) {
-            await readyFile.create(recursive: true);
-          }
-        } catch (e) {
-          debugPrint('416 ready create failed: $e');
-        }
-        await saveTrackMetadata(track, force: track.loudness != null);
-        _downloadedMemo[_key(track)] = true;
-        _emit(DownloadProgress(track.id, existing, existing, true, null));
-        await DatabaseService.saveDownloadedTrack(track);
-        return path;
-      }
-      if (res.statusCode != HttpStatus.ok &&
-          res.statusCode != HttpStatus.partialContent) {
-        await res.drain<void>();
-        throw Exception('CDN HTTP ${res.statusCode}');
-      }
-      // A signed CDN link that has expired answers 200 with an HTML/JSON error
-      // body; writing that to disk would leave a permanently "downloaded"
-      // track that cannot play.
-      final contentType = res.headers.contentType?.mimeType ?? '';
-      if (contentType.startsWith('text/') || contentType.contains('json')) {
-        await res.drain<void>();
-        throw Exception('CDN 返回了非音频内容 ($contentType)');
-      }
-
-      final int? total;
-      var received = 0;
-      if (res.statusCode == HttpStatus.partialContent) {
-        // 206: the server honored the range — append to what is on disk.
-        received = existing;
-        lastEmitted = existing;
-        total = res.contentLength > 0 ? existing + res.contentLength : null;
-        sink = tmp.openWrite(mode: FileMode.append);
-      } else {
-        // 200 after a Range request means the server ignored it; the body is
-        // the entire file, so whatever the .part holds is unusable.
-        if (existing > 0) {
-          await tmp.delete();
-        }
-        total = res.contentLength > 0 ? res.contentLength : null;
-        sink = tmp.openWrite();
-      }
-
-      // Apply read timeout per chunk: stall >30s is failure. res itself has no
-      // idle timeout once headers arrived; chunk stream can hang forever.
-      final timeoutRes = res.timeout(
-        const Duration(seconds: 30),
-        onTimeout: (sink) =>
-            sink.addError(TimeoutException('CDN chunk timeout')),
-      );
-      await for (final chunk in timeoutRes) {
-        sink.add(chunk);
-        received += chunk.length;
-        // Throttle progress events to ~every 64 KiB to avoid stream spam.
-        if (received - lastEmitted >= 65536) {
-          lastEmitted = received;
-          _emit(DownloadProgress(track.id, received, total, false, null));
-        }
-      }
-
-      await sink.flush();
-      await sink.close();
-      sink = null;
-
-      // Truncated transfer (dropped connection mid-stream): fail loudly rather
-      // than marking a half file as ready.
-      if (total != null && received < total) {
-        throw Exception('下载不完整 ($received/$total 字节)');
-      }
-      if (received < 1024) {
-        throw Exception('音频文件异常 ($received 字节)');
-      }
+      // A partial file that turns out not to be the start of what the
+      // server has now is thrown away, and the transfer made once more
+      // from the first byte.
+      var done = await _transfer(url, part, note, track.id);
+      done ??= await _transfer(url, part, note, track.id);
+      if (done == null) throw Exception('下载无法续传');
 
       final destination = File(path);
       if (await destination.exists()) {
@@ -428,19 +325,18 @@ class AudioDownloadService {
         }
       }
       try {
-        await tmp.rename(path);
+        await part.rename(path);
       } catch (e) {
+        // Windows: target exists or is locked. Copy, then drop the part.
         debugPrint('finalize rename failed, trying copy: $e');
+        await part.copy(path);
         try {
-          await tmp.copy(path);
-          try {
-            await tmp.delete();
-          } catch (_) {}
-        } catch (e2) {
-          debugPrint('finalize copy failed: $e2');
-          rethrow;
-        }
+          await part.delete();
+        } catch (_) {}
       }
+      try {
+        if (await note.exists()) await note.delete();
+      } catch (_) {}
       try {
         final readyFile = File(_readyPath(dir, _key(track)));
         if (!await readyFile.exists()) {
@@ -452,19 +348,214 @@ class AudioDownloadService {
       await saveTrackMetadata(track, force: track.loudness != null);
       _downloadedMemo[_key(track)] = true;
 
-      _emit(DownloadProgress(track.id, received, total, true, null));
+      _emit(DownloadProgress(track.id, done.received, done.total, true, null));
       await DatabaseService.saveDownloadedTrack(track);
       return path;
     } catch (e) {
-      try {
-        await sink?.close();
-      } catch (_) {}
       // Deliberately keep the .part file: the next attempt resumes it via
-      // Range instead of re-downloading from byte 0. Corrupt or unwanted
-      // partial data is handled there (a 200 answer restarts from scratch).
+      // Range instead of re-downloading from byte 0 (see [_transfer] for
+      // how a partial file that no longer fits is recognised).
       _emit(DownloadProgress(track.id, 0, null, false, '$e'));
       rethrow;
     }
+  }
+
+  static String _partNotePath(String audioPath) => '$audioPath.part.json';
+
+  /// What a `.part` file is the beginning of: the full length of the file
+  /// it was cut from, and the server's validator (ETag / Last-Modified) for
+  /// it. Null when there is no usable note.
+  static Future<({int? total, String? validator})?> _readPartNote(
+      File note) async {
+    try {
+      if (!await note.exists()) return null;
+      final map = jsonDecode(await note.readAsString());
+      if (map is! Map) return null;
+      final total = map['total'];
+      final validator = map['validator'];
+      return (
+        total: total is int && total > 0 ? total : null,
+        validator:
+            validator is String && validator.isNotEmpty ? validator : null,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// A validator the server will compare exactly: a strong ETag, else the
+  /// modification date. (`If-Range` ignores weak ETags.)
+  static String? _validatorOf(HttpClientResponse res) {
+    final etag = res.headers.value(HttpHeaders.etagHeader);
+    if (etag != null && etag.isNotEmpty && !etag.startsWith('W/')) return etag;
+    return res.headers.value(HttpHeaders.lastModifiedHeader);
+  }
+
+  static final RegExp _contentRange = RegExp(r'bytes\s+(\d+)-\d+/(\d+|\*)');
+
+  static Future<void> _discardPart(File part, File note) async {
+    for (final file in [part, note]) {
+      try {
+        if (await file.exists()) await file.delete();
+      } catch (e) {
+        debugPrint('discard partial download failed: $e');
+      }
+    }
+  }
+
+  /// Brings [part] up to the whole of [url], resuming what is already there.
+  ///
+  /// Every attempt asks Bilibili for a fresh link, which may be a different
+  /// file — another bitrate, another encode. Bytes appended to the start of
+  /// a different file make audio that is marked downloaded and cannot play,
+  /// so a partial file is only continued when it is known to belong to this
+  /// one: the note written beside it ([_readPartNote]) must agree with the
+  /// server on the validator (sent as `If-Range`, so a changed file comes
+  /// back whole) and on the total length.
+  ///
+  /// Returns the byte counts once [part] is complete, or null when the
+  /// partial file had to be thrown away — call again to start from zero.
+  static Future<({int received, int? total})?> _transfer(
+    String url,
+    File part,
+    File note,
+    String trackId,
+  ) async {
+    var existing = await part.exists() ? await part.length() : 0;
+    final known = existing > 0 ? await _readPartNote(note) : null;
+    if (existing > 0 && known == null) {
+      // Nothing says what these bytes are the start of.
+      await _discardPart(part, note);
+      existing = 0;
+    }
+
+    final req = await _client.getUrl(Uri.parse(url));
+    req.headers.set('Referer', 'https://www.bilibili.com/');
+    req.headers.set('User-Agent', kBiliUserAgent);
+    req.headers.set('Accept', '*/*');
+    req.headers.set('Accept-Encoding', 'identity');
+    if (existing > 0) {
+      req.headers.set('Range', 'bytes=$existing-');
+      final validator = known?.validator;
+      if (validator != null) req.headers.set('If-Range', validator);
+    }
+
+    final res = await req.close().timeout(
+          const Duration(seconds: 15),
+          onTimeout: () => throw TimeoutException('CDN close timeout'),
+        );
+
+    // 416: nothing lies beyond what is on disk. That is a finished file
+    // (e.g. a crash between the last byte and the rename) only when the
+    // length is the one recorded for it.
+    if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable &&
+        existing > 0) {
+      await res.drain<void>();
+      if (known?.total == existing) {
+        return (received: existing, total: existing);
+      }
+      await _discardPart(part, note);
+      return null;
+    }
+    if (res.statusCode != HttpStatus.ok &&
+        res.statusCode != HttpStatus.partialContent) {
+      await res.drain<void>();
+      throw Exception('CDN HTTP ${res.statusCode}');
+    }
+    // A signed CDN link that has expired answers 200 with an HTML/JSON error
+    // body; writing that to disk would leave a permanently "downloaded"
+    // track that cannot play.
+    final contentType = res.headers.contentType?.mimeType ?? '';
+    if (contentType.startsWith('text/') || contentType.contains('json')) {
+      await res.drain<void>();
+      throw Exception('CDN 返回了非音频内容 ($contentType)');
+    }
+
+    final int? total;
+    var received = 0;
+    final IOSink sink;
+    if (res.statusCode == HttpStatus.partialContent && existing > 0) {
+      // 206: the rest of a file — the same one only if it starts where the
+      // partial file ends, is as long as recorded, and carries the same
+      // validator.
+      final range = _contentRange
+          .firstMatch(res.headers.value(HttpHeaders.contentRangeHeader) ?? '');
+      final start = int.tryParse(range?.group(1) ?? '');
+      final full = int.tryParse(range?.group(2) ?? '');
+      final validator = _validatorOf(res);
+      final same = start == existing &&
+          (known?.total == null || full == null || full == known?.total) &&
+          (known?.validator == null ||
+              validator == null ||
+              validator == known?.validator) &&
+          // With neither to go by there is no telling.
+          (known?.validator != null || (known?.total != null && full != null));
+      if (!same) {
+        // Not read: the body is the tail of some other file.
+        await res.listen((_) {}).cancel();
+        await _discardPart(part, note);
+        return null;
+      }
+      received = existing;
+      total =
+          full ?? (res.contentLength > 0 ? existing + res.contentLength : null);
+      sink = part.openWrite(mode: FileMode.append);
+    } else if (res.statusCode == HttpStatus.partialContent) {
+      // A range nobody asked for.
+      await res.listen((_) {}).cancel();
+      throw Exception('CDN 返回了未请求的分段内容');
+    } else {
+      // 200: the whole file, from the first byte — a fresh download, or a
+      // server saying (through If-Range) that the file has changed, or one
+      // that ignores Range. Whatever the .part holds is replaced.
+      total = res.contentLength > 0 ? res.contentLength : null;
+      await _discardPart(part, note);
+      try {
+        await note.writeAsString(
+          jsonEncode({'total': total, 'validator': _validatorOf(res)}),
+          flush: true,
+        );
+      } catch (e) {
+        // Without the note this download simply cannot be resumed.
+        debugPrint('part note write failed: $e');
+      }
+      sink = part.openWrite();
+    }
+
+    var lastEmitted = received;
+    try {
+      // Apply read timeout per chunk: stall >30s is failure. res itself has
+      // no idle timeout once headers arrived; chunk stream can hang forever.
+      final timeoutRes = res.timeout(
+        const Duration(seconds: 30),
+        onTimeout: (sink) =>
+            sink.addError(TimeoutException('CDN chunk timeout')),
+      );
+      await for (final chunk in timeoutRes) {
+        sink.add(chunk);
+        received += chunk.length;
+        // Throttle progress events to ~every 64 KiB to avoid stream spam.
+        if (received - lastEmitted >= 65536) {
+          lastEmitted = received;
+          _emit(DownloadProgress(trackId, received, total, false, null));
+        }
+      }
+      await sink.flush();
+    } finally {
+      try {
+        await sink.close();
+      } catch (_) {}
+    }
+
+    // Truncated transfer (dropped connection mid-stream): fail loudly rather
+    // than marking a half file as ready.
+    if (total != null && received < total) {
+      throw Exception('下载不完整 ($received/$total 字节)');
+    }
+    if (received < 1024) {
+      throw Exception('音频文件异常 ($received 字节)');
+    }
+    return (received: received, total: total);
   }
 
   static void _emit(DownloadProgress p) {

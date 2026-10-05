@@ -15,7 +15,7 @@ Flutter is at `~/flutter/bin` and is not on PATH in non-interactive shells.
 ```bash
 export PATH="$HOME/flutter/bin:$PATH"
 flutter analyze                 # must stay at "No issues found"
-flutter test                    # ~40 s; a few tests query NetEase for real
+flutter test                    # ~1.5 min; tests tagged `live` query NetEase/Bilibili for real
 flutter test test/render_screens.dart --update-goldens   # PNGs in build/screens/
 tool/build_release.sh [ios|all] # obfuscated release; needs JDK 21+
 tool/release.sh patch "note"    # bump version + CHANGELOG + commit + tag (no build)
@@ -67,11 +67,20 @@ docs/archive/               old review notes and a superseded feature list — h
   isolates the name. Compilations and anything over 15 minutes are never one song.
   Evidence also comes from Bilibili (`BilibiliSdk.fetchVideoHints`: tags, description,
   zone) — on a cover the tags name the original singer, so they confirm the song but
-  not who is heard — and from the singer's NetEase catalogue. Named artists in the
+  not who is heard — and from the singer's NetEase catalogue.
+  First of all, though, it uses the song Bilibili itself recognised in the audio
+  (`VideoHints.musicTitle`, the "发现《…》" card): when the title or a tag names that
+  song too, that is the song, and only who performs it is left to work out
+  (`LyricsEngine._performers`: singers the title names, against the song's own
+  artists — a cover, a duet, or the UP主's version). Recognised music the video does
+  not name is only its backing track and is ignored. Named artists in the
   library feed the offline parser (`LyricsEngine.knownArtists`). `Track.matcher` records
   who named a song (0 = the listener, else `TrackNaming.matcher`): raise that constant
   when matching improves and older automatic answers are re-checked on next play.
-  The title corpus for the offline parser is `test/fixtures/real_bilibili_titles.json`.
+  The title corpus for the offline parser is `test/fixtures/real_bilibili_titles.json`;
+  `test/fixtures/zhoushen_videos.json` is 126 surveyed videos with their tags, recognised
+  music and hand-checked answers, replayed by `recognition_live_test.dart`. Check a
+  matching change against it before believing it.
 - **Lyrics.** `LyricsController` follows the playing track. Lyrics the listener chose,
   pasted or calibrated are pinned in `LyricsStore` and never overwritten automatically.
 
@@ -91,8 +100,9 @@ docs/archive/               old review notes and a superseded feature list — h
 
 - Widget tests run on a fake clock: real IO and isolates (`compute`) only complete inside
   `tester.runAsync`. Load the library in `setUpAll` or `runAsync`, not in the test body.
-- External HTTP is blocked in most tests (`useHermeticHttp`); `zhoushen_test.dart` uses
-  the real network on purpose.
+- External HTTP is blocked in most tests (`useHermeticHttp`); the `live`-tagged files
+  (`zhoushen_test.dart`, `recognition_live_test.dart`) use the real network on purpose
+  and CI leaves them out.
 - The Android keystore is `android/bilibeat-release.jks` (old name, kept so signing does
   not change). It and `android/key.properties` are gitignored; never commit them.
 - iOS has no CocoaPods — plugins integrate through Swift Package Manager.

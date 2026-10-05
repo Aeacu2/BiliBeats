@@ -73,6 +73,9 @@ class LyricsStore {
       }
     } catch (e) {
       debugPrint('LyricsStore load skipped: $e');
+      // Pinned lyrics are the listener's work: an unreadable file is kept,
+      // not overwritten by the next save.
+      await DatabaseService.setAsideStoreFile(_file);
     }
     _loaded = true;
     _clearedBeforeLoad.clear();

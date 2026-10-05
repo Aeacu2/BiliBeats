@@ -120,8 +120,78 @@ class DatabaseService {
       await _loadTracks('$dir/bilibeat_recently_played.json', _recentlyPlayed);
       await _loadPlaylists('$dir/bilibeat_playlists.json');
       await _loadSearchHistory('$dir/bilibeat_search_history.json');
+      _rebaseCovers(dir);
+      // With a store set aside, what it referenced is unknown: keep it all.
+      if (!_setAsideAny) unawaited(_sweepCovers(dir));
     } catch (e) {
       debugPrint('DatabaseService _ensureLoaded error: $e');
+    }
+  }
+
+  static const String _coverFolder = '/bilibeat_covers/';
+
+  /// A cover the listener picked is stored by its full path, and on iOS the
+  /// app's container moves when the app is reinstalled or re-signed. Paths
+  /// into the cover folder are re-pointed at where that folder is now.
+  @visibleForTesting
+  static String rebaseCover(String url, String docs) {
+    if (!url.startsWith('/') && !url.startsWith('file://')) return url;
+    final at = url.lastIndexOf(_coverFolder);
+    if (at < 0) return url;
+    return '$docs$_coverFolder${url.substring(at + _coverFolder.length)}';
+  }
+
+  static void _rebaseCovers(String docs) {
+    void rebase(List<Track> tracks) {
+      for (var i = 0; i < tracks.length; i++) {
+        final cover = rebaseCover(tracks[i].coverUrl, docs);
+        if (cover != tracks[i].coverUrl) {
+          tracks[i] = tracks[i].copyWith(coverUrl: cover);
+        }
+      }
+    }
+
+    rebase(_downloadedTracks);
+    rebase(_recentlyPlayed);
+    for (var i = 0; i < _playlists.length; i++) {
+      final playlist = _playlists[i];
+      rebase(playlist.tracks);
+      final cover = playlist.coverUrl;
+      if (cover != null && rebaseCover(cover, docs) != cover) {
+        _playlists[i] = Playlist(
+          id: playlist.id,
+          name: playlist.name,
+          coverUrl: rebaseCover(cover, docs),
+          tracks: playlist.tracks,
+        );
+      }
+    }
+  }
+
+  /// Deletes picked covers nothing shows any more (a cover that was
+  /// replaced, or picked and then not saved). Recent files are left alone.
+  static Future<void> _sweepCovers(String docs) async {
+    try {
+      final folder = Directory('$docs/bilibeat_covers');
+      if (!await folder.exists()) return;
+      String local(String url) =>
+          url.startsWith('file://') ? url.substring('file://'.length) : url;
+      final used = <String>{
+        for (final t in _downloadedTracks) local(t.coverUrl),
+        for (final t in _recentlyPlayed) local(t.coverUrl),
+        for (final p in _playlists) ...[
+          if (p.coverUrl != null) local(p.coverUrl!),
+          for (final t in p.tracks) local(t.coverUrl),
+        ],
+      };
+      final cutoff = DateTime.now().subtract(const Duration(days: 1));
+      await for (final entity in folder.list()) {
+        if (entity is! File || used.contains(entity.path)) continue;
+        if ((await entity.lastModified()).isAfter(cutoff)) continue;
+        await entity.delete();
+      }
+    } catch (e) {
+      debugPrint('DatabaseService cover sweep skipped: $e');
     }
   }
 
@@ -137,6 +207,7 @@ class DatabaseService {
         ..addAll(tracks);
     } catch (e) {
       debugPrint('DatabaseService load $path skipped: $e');
+      await _setAside(path);
     }
   }
 
@@ -249,6 +320,7 @@ class DatabaseService {
         ..addAll(playlists);
     } catch (e) {
       debugPrint('DatabaseService load $path skipped: $e');
+      await _setAside(path);
     }
   }
 
@@ -264,6 +336,7 @@ class DatabaseService {
         ..addAll(list.map((e) => e.toString()));
     } catch (e) {
       debugPrint('DatabaseService load $path skipped: $e');
+      await _setAside(path);
     }
   }
 
@@ -338,20 +411,43 @@ class DatabaseService {
       {'schema_version': schemaVersion, 'data': payload};
 
   /// Unwraps a persisted payload, accepting both the versioned envelope and
-  /// the bare legacy shape. Returns null for envelopes written by a NEWER
-  /// schema than this build understands: guessing at unknown future data and
-  /// then re-persisting the guess would destroy it.
+  /// the bare legacy shape. Throws for envelopes written by a NEWER schema
+  /// than this build understands: guessing at unknown future data and then
+  /// re-persisting the guess would destroy it. Every loader treats that like
+  /// a file it cannot parse — see [_setAside].
   static dynamic _readPayload(dynamic decoded) {
     if (decoded is Map && decoded.containsKey('schema_version')) {
       final version = decoded['schema_version'];
       if (version is int && version > schemaVersion) {
-        debugPrint('DatabaseService: file has schema_version $version > '
-            '$schemaVersion; written by a newer build, skipping');
-        return null;
+        throw FormatException('schema_version $version is newer than '
+            '$schemaVersion; written by a newer build');
       }
       return decoded['data'];
     }
     return decoded;
+  }
+
+  /// Whether a file was set aside in this launch (see [_setAside]).
+  static bool _setAsideAny = false;
+
+  /// Moves a file this build cannot read (damaged, or written by a newer
+  /// build) out of the way, to `<name>.unreadable`. The store then starts
+  /// empty, and the next save writes a fresh file instead of overwriting
+  /// the only copy of whatever was in the old one.
+  static Future<void> _setAside(String path) async {
+    _setAsideAny = true;
+    try {
+      final file = File(path);
+      if (!await file.exists()) return;
+      var target = '$path.unreadable';
+      if (await File(target).exists()) {
+        target = '$path.${DateTime.now().millisecondsSinceEpoch}.unreadable';
+      }
+      await file.rename(target);
+      debugPrint('DatabaseService: kept unreadable file as $target');
+    } catch (e) {
+      debugPrint('DatabaseService: could not set aside $path: $e');
+    }
   }
 
   static Future<void> _persistDownloaded() async {
@@ -712,14 +808,18 @@ class DatabaseService {
     final cached = _prefs;
     if (cached != null) return cached;
     var loaded = <String, dynamic>{};
+    String? path;
     try {
-      final file = File('${await _docs()}/bilibeat_prefs.json');
+      path = '${await _docs()}/bilibeat_prefs.json';
+      final file = File(path);
       if (await file.exists()) {
         final payload = _readPayload(jsonDecode(await file.readAsString()));
         if (payload is Map) loaded = Map<String, dynamic>.from(payload);
       }
     } catch (e) {
       debugPrint('DatabaseService load prefs skipped: $e');
+      // Another caller may have loaded (and since saved) them meanwhile.
+      if (path != null && _prefs == null) await _setAside(path);
     }
     return _prefs ??= loaded;
   }
@@ -794,4 +894,8 @@ class DatabaseService {
 
   /// Unwraps a decoded store file (see [_readPayload]).
   static dynamic unwrapStorePayload(dynamic decoded) => _readPayload(decoded);
+
+  /// Sets `<documents>/[name]` aside as unreadable (see [_setAside]).
+  static Future<void> setAsideStoreFile(String name) async =>
+      _setAside('${await _docs()}/$name');
 }

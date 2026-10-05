@@ -25,7 +25,7 @@ class TrackNaming {
   /// The matcher's generation, recorded on every song it names
   /// ([Track.matcher]). Raise it when matching gets better: songs named by
   /// an older generation are then looked at again the next time they play.
-  static const int matcher = 3;
+  static const int matcher = 4;
   static BiliBeatsAudioHandler? _handler;
 
   /// Tried this session; a title the catalogues do not know is not asked
@@ -53,7 +53,7 @@ class TrackNaming {
   /// What the music catalogues say [track] is, or null when they do not
   /// recognise it.
   static Future<SongIdentity?> identify(Track track) async {
-    final hints = await BilibiliSdk.fetchVideoHints(track.bvid);
+    final hints = await BilibiliSdk.fetchVideoHints(track.bvid, cid: track.cid);
     return _ask(track, hints, _uploaderOf(track, hints));
   }
 
@@ -121,7 +121,8 @@ class TrackNaming {
     final before = await _stored(track.id);
     if (before == null || _settled(before)) return;
 
-    final hints = await BilibiliSdk.fetchVideoHints(before.bvid);
+    final hints =
+        await BilibiliSdk.fetchVideoHints(before.bvid, cid: before.cid);
     final wasNamed = before.isNamed;
     // Named before [Track.matcher] was recorded: by the listener, or by the
     // first matcher — which credited the UP主 whenever it could not read the
