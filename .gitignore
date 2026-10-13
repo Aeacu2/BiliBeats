@@ -1,0 +1,84 @@
+# Local editor tooling state (opencode session data). Never shared.
+.opencode/
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+**/ios/Flutter/Generated.xcconfig
+# Xcode-generated ephemeral build state (also covers ios/Flutter/ephemeral/
+# and macos/Flutter/ephemeral/, incl. flutter_export_environment.sh).
+**/ephemeral/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+test/failures/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/build/
+
+# Obfuscation symbol files: large, per-build binaries. Archive them with the
+# GitHub release instead — they are required to read crashes from that build.
+symbols/
+
+# Release signing material. Losing these orphans every install; leaking them
+# lets anyone ship an "update" to your users. Never commit.
+android/key.properties
+*.jks
+*.keystore
+
+# The song model: built by tool/song_model/export_plm.py, too large to commit
+# (assets/song_model/README.md). Pretrained encoders, checkpoints and caches
+# live in tool/song_model/work/.
+assets/song_model/song_model.bin
+assets/song_model/song_vocab.txt
+assets/song_model/song_singers.txt
+assets/song_model/song_model.json
+tool/song_model/work/
+# The retired character model's checkpoints (46 MB of weights nothing uses).
+tool/song_model/legacy/weights/
+
+# The training data: crawled video metadata and its labels. Kept locally
+# only; it is not published.
+tool/song_model/data/
+tool/song_model/label_haiku/
+
+# Real videos' metadata the matching tests are measured on. Kept locally
+# only; the tests that need it skip without it.
+test/fixtures/

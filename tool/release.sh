@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+#
+# Cuts a release: bumps pubspec.yaml, prepends a CHANGELOG.md entry, commits
+# and tags. It deliberately does NOT build — run tool/build_release.sh
+# afterwards, then attach the artifacts and symbols/ to the GitHub release.
+#
+#   tool/release.sh patch "first note" ["second note" ...]
+#   tool/release.sh minor "..."
+#   tool/release.sh major "..."
+#
+# Why this exists:
+#
+#   1. Before this script, the version number lived in three places that had
+#      to be kept in sync by hand: pubspec.yaml, the commit message, and the
+#      git tag. Releases 3.4.1, 3.5.x, 3.8.0/3.8.1 and 3.10.1/3.10.2 shipped
+#      without tags at all. This script makes the tagged commit the single
+#      act of releasing.
+#   2. It refuses to run on a dirty tree, so the release commit contains
+#      exactly the version bump and changelog entry — nothing accidental.
+#   3. The build number (the +N in x.y.z+N) is bumped automatically. Android
+#      uses it as versionCode; forgetting it makes installs reject updates.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+usage() {
+  echo "usage: tool/release.sh <patch|minor|major|X.Y.Z> \"note\" [\"note\" ...]" >&2
+  exit 2
+}
+
+[ $# -ge 2 ] || usage
+BUMP="$1"; shift
+case "$BUMP" in
+  patch|minor|major) ;;
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *) usage ;;
+esac
+NOTES=("$@")
+
+# --- Preflight ---------------------------------------------------------------
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "error: working tree is dirty — commit or stash first, so the release" >&2
+  echo "       commit contains only the version bump and changelog entry." >&2
+  git status --short >&2
+  exit 1
+fi
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$BRANCH" != "main" ] && [ "${ALLOW_BRANCH:-}" != "1" ]; then
+  echo "error: on branch '$BRANCH' — releases are cut from main" >&2
+  echo "       (set ALLOW_BRANCH=1 to release from here anyway)." >&2
+  exit 1
+fi
+
+# A step failing after the version is bumped must not leave a tree that
+# says it is the new version without the commit and tag that make it one.
+restore_tree() {
+  git reset -q -- pubspec.yaml CHANGELOG.md 2>/dev/null || true
+  git checkout -- pubspec.yaml CHANGELOG.md 2>/dev/null || true
+  rm -f CHANGELOG.md.new /tmp/release_entry.md
+  echo "error: release aborted; pubspec.yaml and CHANGELOG.md restored" >&2
+}
+trap restore_tree ERR
+
+if ! git diff --quiet origin/main main 2>/dev/null; then
+  echo "warning: local main differs from origin/main — did you forget to pull/push?" >&2
+fi
+
+# --- Version bump ------------------------------------------------------------
+
+VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+SHORT="${VERSION%%+*}"
+BUILD="${VERSION##*+}"
+MAJOR="${SHORT%%.*}"
+REST="${SHORT#*.}"
+MINOR="${REST%%.*}"
+PATCH="${REST##*.}"
+
+case "$BUMP" in
+  major)
+    MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+    NEW_SHORT="$MAJOR.$MINOR.$PATCH"
+    NEW_BUILD=$((BUILD + 1))
+    ;;
+  minor)
+    MINOR=$((MINOR + 1)); PATCH=0
+    NEW_SHORT="$MAJOR.$MINOR.$PATCH"
+    NEW_BUILD=$((BUILD + 1))
+    ;;
+  patch)
+    PATCH=$((PATCH + 1))
+    NEW_SHORT="$MAJOR.$MINOR.$PATCH"
+    NEW_BUILD=$((BUILD + 1))
+    ;;
+  *)
+    NEW_SHORT="$BUMP"
+    # Android refuses an update whose versionCode is not higher than the
+    # installed one, whatever the version name says.
+    NEW_BUILD=$((BUILD + 1))
+    ;;
+esac
+NEW_VERSION="$NEW_SHORT+$NEW_BUILD"
+
+if git rev-parse "v$NEW_SHORT" >/dev/null 2>&1; then
+  echo "error: tag v$NEW_SHORT already exists" >&2
+  exit 1
+fi
+
+# sed -i needs a different invocation on macOS; the release machine may be
+# either, so branch instead of assuming one platform.
+if [ "$(uname)" = "Darwin" ]; then
+  sed -i '' "s/^version: .*$/version: $NEW_VERSION/" pubspec.yaml
+else
+  sed -i "s/^version: .*$/version: $NEW_VERSION/" pubspec.yaml
+fi
+grep -q "^version: $NEW_VERSION$" pubspec.yaml || {
+  echo "error: failed to update pubspec.yaml" >&2; exit 1; }
+
+# --- Changelog ---------------------------------------------------------------
+
+TODAY=$(date +%F)
+{
+  printf '## [%s] - %s\n\n' "$NEW_SHORT" "$TODAY"
+  for note in "${NOTES[@]}"; do
+    printf -- '- %s\n' "$note"
+  done
+  printf '\n'
+} > /tmp/release_entry.md
+
+# Insert the entry right above the first existing version heading. A
+# CHANGELOG.md with no heading is a broken repo state, not an empty one — the
+# entry would silently vanish, so fail loudly instead.
+awk '
+  BEGIN { done = 0 }
+  !done && /^## \[/ {
+    while ((getline line < "/tmp/release_entry.md") > 0) print line
+    close("/tmp/release_entry.md")
+    done = 1
+  }
+  { print }
+  END { if (!done) exit 1 }
+' CHANGELOG.md > CHANGELOG.md.new || {
+  echo "error: no version heading in CHANGELOG.md — cannot place the entry" >&2
+  rm -f CHANGELOG.md.new /tmp/release_entry.md
+  exit 1
+}
+mv CHANGELOG.md.new CHANGELOG.md
+rm -f /tmp/release_entry.md
+
+# --- Commit + tag ------------------------------------------------------------
+
+FIRST_NOTE="${NOTES[0]}"
+git add pubspec.yaml CHANGELOG.md
+git commit -m "feat(release): $NEW_SHORT - $FIRST_NOTE"
+git tag "v$NEW_SHORT"
+trap - ERR
+
+echo
+echo "==> Released $NEW_VERSION (tag v$NEW_SHORT)"
+echo
+echo "Next steps:"
+echo "  git push && git push --tags"
+echo "  tool/build_release.sh all"
+echo "  # then create the GitHub release for v$NEW_SHORT and attach the APK/IPA/DMG"
+echo "  # plus the matching symbols/ directory contents"

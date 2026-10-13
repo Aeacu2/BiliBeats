@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+#
+# Builds the shippable release artifacts with Dart obfuscation.
+#
+#   tool/build_release.sh            # android (default)
+#   tool/build_release.sh ios
+#   tool/build_release.sh all
+#
+# Android: a single arm64-only APK. `--target-platform android-arm64` keeps
+# Flutter from compiling the other ABIs at all, and `abiFilters` in
+# android/app/build.gradle is the backstop so even a plain `flutter build apk`
+# cannot ship 32-bit.
+#
+# iOS: an **unsigned** .ipa for sideloading (AltStore / Sideloadly / your own
+# provisioning profile). There is no Apple Developer account behind this app,
+# so there is nothing to sign with here and nothing to submit to; the archive
+# is built with --no-codesign and packaged by hand. Whoever installs it signs
+# it with their own identity.
+#
+# Things this exists to get right, because all of them have already bitten us:
+#
+#   1. JDK version. AGP's bundled lint calls java.util.List.removeLast(), which
+#      only exists on JDK 21+. Building on JDK 17 fails deep inside lint with a
+#      NoSuchMethodError that says nothing about Java versions.
+#   2. Symbol files. --obfuscate renames every identifier, so a crash from a
+#      shipped build is unreadable without the matching .symbols file. They are
+#      written to symbols/<version>/ and MUST be kept for as long as that
+#      version is in anyone's hands. Attach them to the GitHub release.
+#   3. iOS has no CocoaPods. Every plugin this app uses ships a Package.swift,
+#      so the project is integrated through Swift Package Manager and there is
+#      deliberately no ios/Podfile. Do not re-add one to "fix" a build; if a
+#      future plugin is Pods-only, regenerate it with `flutter create .` and
+#      say so here.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# The song model is not in the repository (assets/song_model/README.md). A
+# release without it would quietly name songs by the rules alone, so the
+# one this version ships is fetched, and checked, before anything is built.
+tool/fetch_song_model.sh
+
+TARGET="${1:-android}"
+case "$TARGET" in
+  android|ios|macos|all) ;;
+  *) echo "usage: tool/build_release.sh [android|ios|macos|all]" >&2; exit 2 ;;
+esac
+
+# Flutter is not always on PATH (it isn't on this machine), so resolve it
+# rather than failing halfway through with "command not found".
+FLUTTER="${FLUTTER_BIN:-$(command -v flutter || true)}"
+if [ -z "$FLUTTER" ] && [ -x "$HOME/flutter/bin/flutter" ]; then
+  FLUTTER="$HOME/flutter/bin/flutter"
+fi
+if [ -z "$FLUTTER" ]; then
+  echo "error: flutter not found; set FLUTTER_BIN=/path/to/flutter" >&2
+  exit 1
+fi
+
+VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+SHORT_VERSION="${VERSION%%+*}"
+SYMBOLS_DIR="symbols/$VERSION"
+# A release build is the tagged commit and nothing else: built from any
+# other tree it would carry the same version and replace that version's
+# symbols, and crashes from the published build could no longer be read.
+if [ -n "$(git status --porcelain)" ] ||
+   [ "$(git describe --exact-match --tags HEAD 2>/dev/null)" != "v$SHORT_VERSION" ]; then
+  if [ "${ALLOW_UNTAGGED:-}" != "1" ]; then
+    echo "error: HEAD is not a clean checkout of v$SHORT_VERSION." >&2
+    echo "       Run tool/release.sh first, or set ALLOW_UNTAGGED=1 for a" >&2
+    echo "       development build (its symbols go to symbols/dev)." >&2
+    exit 1
+  fi
+  SYMBOLS_DIR="symbols/dev"
+fi
+mkdir -p "$SYMBOLS_DIR"
+
+build_android() {
+  if [ -z "${JAVA_HOME:-}" ]; then
+    if [ -d "/opt/homebrew/opt/openjdk@21" ]; then
+      JAVA_HOME="/opt/homebrew/opt/openjdk@21"
+    elif compgen -G "$HOME/miniforge3/pkgs/openjdk-*/lib/jvm" >/dev/null; then
+      JAVA_HOME=$(compgen -G "$HOME/miniforge3/pkgs/openjdk-*/lib/jvm" | head -n 1)
+    else
+      JAVA_HOME="/opt/homebrew/opt/openjdk@21"
+    fi
+  fi
+  export JAVA_HOME
+  export PATH="$JAVA_HOME/bin:$PATH"
+
+  if ! java -version 2>&1 | grep -qE '"(2[1-9]|[3-9][0-9])'; then
+    echo "error: need JDK 21+ (AGP lint requires it); JAVA_HOME=$JAVA_HOME" >&2
+    java -version >&2 || true
+    exit 1
+  fi
+
+  if [ ! -f android/key.properties ]; then
+    if [ "${ALLOW_DEBUG_SIGNING:-}" != "1" ]; then
+      echo "error: android/key.properties not found — the build would be signed" >&2
+      echo "       with the DEBUG key and could not update an installed release." >&2
+      echo "       Run tool/make_keystore.sh first, or set ALLOW_DEBUG_SIGNING=1." >&2
+      exit 1
+    fi
+    echo "WARNING: signing with the DEBUG key; this build must not be published." >&2
+    echo >&2
+  fi
+
+  echo "==> Android $VERSION (obfuscated), symbols -> $SYMBOLS_DIR"
+  # No --split-per-abi: with a single ABI there is nothing to split, and AGP
+  # rejects `splits.abi` and `ndk.abiFilters` being set at the same time
+  # ("Conflicting configuration ... cannot be present when splits abi filters
+  # are set"). The output is a single app-release.apk containing only arm64.
+  "$FLUTTER" build apk --release \
+    --target-platform android-arm64 \
+    --obfuscate \
+    --split-debug-info="$SYMBOLS_DIR"
+
+  # Publish under a name that says what it is, rather than "app-release.apk".
+  cp build/app/outputs/flutter-apk/app-release.apk \
+     "build/app/outputs/flutter-apk/bilibeats-${SHORT_VERSION}-arm64-v8a.apk"
+
+  echo
+  echo "==> APK"
+  ls -lh build/app/outputs/flutter-apk/*-release.apk
+}
+
+build_ios() {
+  if [ "$(uname)" != "Darwin" ]; then
+    echo "error: iOS builds need macOS with Xcode" >&2
+    exit 1
+  fi
+
+  echo "==> iOS $VERSION (obfuscated, unsigned), symbols -> $SYMBOLS_DIR"
+  "$FLUTTER" build ios --release --no-codesign \
+    --obfuscate \
+    --split-debug-info="$SYMBOLS_DIR"
+
+  # An .ipa is just a zip with the .app inside a Payload/ directory. Building
+  # one by hand (rather than via `flutter build ipa`, which insists on an
+  # export method and therefore a signing identity) is what lets an unsigned
+  # build be produced at all.
+  local out_dir="build/ios/ipa"
+  local ipa="$out_dir/bilibeats-${SHORT_VERSION}-unsigned.ipa"
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir/Payload"
+  cp -R build/ios/iphoneos/Runner.app "$out_dir/Payload/"
+  (cd "$out_dir" && zip -qry "$(basename "$ipa")" Payload)
+  rm -rf "$out_dir/Payload"
+
+  echo
+  echo "==> IPA (UNSIGNED — sideload with AltStore/Sideloadly, or re-sign)"
+  ls -lh "$ipa"
+}
+
+build_macos() {
+  if [ "$(uname)" != "Darwin" ]; then
+    echo "error: macOS builds need macOS with Xcode" >&2
+    exit 1
+  fi
+
+  echo "==> macOS $VERSION (obfuscated), symbols -> $SYMBOLS_DIR"
+  "$FLUTTER" build macos --release \
+    --obfuscate \
+    --split-debug-info="$SYMBOLS_DIR"
+
+  local app_path="build/macos/Build/Products/Release/BiliBeats.app"
+  local dmg="build/macos/bilibeats-${SHORT_VERSION}-macos.dmg"
+  hdiutil create -volname "BiliBeats" -srcfolder "$app_path" -ov -format UDZO "$dmg"
+
+  echo
+  echo "==> macOS DMG"
+  ls -lh "$dmg"
+}
+
+case "$TARGET" in
+  android) build_android ;;
+  ios) build_ios ;;
+  macos) build_macos ;;
+  all) build_android; build_ios; build_macos ;;
+esac
+
+echo
+echo "==> Symbols (keep these — required to read any crash from this build)"
+ls -lh "$SYMBOLS_DIR"
+echo
+echo "Symbolize a stack trace with:"
+echo "  flutter symbolize -i <trace.txt> -d $SYMBOLS_DIR/<app.*.symbols>"

@@ -1,0 +1,215 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+/// Single source of truth for color. The brand accent stays the signature
+/// bilibeat pink; everything else is a calm, cool neutral ramp so the accent
+/// (and the album art) are the only saturated things on screen — the core of a
+/// "premium" feel.
+class AppColors {
+  // Brand
+  static const Color accent = Color(0xFFFF3366);
+
+  // Precomputed opacity colors (avoids runtime Color allocations)
+  static const Color accent30 = Color(0x4DFF3366); // accent 30%
+  static const Color accent22 = Color(0x38FF3366); // accent 22%
+  static const Color accent50 = Color(0x80FF3366); // accent 50%
+  static const Color black50 = Color(0x80000000); // black 50%
+  static const Color black55 = Color(0x8C000000); // black 55%
+  static const Color white10 = Color(0x1AFFFFFF); // white 10%
+  static const Color white12 = Color(0x1FFFFFFF); // white 12%
+  static const Color white24 = Color(0x3DFFFFFF); // white 24%
+  static const Color white30 = Color(0x4DFFFFFF); // white 30%
+  static const Color white45 = Color(0x73FFFFFF); // white 45%
+
+  // Neutral ramp (cool near-black, not pure #000 — reads more refined).
+  static const Color background = Color(0xFF08080A);
+  static const Color backgroundElevated = Color(0xFF101014);
+
+  /// One step deeper than [backgroundElevated]: nested surfaces and the cover
+  /// placeholder read as "card on card" instead of fighting for the same tone.
+  static const Color surfaceDeep = Color(0xFF141416);
+
+  /// Fill for the search field and other inset controls.
+  static const Color fieldFill = Color(0xFF1B1B1F);
+  static const Color hairline = Color(0x14FFFFFF); // subtle borders
+  static const Color hairlineStrong = Color(0x26FFFFFF);
+
+  // Text
+  static const Color textPrimary = Color(0xFFFFFFFF);
+  static const Color textSecondary = Color(0xB3FFFFFF); // 70%
+  static const Color textMuted = Color(0x8CFFFFFF); // 55%
+  static const Color textFaint = Color(
+      0x78FFFFFF); // 47% — was 35% (0x59) →45% (0x73) still 4.47:1, now 4.71:1 for WCAG AA
+
+  // Semantic
+  static const Color success = Color(0xFF34C77B);
+  static const Color danger = Color(0xFFFF453A);
+}
+
+/// Corner-radius scale.
+class AppRadius {
+  static const double sm = 10;
+  static const double md = 14;
+  static const double lg = 20;
+  static const double xl = 28;
+  static const double pill = 999;
+}
+
+/// A tuned system-font type scale. We deliberately do NOT declare a custom
+/// fontFamily that isn't bundled (that silently falls back anyway); instead we
+/// get a premium look from weight contrast, tight tracking on large text, and
+/// generous line heights. SF Pro (iOS) / Roboto (Android) are high-quality.
+class AppTypography {
+  /// Section headers inside a page (为你推荐, 我的音乐).
+  static const TextStyle section = TextStyle(
+    fontSize: 19,
+    height: 1.2,
+    fontWeight: FontWeight.w700,
+    letterSpacing: -0.3,
+    color: AppColors.textPrimary,
+  );
+
+  static const TextStyle display = TextStyle(
+    fontSize: 32,
+    height: 1.1,
+    fontWeight: FontWeight.w800,
+    letterSpacing: -1.0,
+    color: AppColors.textPrimary,
+  );
+  static const TextStyle titleLarge = TextStyle(
+    fontSize: 24,
+    height: 1.15,
+    fontWeight: FontWeight.w700,
+    letterSpacing: -0.6,
+    color: AppColors.textPrimary,
+  );
+  static const TextStyle title = TextStyle(
+    fontSize: 20,
+    height: 1.2,
+    fontWeight: FontWeight.w700,
+    letterSpacing: -0.4,
+    color: AppColors.textPrimary,
+  );
+  static const TextStyle headline = TextStyle(
+    fontSize: 17,
+    height: 1.25,
+    fontWeight: FontWeight.w600,
+    letterSpacing: -0.2,
+    color: AppColors.textPrimary,
+  );
+  static const TextStyle body = TextStyle(
+    fontSize: 15,
+    height: 1.4,
+    fontWeight: FontWeight.w400,
+    color: AppColors.textPrimary,
+  );
+  static const TextStyle bodyMedium = TextStyle(
+    fontSize: 14,
+    height: 1.35,
+    fontWeight: FontWeight.w500,
+    color: AppColors.textSecondary,
+  );
+  static const TextStyle caption = TextStyle(
+    fontSize: 12,
+    height: 1.3,
+    fontWeight: FontWeight.w500,
+    letterSpacing: 0.1,
+    color: AppColors.textMuted,
+  );
+  static const TextStyle overline = TextStyle(
+    fontSize: 11,
+    height: 1.2,
+    fontWeight: FontWeight.w700,
+    letterSpacing: 1.4,
+    color: AppColors.textMuted,
+  );
+}
+
+class AppTheme {
+  static ThemeData get darkTheme {
+    final base = ThemeData(
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: AppColors.background,
+      useMaterial3: true,
+      colorScheme: const ColorScheme.dark(
+        primary: AppColors.accent,
+        secondary: AppColors.accent,
+        surface: AppColors.backgroundElevated,
+        onPrimary: Colors.white,
+      ),
+      splashFactory: InkSparkle.splashFactory,
+    );
+
+    return base.copyWith(
+      textTheme: base.textTheme.copyWith(
+        displayLarge: AppTypography.display,
+        displayMedium: AppTypography.titleLarge,
+        titleLarge: AppTypography.title,
+        titleMedium: AppTypography.headline,
+        bodyLarge: AppTypography.body,
+        bodyMedium: AppTypography.bodyMedium,
+        bodySmall: AppTypography.caption,
+        labelSmall: AppTypography.overline,
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        centerTitle: false,
+        systemOverlayStyle: SystemUiOverlayStyle.light,
+        titleTextStyle: AppTypography.titleLarge,
+      ),
+      bottomNavigationBarTheme: const BottomNavigationBarThemeData(
+        backgroundColor: Colors.transparent,
+        selectedItemColor: AppColors.accent,
+        unselectedItemColor: AppColors.textMuted,
+        type: BottomNavigationBarType.fixed,
+        elevation: 0,
+      ),
+      iconTheme: const IconThemeData(color: AppColors.textSecondary),
+      dialogTheme: const DialogThemeData(
+        backgroundColor: AppColors.backgroundElevated,
+        surfaceTintColor: Colors.transparent,
+        titleTextStyle: AppTypography.headline,
+        contentTextStyle: AppTypography.bodyMedium,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(AppRadius.xl)),
+        ),
+      ),
+      bottomSheetTheme: const BottomSheetThemeData(
+        backgroundColor: AppColors.backgroundElevated,
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(
+            top: Radius.circular(AppRadius.xl),
+          ),
+        ),
+      ),
+      popupMenuTheme: const PopupMenuThemeData(
+        color: AppColors.backgroundElevated,
+        surfaceTintColor: Colors.transparent,
+        textStyle: AppTypography.body,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(AppRadius.md)),
+        ),
+      ),
+      textSelectionTheme: const TextSelectionThemeData(
+        cursorColor: AppColors.accent,
+        selectionColor: AppColors.accent30,
+        selectionHandleColor: AppColors.accent,
+      ),
+      progressIndicatorTheme: const ProgressIndicatorThemeData(
+        color: AppColors.accent,
+      ),
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
+      ),
+      sliderTheme: const SliderThemeData(
+        activeTrackColor: AppColors.accent,
+        inactiveTrackColor: AppColors.hairlineStrong,
+        thumbColor: AppColors.accent,
+        overlayColor: AppColors.accent22,
+      ),
+    );
+  }
+}

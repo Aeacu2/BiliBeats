@@ -1,0 +1,4 @@
+# `live` tests talk to real third-party services (NetEase). They run with a
+# plain `flutter test`; CI leaves them out (`--exclude-tags live`).
+tags:
+  live:

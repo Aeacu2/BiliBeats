@@ -1,0 +1,2544 @@
+# Audit findings (unverified)
+
+From every finder that completed. None of these went through dedup or verification.
+
+## 1. [medium] A user-started download that fails gives no feedback: DownloadManager.errors has no listener and the only failure indicator is hidden on the search screen
+
+- Finder: find:downloads (aa27dc) · Category: ux · `lib/services/download_manager.dart:72`
+
+**Scenario.** On the search screen tap the download arrow on a Bilibili result (or 下载 in its sheet) while playurl is refused or the CDN request times out. The ring appears, then the control silently reverts to the plain download arrow: no snackbar, no failed state on the row, no reason. The listener cannot tell failure from 'not started'. The only trace is a red icon in the top bar that appears after leaving search with 取消. (The playback path does report: audio_player_handler.dart:613 '下载失败，未能播放'.)
+
+**Evidence.** lib/services/download_manager.dart:69-72 `/// Emits a human-readable message when a user-initiated download fails — without this a failure was indistinguishable from a success (the ring simply disappeared).` / `Stream<String> get errors => _errorController.stream;` and :141 `if (!_errorController.isClosed) _errorController.add('$e');`. `grep -rn "\.errors" lib test` returns nothing: the stream has no subscriber (git log -S shows the listener existed in 8948897 and was dropped in the 5.0.0 rewrite 9f47aea). The only remaining failure UI is the red icon in lib/app/app_shell.dart:211-218 `if (_searchActive) TextButton(... '取消' ...) else ...[ const _DownloadsButton(), ...]` — i.e. it is replaced by 取消 exactly while the search view (where downloads are started) is open, and it is not visible at all on pushed routes (playlist page) or inside TrackSheet. lib/widgets/track_download_button.dart:119-154 has three states only (task / _isDownloaded / idle): after a failure it falls back to the idle download arrow. lib/widgets/track_sheet.dart:253-280 likewise returns to the two buttons. FailedDownload.error is never displayed (download_management_sheet.dart:137 `detail: '下载失败'`).
+
+**Fix.** Subscribe to DownloadManager.instance.errors next to handler.messages in AppShell.initState (app_shell.dart:51) and show a snackbar; emit a user-facing string (e.g. '「<title>」下载失败') instead of the raw '$e'. Optionally draw a failed state in TrackDownloadButton via DownloadManager.isFailed.
+
+## 2. [medium] A write error during download (disk full) makes `await sink.flush()` hang forever: the download never fails, stays in _inFlight and cannot be retried until the app is killed
+
+- Finder: find:downloads (aa27dc) · Category: resilience · `lib/services/audio_download_service.dart:543`
+
+**Scenario.** Storage fills up while (or before) a song downloads: the first failing write (ENOSPC) silently kills the file consumer; the loop keeps pulling the rest of the file over the network and discarding it, then hangs at flush. The ring sits near 100% forever, the row is disabled ('下载中'), the top-bar counter never clears, and after freeing space both 下载 and 下载并播放 for that song join the hung future (the song never plays, `preparing` never clears for that selection). Only force-stopping the app recovers. Not executed (audit is read-only); derived from the SDK source cited.
+
+**Evidence.** lib/services/audio_download_service.dart:534-548 `await for (final chunk in timeoutRes) { sink.add(chunk); received += chunk.length; ... } await sink.flush(); } finally { try { await sink.close(); } catch (_) {} }` — writes go through an IOSink whose errors are never observed during the loop. Dart 3.12.2 SDK: dart-sdk/lib/io/file_impl.dart:225-229 on a failed writeFrom `_subscription.cancel(); openedFile.close(); completer.completeError(e, stackTrace);`; dart-sdk/lib/io/io_sink.dart:257-267 the sink's onError, when not bound, only does `_completeDoneError(error, stackTrace)` — `_controllerCompleter` is left uncompleted and `_controllerInstance` non-null; later `sink.add` goes to the cancelled controller and is dropped; io_sink.dart:184-196 `flush()` then returns `_controllerCompleter!.future.whenComplete(...)`, a future nothing will ever complete. (`sink.done` also completes with an error nobody listens to -> unhandled async error.) Consequences up the stack: audio_download_service.dart:291-293 `finally { _inFlight.remove(id); }` never runs, so :267-268 `final existing = _inFlight[id]; if (existing != null) return existing;` hands every later caller the same dead future; download_manager.dart:142-145 never removes the task, and track_download_button.dart:124-128 sets `onTap = null` while a task exists.
+
+**Fix.** Do not write through IOSink.add. Open the part with `part.open(mode: ...)` and `await raf.writeFrom(chunk)` per chunk (errors then throw in the loop and give back-pressure), closing the RandomAccessFile in finally. Minimal alternative: capture `sink.done.catchError` into a variable, throw it from inside the loop, and never call flush() after an error.
+
+## 3. [medium] Header timeout does not abort the request and getUrl has no timeout: four stalled CDN responses on one host make every later download hang without an error
+
+- Finder: find:downloads (aa27dc) · Category: resource-leak · `lib/services/audio_download_service.dart:443`
+
+**Scenario.** On a slow or flapping link the CDN's response headers take longer than 15 s (or the path goes half-open after the request was sent). Each such attempt reports 下载失败 but permanently keeps one of the 4 connections for that CDN host:port. After the fourth occurrence in the life of the process (the media service keeps it alive for long periods), every further download whose link points at that host waits forever inside `_client.getUrl`: ring stuck at 0, no failure, no retry possible (the id stays in _inFlight), until the app is force-stopped.
+
+**Evidence.** lib/services/audio_download_service.dart:47-50 `_client = biliHttpClient(connectionTimeout: 15s, idleTimeout: 60s)` with bili_http.dart:17 `int maxConnectionsPerHost = 4`; :432 `final req = await _client.getUrl(Uri.parse(url));` (no timeout); :443-446 `final res = await req.close().timeout(const Duration(seconds: 15), onTimeout: () => throw TimeoutException('CDN close timeout'));` — the timeout only abandons the future; `req.abort()` is never called. Dart SDK _http/http_impl.dart:2353-2356 a connection goes back to the pool only on `incoming.dataDone`; a response whose headers arrive after the 15 s is completed into a future nobody reads, its body is never listened to, so the connection stays in `_active` (:2187-2191 the parser subscription is paused). http_impl.dart:2664-2673 `if (... _active.length + _connecting >= maxConnectionsPerHost) { var completer = Completer<_ConnectionInfo>(); _pending.add(...); return completer.future; }` — queued requests have no timeout (connectionTimeout only wraps the socket connect at :2706-2708). http_impl.dart:1702-1708 `abort()` is what would `_httpClientConnection.destroy()`. Same unbounded waits at :453/:462/:470 `await res.drain<void>()` (no timeout on an error body). BilibiliSdk._httpGet (bilibili_sdk.dart:34-47) abandons requests the same way, but its getUrl is wrapped in a timeout so it fails instead of hanging.
+
+**Fix.** On the header timeout call `req.abort()` before throwing; wrap `_client.getUrl(...)` in `.timeout(...)`; replace the un-timed `res.drain()` calls with `res.listen((_) {}).cancel()` (as already done at :495/:505) or add a timeout.
+
+## 4. [medium] Search results keep Bilibili's HTML entities in titles (&amp;, &quot;) - shown in every list and saved into the library
+
+- Finder: find:network (a127be) · Category: correctness · `lib/services/bilibili_sdk.dart:592`
+
+**Scenario.** Search 王菲 誓言 -> the row reads `王菲&amp;窦靖童合唱《誓言》`. Download it: title and rawTitle are persisted with the entity; the library, mini player, 正在准备「…」 banner and lock-screen item show it. It only disappears if auto-matching later renames the track; for anything the matcher declines (compilations such as `【周杰伦合集】&quot; … &quot;`, videos over 15 min, auto-match switched off) it stays for good, and rawTitle keeps it regardless. `&` between two singers is one of the most common characters in collaboration titles.
+
+**Evidence.** bilibili_sdk.dart:591-592 `final rawTitle = item['title'] as String? ?? '';` / `final cleanTitle = rawTitle.replaceAll(_htmlTagRegex, '');` - only tags are removed. bilibili_sdk.dart:620-621 `title: cleanTitle,` / `rawTitle: cleanTitle,`. Displayed verbatim: lib/widgets/song_tile.dart:92-93 `Text(` / `track.title,`. The only entity decoding in lib/ is LyricsEngine._preprocess (lyrics_engine.dart:166-170 `.replaceAll('&amp;', '&') ... .replaceAll('&#39;', "'")`), used for parsing only, never for the stored/displayed title. The repo's own corpus of real search answers proves the API escapes: test/fixtures/real_bilibili_titles.json contains `"title":"王菲&amp;窦靖童合唱《誓言》"` and `"【周杰伦合集】&quot; 要好好生活，要爱自己 &quot;"`. The BV path (_tracksOfView, line 198) gets unescaped titles from the view API, so one video has two different titles depending on how it was found.
+
+**Fix.** In _searchOnce decode entities after stripping tags (&amp; &lt; &gt; &quot; &#39; &#x27; &nbsp; and numeric forms) for `title` (and `author`), via one helper shared with LyricsEngine._preprocess.
+
+## 5. [medium] 为你推荐 recommends songs that are already downloaded: knownIds is only favourites plus the last 30 plays
+
+- Finder: find:network (a127be) · Category: correctness · `lib/services/recommendation_engine.dart:202`
+
+**Scenario.** Library of 200 downloaded 周深 songs, 20 favourited. The strongest seed is 周深 (Track.uploader of named tracks); page 1 of that search is his most popular videos, most of which are already downloaded as `<bvid>_p1`. Every one that is not a favourite and not among the 30 most recent plays passes the filter, so the list is largely songs the listener already owns (rows show the ⋯ button instead of download) and little that is new.
+
+**Evidence.** recommendation_engine.dart:20-21 `/// Tracks the user already has; never recommend these back.` / `final Set<String> knownIds;`. Filled only inside absorb: line 84-85 `void absorb(Track t, double weight) {` / `known.add(t.id);`, which is called for `favourites` (94-96) and `history.take(30)` (98-100). recommend() loads only those sources (165-167: getFavoritesPlaylist, getRecentlyPlayed, getSearchHistory) - DatabaseService.getDownloadedTracks() is never consulted. Line 202 `if (profile.knownIds.contains(track.id)) continue; // already theirs`. search_view.dart:17 describes the section as `recommendations to download`; docs/archive/FEATURE_AND_BUG_LIST.md states 已在库中的曲目不再推荐.
+
+**Fix.** Pass the downloaded ids into the profile: in recommend() add `(await DatabaseService.getDownloadedTracks()).map((t) => t.id)` to knownIds (keep the 30-play limit for weighting only).
+
+## 6. [medium] 换一批 reloads the identical batch: refresh() always asks for page 1 with nothing excluded
+
+- Finder: find:network (a127be) · Category: correctness · `lib/state/recommendations_controller.dart:43`
+
+**Scenario.** Open search, look at the 20 recommendations, tap 换一批: four seed searches go out and the same 20 songs come back in the same order. If the listener had scrolled to load more, the list is cut back to those first 20. The button never produces a different batch unless favourites/history changed in between.
+
+**Evidence.** recommendations_controller.dart:43 `final tracks = await RecommendationEngine.recommend();` then 48-49 `_tracks = tracks;` / `_page = 1;`. The button: search_view.dart:145-146 `tooltip: '换一批',` / `onPressed: _recs.loading ? null : _recs.refresh,`. recommend() is deterministic for an unchanged profile: same seedQueries(), `page = 1`, `'order': 'totalrank'` (bilibili_sdk.dart:521), sort by score, `ranked.take(limit)`. The engine's own doc (recommendation_engine.dart:156-159) says `each refresh asks every seed for its next Bilibili page, so consecutive calls return disjoint batches`, and commit 636a508 implemented it that way (`每次刷新取各 seed 的下一页并排除已展示 id，连续刷新始终得到不重复的新曲目`); the controller rewrite lost it.
+
+**Fix.** Make refresh advance: request `page: _page + 1` with `excludeIds: _seen`, replace `_tracks` with that batch and keep `_seen`; wrap back to page 1 (clearing `_seen`) when a batch comes back empty.
+
+## 7. [medium] A BV number or link never reaches the end of its results: every scroll near the bottom re-requests the same video
+
+- Finder: find:network (a127be) · Category: resilience · `lib/state/online_search_controller.dart:119`
+
+**Scenario.** Paste the BV number (or b23.tv link) of a 30-part album; 30 rows appear. Scroll towards the last parts: within 320 px of the end each scroll notification calls loadMore; page 2, 3, 4… return the same 30 parts, all duplicates, so `_reachedEnd` is never set. One `x/web-interface/view` request follows another for as long as the finger moves (for a short link also the b23.tv hop and the whole video HTML page each time), the footer spinner flickers on and off, and the burst invites a 412 on the endpoint that cid-less downloads and song naming depend on.
+
+**Evidence.** BilibiliSdk.search ignores `page` on the id paths: bilibili_sdk.dart:467-471 `final directId = extractBvOrAvId(query);` ... `final direct = await fetchVideoInfo(directId);` / `if (direct.isNotEmpty) return direct;` and 478-482 for short links. OnlineSearchController.loadMore: line 109 `final results = await BilibiliSdk.search(_query, page: page);`, 113-114 `for (final t in results)` / `if (_seen.add(t.id)) t,`, 116 `_page = page;`, 118-119 `// Only an empty page proves the end; a page of duplicates does not.` / `if (results.isEmpty) _reachedEnd = true;`. Trigger: search_view.dart:74-80 `metrics.pixels >= metrics.maxScrollExtent - 320` ... `_online.loadMore();` on every ScrollNotification. The 3 s quiet window (98-101) applies only after a failure.
+
+**Fix.** End paging for id queries: in BilibiliSdk.search return `const []` when `page > 1` and the id/short link resolved to a video (so the controller sets _reachedEnd after one extra call), or have search report that the result is a single video and set `_reachedEnd = true` on page 1.
+
+## 8. [medium] Video hints that could not be fetched look the same as hints that say nothing; the name decided without them is saved as final
+
+- Finder: find:network (a127be) · Category: correctness · `lib/services/bilibili_sdk.dart:288`
+
+**Scenario.** Bilibili refuses the API (HTTP 412) or only `x/player/wbi/v2` fails (signature refused during the WBI fallback-key window, -352, a timeout) while NetEase answers. A downloaded video starts playing: fetchVideoHints returns none / tags without music, LyricsEngine.identify decides from the title alone - the recognised-music veto cannot fire and tags cannot confirm a cover's song - and whatever it finds is written with `named: true, matcher: <current>`. The song keeps that name and performer until the matcher constant is raised or the listener edits it; the complete evidence is never consulted.
+
+**Evidence.** bilibili_sdk.dart:261 `if (view is! Map && tags is! List) return VideoHints.none;`; 269 `final music = part == 0 ? null : await _recognisedMusic(bvid, part);` (null = `could not be asked`, line 312); 288 `musicTitle: music?.title ?? '',`; 291-292 `// Half an answer (one request failed) is used but not kept.` - not kept in _hintsMemo only. The tag request has no risk-control fallback (257 `_httpGet('$_baseUrl/x/web-interface/view/detail/tag?bvid=$bvid')`), and the music lookup is WBI-signed (318). Consumer: track_naming.dart:124-125 fetches hints, 146 `final found = await _ask(before, hints, uploader);`, 155-157 only `if (found == null && !settled)` is retried, otherwise 189-196 `_save(stored.copyWith(... named: true, ... matcher: matcher))`, after which `_settled` (track_naming.dart:101-102) never asks again. The engine relies on the missing evidence, e.g. lyrics_engine.dart:1102 `if (hints.musicTitle.isNotEmpty && !bestApart) { _remember(memoKey, null); return null; }`. The doc at bilibili_sdk.dart:247-248 promises `offline (or refused) is [VideoHints.none], and is asked again next time`.
+
+**Fix.** Carry completeness in VideoHints (false when view, tags or the music lookup could not be asked - _recognisedMusic already separates null from `nothing`). In TrackNaming._name, when hints are incomplete do not persist an automatic name: `_attempted.remove(track.id); return;`.
+
+## 9. [medium] Any error code other than -352/412 is read as "no results" (search) or "no such video" (view)
+
+- Finder: find:network (a127be) · Category: correctness · `lib/services/bilibili_sdk.dart:574`
+
+**Scenario.** The signed search answers HTTP 200 `{"code":-403,"message":"访问权限不足"}` (signature refused - what the hard-coded fallback keys produce, see wbi_signer.dart:175-177), or -799 (too frequent). It is not `risk controlled`, so it is taken as the answer, the unsigned fallback API that would have worked is never tried, and both the music-zone and the unfiltered attempt return []. The listener is told the song does not exist, with no retry button. Likewise a -352/-403 from the signed view fallback makes a pasted BV number `not found`.
+
+**Evidence.** _searchOnce never checks `code`: 538-542 `if (isRiskControlled(primary)) { primary = null; }` / `if (primary != null) { body = primary;` (the plain fallback API is skipped), then 574-575 `final data = json['data'];` / `final dynamic rawResult = data is Map ? data['result'] : null;` and 630 `return [];`. isRiskControlled (643) knows only `if (code == -352 || code == 412) return true;` - Bilibili's JSON interception code is -412, positive 412 is the HTTP status. search() (494-501) then repeats unfiltered and returns that `[]`. Same in _tracksOfView: 195 `if (json['code'] == 0 && json['data'] != null) {` ... 240 `return [];`, although the contract above it (169-170) says `transport/API failure throws`. search_view.dart:239-245 renders `[]` as `没有找到，换个关键词或粘贴 BV 号试试` with no 重试.
+
+**Fix.** In _searchOnce treat `json['code'] != 0` on the primary like a refusal (try the fallback API) and on the final body throw BiliApiException. In _tracksOfView return [] only for the not-found codes (-404, -400, 62002, 62004, 62012) and throw for the rest. Add -412 to isRiskControlled.
+
+## 10. [medium] One failed WBI key fetch switches all signing to the hard-coded pair for two minutes, even when live keys are in memory
+
+- Finder: find:network (a127be) · Category: resilience · `lib/services/wbi_signer.dart:138`
+
+**Scenario.** The player has been alive since yesterday (keys older than 12 h) or was just opened in a lift; the single `nav` request times out. Connectivity returns seconds later, but for the next two minutes signParams does not try again and signs with the hard-coded pair: every download fails with 无法获取音源下载链接, keyword search reports no results (previous finding), and songs that start playing are named without Bilibili's recognised music (finding above). Each later nav failure repeats the two-minute window.
+
+**Evidence.** wbi_signer.dart:131-136 the cached live keys are returned only while `DateTime.now().difference(_cacheTime!).inHours < 12`. After that, 138-141 `final retryAfter = _retryAfter;` / `if (retryAfter != null && DateTime.now().isBefore(retryAfter)) { return _fallbackKeys; }` and on any fetch error 180-181 `_retryAfter = DateTime.now().add(_retryEvery);` / `return _fallbackKeys;` - `_cachedImgKey/_cachedSubKey` from the last successful fetch are ignored. The file itself says of the hard-coded pair (175-177) `B站 rotates these, so a stale pair signs requests that the API rejects`. Nothing clears `_cacheTime` when a signed request is refused, so a rotated key is also used for up to 12 h. Consumers: fetchAudioStream (bilibili_sdk.dart:389-398, `json['code'] == 0` else null -> audio_download_service.dart:305 `无法获取音源下载链接`), _recognisedMusic (318), _searchOnce (529).
+
+**Fix.** On fetch failure return the last live keys when any were ever fetched; use the hard-coded pair only when there are none. Clear `_retryAfter` as soon as any Bilibili request succeeds (or shorten it to seconds), and reset `_cacheTime` when a signed call answers -403 so the next call refetches.
+
+## 11. [medium] Re-downloading a song from search re-enters it as the raw video copy; the matcher then overwrites the listener's own edits kept in playlists and history
+
+- Finder: find:persistence (a475ad) · Category: data-loss · `lib/services/database_service.dart:767`
+
+**Scenario.** 1) The listener names song X in 编辑信息 (title, artist, a picked cover; stored with named=true, matcher=0) and X is in 收藏 or a playlist. 2) They free space with 删除下载: X leaves the downloaded list, the playlist/history copies keep the edit. 3) In a later session they find X again in 哔哩哔哩 search results (or 为你推荐) and tap the download button on that row. The raw search Track (video title, UP主, thumbnail, not named) becomes the library copy. 4) LibraryController.reload sees a new id and calls TrackNaming.autoName; _name only looks at the downloaded copy, finds it unsettled, and on a match calls updateTrackMetadata, which replaces the matcher-0 copies in every playlist and in history with the automatic answer. The listener's title/artist are gone and their picked cover file becomes unreferenced (swept a day later). If the matcher finds nothing, the copies simply disagree: 歌曲 and the player show the video title, the playlist row shows the edited name. (Re-downloading from the playlist row itself is fine, because that passes the edited copy.)
+
+**Evidence.** lib/services/database_service.dart:767-771 `static Future<void> saveDownloadedTrack(Track track) async { await _ensureLoaded(); if (_downloadedTracks.any((t) => t.id == track.id)) return; _downloadedTracks.insert(0, track);` -- only the downloaded list is consulted; the caller's copy goes in as is.
+lib/services/database_service.dart:775-777 (removeDownloadedTrack doc) `Deletes the local audio for [track] but preserves the user's collection: playlist membership, Favorites, metadata and history all stay.`
+lib/services/database_service.dart:532-537 and 540-543 (updateTrackMetadata) `for (final pl in _playlists) { final idx = pl.tracks.indexWhere((t) => t.id == updated.id); if (idx != -1) { pl.tracks[idx] = updated; } }` / `_recentlyPlayed[recIdx] = updated;`
+lib/state/library_controller.dart:202-204 `for (final track in _downloaded) { if (!known.contains(track.id)) TrackNaming.autoName(track); }`
+lib/services/track_naming.dart:121-122 `final before = await _stored(track.id); if (before == null || _settled(before)) return;` (_stored reads getDownloadedTracks only) and 188-196 `await _save(stored.copyWith(title: found.title, uploader: found.artist, coverUrl: found.coverUrl, named: true, rawUploader: uploader, matcher: matcher));`
+lib/widgets/track_info_sheet.dart:95-96 `// The listener's own answer: the matcher never revisits it.` / `matcher: 0,`
+Entry point with a raw copy: lib/screens/search_view.dart:250 `_songs(_online.results)` -> lib/widgets/track_download_button.dart:151 `DownloadManager.instance.startDownload(widget.track);` -> lib/services/audio_download_service.dart:352 `await DatabaseService.saveDownloadedTrack(track);`. No test covers delete + re-download.
+
+**Fix.** Resolve by id before inserting: in saveDownloadedTrack, if a copy with the same id already exists in a playlist or in _recentlyPlayed and isNamed, insert that copy (carrying over the freshly measured loudness) instead of the caller's, and write it to the per-track metadata file with force. That keeps matcher=0 so TrackNaming leaves it alone.
+
+## 12. [medium] One failed network lookup marks a song as having no lyrics for the rest of the process lifetime
+
+- Finder: find:lyrics (a0a674) · Category: resilience · `lib/state/lyrics_controller.dart:189`
+
+**Scenario.** Offline or on a stalled connection (the normal case for an app that plays local files), play a downloaded song whose lyrics are not in the 300-entry cache. Both providers fail, the song is added to `_misses`, the pane shows 暂无歌词. Back online, play the same song again in the same process (the background audio service keeps the process alive for hours or days): no request is made and it still shows 暂无歌词. Only a force-stop, a manual 重新匹配, or a rename brings lyrics back. A single 10 s timeout has the same effect.
+
+**Evidence.** lib/state/lyrics_controller.dart:46-48 `/// Songs the databases had nothing for, this session: no network request on every replay.` / `final Set<String> _misses = {};`
+lib/state/lyrics_controller.dart:178-181 `if (_misses.contains(track.id)) { publish(Lyrics.none); return; }`
+lib/state/lyrics_controller.dart:184-189 `final fresh = await LyricsEngine.autoFetchLyrics(...);` / `if (fresh.isEmpty) _misses.add(track.id);`
+autoFetchLyrics cannot tell failure from absence: `_httpGet` swallows every error and returns null (lib/services/lyrics_engine.dart:50-53 `catch (e) { debugPrint('Lyrics HTTP error: $e'); } return null;`), fetchFromNetEase just skips a null body (lyrics_engine.dart:1910 `if (searchBody != null) {`), fetchFromLRCLIB likewise (1843), and the orchestrator ends with `return Lyrics(source: 'none', ...)` (2165-2166).
+The only removals from `_misses` are choose (83), rematch (104) and a rename of the playing track (134); nothing clears it when connectivity returns. The naming half already makes this distinction (lyrics_engine.dart:562-564 "or null when the request itself failed — which is not the same answer as 'nothing found'"; commit 6319e4f "A lookup that could not reach NetEase leaves the song unnamed for a retry"), the lyric half does not.
+
+**Fix.** Let autoFetchLyrics report that a provider request failed (return null, or a flag set whenever `_httpGet` returned null) and add to `_misses` only when every provider actually answered with nothing.
+
+## 13. [medium] Cached automatic lyrics are rejected on every later play when the provider's title carries a subtitle; offline they are deleted
+
+- Finder: find:lyrics (a0a674) · Category: correctness · `lib/state/lyrics_controller.dart:152`
+
+**Scenario.** Track named 问 / 周深; NetEase's recording is named "问 (Live)". First play: matchesSongQuery("问 (Live)", "周深 问") accepts it via the stripped name, lyrics are shown and stored with title "问 (Live)". Every later play: `_matches` is false ("问live" vs "问", target shorter than minLen), so the cache is ignored, the pane shows the loading shimmer and the search + lyric requests run again. Played offline: the refetch fails, putAutomatic(none) deletes the cached entry from bilibeat_lyrics.json, the song goes into `_misses` and shows 暂无歌词 although its lyrics were on disk. Same for any single-character CJK or under-4-letter Latin title with a subtitle ("SOS (Live)"), and for unnamed or part tracks whose parsed title has extra words ("大鱼 好听哭了" vs stored "大鱼 (Live)"; "<concert> - P3: 大鱼" vs "大鱼 (Live)").
+
+**Evidence.** Acceptance at fetch time strips the provider's parenthesised subtitle and tries query suffixes: lib/services/lyrics_engine.dart:1679-1680 `final cleanName = songName.replaceAll(parenSubtitle, '').trim(); if (isTitleMatching(cleanName, title)) return true;` (used at 1922).
+What is stored is the unstripped name: lyrics_engine.dart:1995, 2000-2002 `final songName = (chosenSong['name'] ?? '') as String; ... return Lyrics(source: 'netease', title: songName, ...)`.
+Cache validation compares that raw name with plain isTitleMatching: lib/state/lyrics_controller.dart:148-154 `return LyricsEngine.isTitleMatching(storedTitle, parsed) || LyricsEngine.isTitleMatching(storedTitle, track.title);`, gating use of the cache at 172-177 `(stored.pinned || _matches(stored, track))`.
+isTitleMatching (lyrics_engine.dart:1739-1754) normalises "问 (Live)" to "问live"; against "问" it is not equal and `if (cand.length < minLen || target.length < minLen) return false;` (1748) rejects it. Against a multi-word title ("大鱼live" vs "大鱼好听哭了") neither string contains the other (1753).
+On mismatch the controller refetches (184) and then calls putAutomatic with whatever came back; an empty result removes the existing entry and rewrites the file: lib/services/lyrics_store.dart:131-137 `_entries.remove(trackId); if (lyrics.isNotEmpty) {...} ... await _persist();`.
+
+**Fix.** Validate the cache the way the match was accepted: in `_matches` use `LyricsEngine.matchesSongQuery(storedTitle, parsed)` / `matchesSongQuery(storedTitle, track.title)` (or store the paren-stripped name). Separately, do not let putAutomatic drop an existing entry when the lookup failed rather than answered.
+
+## 14. [medium] _httpGet timeouts abandon the request/response without aborting it, permanently leaking pooled connections (4 per host)
+
+- Finder: find:lyrics (a0a674) · Category: resource-leak · `lib/services/lyrics_engine.dart:40`
+
+**Scenario.** On a slow or briefly stalled mobile link (tunnel, lift, weak signal) a new song starts: identify() fires ~8 NetEase searches, 4 go out and 4 queue. The first four take longer than 10 s overall and then complete; the queued four have already timed out. As each connection is returned, a stale pending closure takes it and parks an unclosed request on it: all 4 music.163.com slots are now held forever. Any response that arrives after its own 10 s timeout leaks its slot the same way. From then until the app process is killed every NetEase request waits 10 s in the queue and fails: automatic lyrics take 30 s to give up (3 queries) and, with the first finding, each song played is recorded as having no lyrics; matching stops naming songs; the manual lyric search shows skeletons for 10 s. The same can happen to the lrclib.net pool.
+
+**Evidence.** lib/services/lyrics_engine.dart:40-44 `final req = await _client.getUrl(Uri.parse(urlStr)).timeout(_timeout);` ... `final res = await req.close().timeout(_timeout);` ... `return await res.transform(utf8.decoder).join().timeout(_timeout);` — Future.timeout only stops waiting; nothing calls req.abort() or drains a late response. The client is one static pool (line 33 `static final HttpClient _client = biliHttpClient();`) with `maxConnectionsPerHost = 4` (lib/services/bili_http.dart:17,22). The code already knows undrained responses pin connections (lines 46-48 comment) but only handles the non-200 case.
+dart:io source (~/flutter/bin/cache/dart-sdk/lib/_http):
+- late response: http_parser.dart:1227 `_bodyPaused = true;` in _createIncoming — the body is not parsed until someone listens; the connection is returned only from `incoming.dataDone.then(...)` (http_impl.dart:2356-2374). A response whose headers arrive after the 10 s timeout is never listened to, so its connection stays in `_active` for good.
+- queued request: http_impl.dart:2665-2673 `if (... _active.length + _connecting >= maxConnectionsPerHost) { ... _pending.add(() { completer.complete(connect(...)); }); return completer.future; }` — the pending closure is not removed when the caller's timeout fires; when a slot frees, `_checkPending()` (2603-2607) runs it, `send()` creates a request and pauses the parser (2286 `_subscription!.pause();`), and nobody ever closes that request.
+Bursts above 4 are normal on this client: identify() issues up to ~10 parallel NetEase searches (lyrics_engine.dart:918-923) and searchCandidates fetches 6 lyrics in parallel (2075).
+
+**Fix.** On timeout release the connection: keep the getUrl future and, if it completes late, `abort()` the request; on a response timeout call `req.abort()` and, if a response still arrives, cancel/drain it (`res.listen(null).cancel()`); cancel the body subscription on a body timeout. Also bound `res.drain()` at line 49, which currently has no timeout. The same getUrl/close timeout pattern is repeated in bilibili_sdk.dart, wbi_signer.dart, fingerprint_service.dart and cached_cover_image.dart.
+
+## 15. [medium] Saving from the lyric editor turns every translation into a separate lyric line, and the unstable sort reverses some original/translation pairs
+
+- Finder: find:lyrics (a0a674) · Category: correctness · `lib/services/lyrics_engine.dart:1824`
+
+**Scenario.** A foreign-language song gets NetEase lyrics with translations (text + smaller translation under it). The listener opens 歌词选项 -> 编辑 to fix one word (or just looks) and taps 保存. The lyrics are now pinned with twice as many lines: each translation is a full-size line of its own, only one line of each pair lights up, and with more than 33 lines one or more pairs come out with the translation above the original. Because the result is pinned it is never corrected automatically. Pasting a bilingual .lrc (same timestamp twice per line, a common export format) is reordered the same way.
+
+**Evidence.** Export writes a translation as a second line with the same tag: lib/services/lyrics_engine.dart:1822-1825 `sb.writeln('$tag${line.text}'); if (line.translation != null && line.translation!.isNotEmpty) { sb.writeln('$tag${line.translation}'); }`.
+Import makes every tagged line its own LyricLine and never fills `translation`: 1788-1791 `result.add(LyricLine(time: ..., text: text));`, then 1795 `result.sort((a, b) => a.time.compareTo(b.time));`.
+The editor round trip is toLrc -> parseAny: lib/widgets/lyrics_sheet.dart:107-114 `initial: ... LyricsEngine.toLrc(current.lines, offset: current.offset)` ... `final lines = LyricsEngine.parseAny(text);` and the result is pinned as source 'user' (117-125). 保存 returns the text whether or not it changed (lyrics_sheet.dart:409-412 `final text = _text.text.trim(); Navigator.of(context).pop(text.isEmpty ? null : text);`).
+List.sort is not stable above 32 elements (dart-sdk/lib/internal/sort.dart:18 `_INSERTION_SORT_THRESHOLD = 32`, 61-65 dual-pivot quicksort otherwise). A line-for-line port of that file run on 17 to 65 equal-timestamp pairs returned 1 to 4 pairs with the second line first.
+The view highlights only the last line whose time has passed (lib/widgets/lyrics_view.dart:109-111), so of two lines with the same time only one is ever bright.
+
+**Fix.** In parseLrc, when two consecutive source lines carry the same single timestamp, fold the second into `translation` of the first (the inverse of toLrc), and make the ordering stable (sort by time then original index, or mergeSort from package:collection). Optionally make 保存 a no-op when the text is unchanged.
+
+## 16. [medium] Songs whose titles are entirely kana, hangul or other non-CJK/non-ASCII script can never match automatic lyrics
+
+- Finder: find:lyrics (a0a674) · Category: correctness · `lib/services/lyrics_engine.dart:1742`
+
+**Scenario.** Download "YOASOBI「アイドル」Official Music Video". cleanTitle gives song アイドル, artist YOASOBI. NetEase returns the song named アイドル; matchesSongQuery("アイドル", "YOASOBI アイドル") normalises the name to an empty string and returns false for the full query and for the suffix; the same happens for the other two queries and for every LRCLIB item. Result: 暂无歌词 (and the song enters `_misses`) although both providers have synced lyrics, which the manual search in the sheet lists immediately. Same for ドライフラワー, マリーゴールド, hangul-only and Cyrillic titles.
+
+**Evidence.** lib/services/lyrics_engine.dart:1722-1727 `_normalize` keeps only `[一-龥a-zA-Z0-9·]` — kana (U+3040–30FF), hangul, Cyrillic and accented Latin are deleted.
+lib/services/lyrics_engine.dart:1740-1742 `final cand = _normalize(candidateName); final target = _normalize(targetTitle); if (cand.isEmpty || target.isEmpty) return false;`
+Every automatic acceptance goes through it: NetEase at 1922 `if (!matchesSongQuery(songName, query)) continue;` (matchesSongQuery calls isTitleMatching for the whole query and each suffix, 1680-1685) and LRCLIB at 1847 `if (!isTitleMatching(trackName, title)) continue;`.
+Japanese titles are an intended input: test/library_features_test.dart:110-114 parses 'YOASOBI「夜に駆ける」Official Music Video' to song 夜に駆ける, and the LRCLIB step is commented "global coverage, e.g. Western/Japanese" (2155). 夜に駆ける only works because two kanji survive normalisation ("夜駆", which also equals スピッツ's 夜を駆ける).
+
+**Fix.** In isTitleMatching, when either normalised string is empty fall back to comparing the trimmed, lower-cased raw strings with whitespace and punctuation removed (equality / containment), or widen the kept ranges for this comparison to kana and hangul. Changing `_normalize` globally would need the matching corpus re-checked, so keep the change local to the lyric matcher.
+
+## 17. [medium] Explicit download failures are silent: DownloadManager.errors lost its only listener in the 5.0.0 shell rewrite
+
+- Finder: find:screens (abef45) · Category: ux · `lib/app/app_shell.dart:51`
+
+**Scenario.** In search, tap the download arrow on a Bilibili result (or 下载 in the song sheet) while the CDN link fails / Bilibili is rate-limiting / the network drops. The ring disappears and the arrow comes back; no toast, no error state on the row, and the top-bar warning icon is replaced by 取消 for as long as search is open. The listener only finds out after leaving search and noticing the red icon. The same failure through 下载并播放 does toast (handler.messages), so the two paths disagree.
+
+**Evidence.** lib/services/download_manager.dart:69-72 `/// Emits a human-readable message when a user-initiated download fails — without this a failure was indistinguishable from a success (the ring simply disappeared).` / `Stream<String> get errors => _errorController.stream;` and :141 `if (!_errorController.isClosed) _errorController.add('$e');`. Nothing in lib/ subscribes to it (grep for `.errors` finds only the definition). The shell's only toast source is lib/app/app_shell.dart:51 `_messagesSub = _services.handler.messages.listen(_showMessage);` (playback-path messages). `git log -S"DownloadManager.instance.errors"` shows the listener (`showAppSnackBar(... message: '下载未完成，请重试' ...)`) was deleted from main.dart in 9f47aea and never re-added. The remaining indicator is the red icon in `_DownloadsButton` (app_shell.dart:271-272), but app_shell.dart:211-218 renders `if (_searchActive) TextButton(onPressed: _exitSearch, child: const Text('取消' ...)) else ...[const _DownloadsButton(), ...]`, so it is not on screen in search, where downloads are started. lib/widgets/track_download_button.dart:146-153 simply falls back to the idle download glyph once the task is removed.
+
+**Fix.** In _AppShellState.initState add a second subscription, e.g. `_downloadErrorsSub = DownloadManager.instance.errors.listen((_) => _showMessage('下载未完成，请重试'));` and cancel it in dispose (never show the raw exception string).
+
+## 18. [medium] Mini player does nothing on any page opened from the player (static NowPlayingPage._open latch)
+
+- Finder: find:screens (abef45) · Category: correctness · `lib/screens/now_playing_page.dart:48`
+
+**Scenario.** Open the player, tap ⋯, tap the artist row (e.g. 周深). The artist page is pushed above the player with a docked mini player at the bottom. Tap a song there (it plays), then tap the mini player: nothing happens, because `_open` is still true. The same holds for the playlist page reached from that artist page via 存为歌单. The only way back to the player is the system/back arrow.
+
+**Evidence.** lib/screens/now_playing_page.dart:44-49 `static bool _open = false;` ... `if (_open || AppServices.instance.handler.currentTrack == null) return;` / `_open = true;` and :76-78 `} finally { _open = false; }` — reset only when the pushed player route completes. The player's own sheet navigates away while that route is still in the stack: now_playing_page.dart:363-364 `TrackSheet.show(context, track, forPlayer: true)`, and lib/widgets/track_sheet.dart:191-203 (not gated on forPlayer) `for (final artist in artists.take(2)) if (_library.artistNamed(artist) != null) SheetAction(... onTap: () { final parent = _dismiss(); ArtistPage.open(parent, artist); })`. The pushed page carries lib/screens/artist_page.dart:101 `const DockedPlayer(),` whose tap is lib/widgets/docked_player.dart:27 `unawaited(NowPlayingPage.open(context, from: rect));`.
+
+**Fix.** Remember the player's route instead of a bool (`static Route<void>? _route`), and when it is already in the stack make `open` return to it: `Navigator.of(context).popUntil((r) => r == _route)`; clear it in the `finally`.
+
+## 19. [medium] After the 30-minute idle stop the Android service keeps its wake lock (and foreground state) while the activity still exists
+
+- Finder: find:playback (ac30e4) · Category: resource-leak · `lib/main.dart:50`
+
+**Scenario.** Play a song, pause, press Home and leave the phone (app stays in recents, the normal case). After 30 minutes handler.stop() runs, but because the activity's MediaBrowser binding keeps AudioService alive, onDestroy never runs: the PARTIAL_WAKE_LOCK acquired on first play stays held and the service stays in the foreground state (its notification cannot be cancelled by NotificationManager.cancel while foreground) until the task is swiped away or the process is killed. The CPU cannot deep-sleep overnight - exactly the lingering the idle stop was written to avoid.
+
+**Evidence.** lib/main.dart:50 `androidStopForegroundOnPause: false` with the comment at :48-49 "The handler stops the service itself after a long pause, so the notification does not linger." The handler does this at lib/services/audio_player_handler.dart:335-337 (`_idleTimer = Timer(_idleStopAfter, () { if (!_player.playing) unawaited(stop()); })`) and :783 `await super.stop()`.
+
+audio_service-0.18.19 AudioService.java: the wake lock is taken at :710 in enterPlayingState (`acquireWakeLock()`), and released in only two places: :721-723 exitForegroundState (reached only via :716 `if (config.androidStopForegroundOnPause)`), and :381 in onDestroy. The idle transition runs :355-358 `stop() { deactivateMediaSession(); stopSelf(); }` - no stopForeground, no releaseWakeLock. AudioServicePlugin.java connects a MediaBrowserCompat to the service in onAttachedToActivity (:321-322 `connect()`) and only disconnects in onDetachedFromActivity (:359), so while the Activity instance exists (app merely backgrounded / in recents) the service is bound and stopSelf() does not destroy it; onDestroy, the only remaining release site, does not run. Deduced from plugin source; not verified on a device.
+
+**Fix.** Do not rely on stopSelf() for release. Either keep androidStopForegroundOnPause true and solve the Android 12 resume problem differently, or on the idle stop explicitly drop foreground/wake lock (e.g. a small native call from MainActivity's channel that calls stopForeground(STOP_FOREGROUND_REMOVE) on AudioService.instance and releases the lock), and verify with `adb shell dumpsys power | grep -i audioservice` after the idle stop.
+
+## 20. [medium] Error-skip of an unplayable file reports idle while still playing, which makes audio_service deactivate the media session for the rest of playback
+
+- Finder: find:playback (ac30e4) · Category: platform · `lib/services/audio_player_handler.dart:359`
+
+**Scenario.** A queued file is corrupt or missing (DB lists it as downloaded; restoreSession/_library never stat the file). Playback reaches it in the background: ExoPlayer errors, the handler broadcasts idle+playing, audio_service deactivates the MediaSession and cancels the notification, then just_audio skips to the next song and music continues. From then on the lock-screen/notification controls and headset buttons are gone (session inactive) while audio plays, until the user opens the app and toggles pause/play.
+
+**Evidence.** lib/services/audio_player_handler.dart:68-70 `// A missing or corrupt file skips ahead instead of stalling. maxSkipsOnError: 3`. `_broadcastState` forwards the raw state: :359-366 `processingState: const { ja.ProcessingState.idle: AudioProcessingState.idle, ... }[_player.processingState]!, playing: playing`.
+
+just_audio-0.10.6 AudioPlayer.java:947-954 sendError sets `processingState = ProcessingState.idle` and broadcasts; just_audio.dart:1593-1597 on idle calls `_setPlatformActive(false)` without touching `playing`; :417-424 the maxSkipsOnError listener then does `seekToNext()`, and seek (:1330-1331) re-activates because `playing && !_active`. So `playing` stays true across idle -> loading -> ready.
+
+audio_service-0.18.19 AudioService.java:559-570: `if (!wasPlaying && playing) enterPlayingState(); ... if (oldProcessingState != idle && processingState == idle) { stop(); }` and :355-358 `stop() { deactivateMediaSession(); stopSelf(); }` (:746-751 sets the session inactive and cancels the notification). The Dart side also calls stopService on the same transition (audio_service.dart:1132-1134). Because `playing` never goes false->true again, enterPlayingState (:705-713, the only place that calls mediaSession.setActive(true)/startForeground) is not re-run.
+
+**Fix.** In _broadcastState, never publish AudioProcessingState.idle while `_player.playing` is true (map it to loading/buffering), so the transient idle of an error skip does not reach audio_service; only stop()/an emptied queue should produce idle.
+
+## 21. [medium] A write error mid-download (disk full) makes the download hang forever instead of failing
+
+- Finder: find:downloads (a6d0e7) · Category: resilience · `lib/services/audio_download_service.dart:543`
+
+**Scenario.** Storage fills up while a song downloads (or is already full when one starts: the .part is created, the first write fails). The ring runs to 100% and stays there; the row says 下载中 with its tap disabled, the track sheet shows a dead percentage button, and a song tapped for playback shows 正在准备「…」 indefinitely. No 下载失败 message is ever shown and no retry is offered. Every later attempt on that track in the session joins the hung `_inFlight` future, so it cannot be retried until the app process is restarted, and the same thing happens again while the disk is full. The whole file is also fetched over the network for nothing.
+
+**Evidence.** audio_download_service.dart:534-543: `await for (final chunk in timeoutRes) { sink.add(chunk); received += chunk.length; ... } await sink.flush();` with `sink = part.openWrite(...)` (502/522). Nothing listens to `sink.done`.
+
+Dart SDK io_sink.dart (`_StreamSinkImpl`, ~/flutter/bin/cache/dart-sdk/lib/io/io_sink.dart:233-272): the first `add` starts `_target.addStream(_controller.stream)`; when that fails while no flush is in progress (`_isBound == false`) the onError branch only calls `_completeDoneError` and neither completes nor clears `_controllerCompleter` / `_controllerInstance`. `flush()` (184-197) then does `var future = _controllerCompleter!.future; _controllerInstance!.close(); return future...` and that future is never completed. file_impl.dart:225-229 shows a failed `writeFrom` cancels the subscription and completes addStream with the error, i.e. exactly that branch.
+
+So after ENOSPC on any chunk before the last, later `sink.add` calls are dropped silently, the loop keeps pulling the whole file off the network, and `await sink.flush()` never returns. `_transfer` never returns, so `ensureDownloaded`'s `finally { _inFlight.remove(id) }` (291-293) and `DownloadManager.startDownload`'s `finally { _tasks.remove(...) }` (download_manager.dart:142-145) never run. The handler's `_ensureLocal` (audio_player_handler.dart:608) awaits the same future with no timeout.
+
+**Fix.** Surface the sink's error. For example, replace the IOSink with a RandomAccessFile and `await raf.writeFrom(chunk)` per chunk (this also gives backpressure), or keep the IOSink and race the loop against `sink.done`: attach `sink.done.catchError(...)` to record the error, check it after each `add`, and throw it instead of calling `flush()` once it is set.
+
+## 22. [medium] Timed-out requests are never aborted, so each one permanently occupies a pooled connection; `getUrl` in the download path then waits forever
+
+- Finder: find:downloads (a6d0e7) · Category: resource-leak · `lib/services/audio_download_service.dart:443`
+
+**Scenario.** On a slow or restricted route to Bilibili (the case the 0.1.2 notes mention), a CDN host takes more than 15 s to send response headers four times over the life of the process (the app can stay alive for days behind the playback service). Each attempt reports 下载失败 but leaves its connection counted as active. The fifth download from that host blocks inside `_client.getUrl` with no timeout: the ring sits at 0 forever, `_inFlight` and `DownloadManager._tasks` are never cleared, and the track cannot be retried until the app is restarted. For api.bilibili.com the same leak ten times over makes every `_httpGet` time out at `getUrl`: search fails to load and `fetchAudioStream` returns null (无法获取音源下载链接) for the rest of the session.
+
+**Evidence.** audio_download_service.dart:432 `final req = await _client.getUrl(Uri.parse(url));` (no timeout) and 443-446 `final res = await req.close().timeout(const Duration(seconds: 15), onTimeout: () => throw TimeoutException('CDN close timeout'));`. `Future.timeout` only abandons the future: the request is not aborted (`req.abort()` is never called anywhere in lib), so the connection stays in the target's `_active` set until a response is fully consumed or the socket errors. If headers arrive after the 15 s, the `HttpClientResponse` has no listener, the parser pauses the socket, and the connection is never returned.
+
+The client is built with `maxConnectionsPerHost = 4` (bili_http.dart:17, used at audio_download_service.dart:47-50). Dart SDK http_impl.dart:2664-2673: when `_active.length + _connecting >= maxConnectionsPerHost`, `connect` parks the caller in `_pending` and returns a completer with no timeout; `connectionTimeout` (2706-2708) covers only the socket connect.
+
+Same pattern in bilibili_sdk.dart:34-47 (`getUrl(...).timeout(10s)`, `req.close().timeout(10s)`, `.join().timeout(10s)`), client limit 10 per host (bilibili_sdk.dart:26-28); the body timeout also leaves its subscription uncancelled.
+
+**Fix.** Abort on timeout: `req.close().timeout(d, onTimeout: () { req.abort(); throw TimeoutException(...); })`, and put a timeout on `_client.getUrl` in `_transfer`. In `_httpGet`, abort the request on the close timeout and read the body through a subscription that is cancelled on timeout (e.g. `res.timeout(...)` on the stream rather than `.join().timeout(...)`).
+
+## 23. [medium] Re-downloading a song stores the caller's un-named copy, and automatic matching then overwrites the listener's own naming in playlists
+
+- Finder: find:downloads (a6d0e7) · Category: data-loss · `lib/services/database_service.dart:770`
+
+**Scenario.** The listener names a song by hand in 编辑信息 (matcher 0) and keeps it in 收藏 or a playlist. They delete its download to free space, and later download it again from search results or a pasted BV number. The search-result Track (video title, UP主, not named) becomes the 本地 entry, so the song shows its video title again there and in playback (the queue uses the library copy). Being new to the library and not settled, it is auto-matched; the matcher's answer is then written over the hand-named copy in the playlist/收藏 and in recents. The listener's naming is lost, contrary to the rule that it is never overwritten automatically.
+
+**Evidence.** database_service.dart:767-771 `saveDownloadedTrack(Track track)`: `if (_downloadedTracks.any((t) => t.id == track.id)) return; _downloadedTracks.insert(0, track);` inserts whatever copy the download was started with (audio_download_service.dart:352 passes the `track` given to `ensureDownloaded`). `removeDownloadedTrack` (779-786) drops the index entry and, through `AudioDownloadService.delete` (audio_download_service.dart:229-235), the `audio_<id>.json` metadata, while its doc comment (775-778) promises that playlist membership and metadata stay.
+
+library_controller.dart:201-203 `if (!known.contains(track.id)) TrackNaming.autoName(track);` runs for every id new to the downloaded list. track_naming.dart `_name` reads only the downloaded copy (`final before = await _stored(track.id); if (before == null || _settled(before)) return;`) and then `_save` -> `DatabaseService.updateTrackMetadata`, which replaces the copy in every playlist and in recents (database_service.dart:532-544).
+
+**Fix.** In `saveDownloadedTrack`, when the id is not in the downloaded list, prefer an existing stored copy of the same id (playlists, then recents) for title, uploader, cover, named, rawUploader and matcher, taking only loudness from the incoming track; write the metadata file from that merged copy.
+
+## 24. [medium] Re-downloading a song from search discards the listener's own name/cover kept in 收藏/playlists, and auto-matching then overwrites those copies too
+
+- Finder: find:persistence (a99d2d) · Category: data-loss · `lib/services/database_service.dart:767`
+
+**Scenario.** The listener names a song by hand in 编辑信息 (matcher 0, custom cover) and favourites it. Later they delete the download to free space (收藏 still shows their name and cover, as designed). Weeks later they find the video in search and tap 下载. The library entry is created from the search copy with the raw video title and UP主; 收藏 and 本地 now show two different names for the same id. As soon as the automatic matcher finds a song, updateTrackMetadata overwrites the 收藏/playlist/history copies as well: the hand-entered title, artist and picked cover are gone (and the picked cover file is deleted by _sweepCovers a day later). A listener-named track (matcher 0) is supposed never to be revisited by the matcher.
+
+**Evidence.** database_service.dart:767-772 `saveDownloadedTrack`: `if (_downloadedTracks.any((t) => t.id == track.id)) return; _downloadedTracks.insert(0, track);` - it inserts whatever copy the caller holds and never looks at the copies the collection still has. database_service.dart:775-778 documents that removal 'preserves the user's collection: playlist membership, Favorites, metadata and history all stay', while audio_download_service.dart:229-235 deletes the per-track meta JSON, so the playlist/recent copies are the ONLY place the edit survives. Search rows hand their own raw Track to the download (track_sheet.dart:99 `DownloadManager.instance.startDownload(widget.track)`, :90 `playTrack(widget.track)`), built in bilibili_sdk.dart with `rawTitle: title` and named=false. Then library_controller.dart:202-204 calls `TrackNaming.autoName(track)` for the new id; track_naming.dart:121-122 reads the downloaded copy (unnamed, so not settled) and track_naming.dart:188-196 -> :115 `DatabaseService.updateTrackMetadata(track)`, which at database_service.dart:532-537 and :540-543 replaces every playlist and recent copy with the matcher's answer (matcher = 4, catalogue cover).
+
+**Fix.** In saveDownloadedTrack, when the id is not in _downloadedTracks, look for an existing copy in _playlists / _recentlyPlayed and, if one isNamed (or has matcher == 0), insert that copy (keeping the new audioUrl/loudness via copyWith) instead of the caller's; also force-write its meta JSON.
+
+## 25. [medium] Search treats every non-zero Bilibili API code as "no results" (no fallback, no error, pagination ends)
+
+- Finder: find:network (aee1ec) · Category: correctness · `lib/services/bilibili_sdk.dart:574`
+
+**Scenario.** The nav request times out once on a flaky connection (or the cached keys rotate while the app stays alive). For the next 2 minutes (or up to 12 h) every signed search comes back code -403 with HTTP 200. The plain fallback URL at 545-550 is never tried because the body is non-null and not 'risk controlled'; the user sees '没有找到，换个关键词或粘贴 BV 号试试' instead of the retry state, for a song that exists. During scrolling, a single rate-limited page (-799) returns [] and sets _reachedEnd permanently, so the result list silently stops. Same path makes RecommendationEngine count the seed as a success with zero tracks.
+
+**Evidence.** bilibili_sdk.dart:538-542 only discards the signed answer when `isRiskControlled(primary)`; isRiskControlled (637-651) recognises only `code == -352 || code == 412` or a v_voucher. bilibili_sdk.dart:571-582 then reads `final data = json['data']; final dynamic rawResult = data is Map ? data['result'] : null;` and 630 `return [];` - `json['code']` is never inspected. So a body such as {"code":-403,...} (bad/stale w_rid), {"code":-412,...} (note: Bilibili's JSON code is negative, the check is for +412), -799/-509 (rate limit) or -400 returns [] from _searchOnce. search() 500-501 then runs the unfiltered attempt, which gets the same code and also returns []. Callers: online_search_controller.dart:82 `_reachedEnd = results.isEmpty;` and :119 `if (results.isEmpty) _reachedEnd = true;`. This contradicts the contract stated at 456-459 and the comment at 558-559. WbiSigner makes the -403 case reachable: after one failed /nav fetch it signs with the static `_fallbackKeys` for 2 minutes (wbi_signer.dart:138-141, 180-181) and live keys are cached 12 h with no invalidation when a signed request is rejected (131-136).
+
+**Fix.** In _searchOnce, after decoding, treat `json['code'] != 0` as a failure: for the signed primary fall through to the plain fallback URL, and if the final body still has code != 0 throw BiliApiException. On -403 from a signed endpoint also clear WbiSigner's cached keys/_cacheTime so the next call refetches.
+
+## 26. [medium] Search-result titles and uploader names keep HTML entities (&amp; &quot; &#39;) and are stored that way
+
+- Finder: find:network (aee1ec) · Category: correctness · `lib/services/bilibili_sdk.dart:592`
+
+**Scenario.** Search '誓言 王菲'; the row reads '王菲&amp;窦靖童合唱《誓言》'. Tap to download: the Track is saved with title/rawTitle containing '&amp;' (rawTitle 'never changes' per CLAUDE.md), so the library row, notification and lock screen show the entity until the song is auto-named or hand-edited; if matching is off or finds nothing it stays forever. LocalSearch over rawTitle and TasteProfile.tokenize also see 'amp' as a token (recommendation_engine.dart:61 adds [a-zA-Z0-9]{2,} runs, so 'amp'/'quot' become taste terms and potential seed queries).
+
+**Evidence.** bilibili_sdk.dart:591-593 `final rawTitle = item['title'] as String? ?? ''; final cleanTitle = rawTitle.replaceAll(_htmlTagRegex, ''); final author = item['author'] as String? ?? 'UP主';` and 620-622 `title: cleanTitle, rawTitle: cleanTitle, uploader: author`. Only the <em> highlight tags are removed; the search API returns HTML-escaped text. The only entity decoding in lib/ is inside LyricsEngine._preprocess (lyrics_engine.dart:166-170), which is used for parsing, not for display or storage (grep for '&amp;' / unescape over lib finds nothing else). The repo's own fixtures show such titles reaching the app: test/zhoushen_test.dart:171 '王菲&amp;窦靖童合唱《誓言》', :371 '【姚贝娜&amp;单依纯 心火】…'. The view API (_tracksOfView, 198) returns the unescaped title, so the same video has two different rawTitle values depending on how it was found.
+
+**Fix.** Decode entities (&amp; &lt; &gt; &quot; &#39; and numeric &#NN;) on title and author in _searchOnce after stripping tags, sharing one helper with LyricsEngine._preprocess.
+
+## 27. [medium] 换一批 (refresh recommendations) re-requests page 1 with no exclusions and shows the same list
+
+- Finder: find:network (aee1ec) · Category: correctness · `lib/state/recommendations_controller.dart:43`
+
+**Scenario.** Open search with a non-empty library, see 20 recommendations, tap 换一批 ('another batch'): after a skeleton flash and 4-16 network requests the identical 20 tracks in the identical order come back (only scrolling position/extra pages are lost). The button never produces a different batch unless favourites/history/search history changed in between.
+
+**Evidence.** recommendations_controller.dart:35-50: refresh() calls `RecommendationEngine.recommend()` with default `page = 1` and `excludeIds = const {}`, then `_seen..clear()..addAll(...)`, `_page = 1`. recommendation_engine.dart:160-214 is deterministic for fixed local data: same profile -> same `seedQueries()` -> `BilibiliSdk.search(seed, page: 1)` with order=totalrank -> same candidates -> same score sort -> `take(limit)`. Nothing random or rotating is involved. The engine's own doc (156-159) says 'each refresh asks every seed for its next Bilibili page ... guaranteeing a refresh never repeats an earlier one', which the controller does not do. search_view.dart:144-146 wires the '换一批' button to `_recs.refresh`.
+
+**Fix.** Make refresh advance: keep a rotating page counter (e.g. recommend(page: ++_refreshPage, excludeIds: previously shown ids), wrapping to 1 when a pass comes back empty), and only clear _seen on wrap.
+
+## 28. [medium] Paging past the end of the music-zone results silently continues with unfiltered (non-music) results from the same page number
+
+- Finder: find:network (aee1ec) · Category: correctness · `lib/services/bilibili_sdk.dart:500`
+
+**Scenario.** Search a niche title that has 25 hits in the 音乐 zone. Pages 1-2 are music. Scrolling requests page 3: the music zone returns [] (its real end), so the unfiltered search's page 3 (ranks 41-60 of the all-zones ranking: gameplay, lectures, reaction videos) is appended, then page 4, 5 ... up to Bilibili's cap. The list never ends where the music ends, the unfiltered pages 1-2 are skipped, and every further page costs two searches (up to four HTTP requests).
+
+**Evidence.** bilibili_sdk.dart:494-501: `musical = await _searchOnce(query, musicOnly: true, page: page); ... if (musical != null && musical.isNotEmpty) return musical; return _searchOnce(query, musicOnly: false, page: page);`. The empty->unfiltered fallback is justified in the comment (489-493) for 'no matches there', i.e. page 1, but it is applied to every page. online_search_controller.dart:109 calls `BilibiliSdk.search(_query, page: page)` for each further page and ends only when the returned page is empty (119). A transient exception on the music attempt (496-499) has the same effect for that one page.
+
+**Fix.** Decide the mode once per query: only fall back to unfiltered when page == 1 (and let the controller remember which mode page 1 used and pass it for later pages); for page > 1 an empty music page is the end.
+
+## 29. [medium] BV/av/short-link queries ignore `page`: loadMore re-fetches the same video on every scroll at the end of a multi-part list and never reaches the end
+
+- Finder: find:network (aee1ec) · Category: performance · `lib/services/bilibili_sdk.dart:467`
+
+**Scenario.** Paste the BV number (or b23.tv link) of a 30-part album video. The 30 parts list is scrollable; on reaching the bottom each scroll notification, serialised only by _loadingMore, fires another view request (for a short link: a b23.tv resolve plus a view request), the spinner flickers in and out under the list, and this continues for as long as the user scrolls or overscrolls near the end - dozens of identical requests per minute against an API that risk-controls bursts (the plain view then 412s and each attempt becomes 2 requests).
+
+**Evidence.** bilibili_sdk.dart:467-471: `final directId = extractBvOrAvId(query); if (directId != null) { final direct = await fetchVideoInfo(directId); if (direct.isNotEmpty) return direct; }` and 474-483 for short links - both return the full part list regardless of `page`. online_search_controller.dart:109-119: `final results = await BilibiliSdk.search(_query, page: page); ... for (final t in results) if (_seen.add(t.id)) t ... // Only an empty page proves the end; a page of duplicates does not. if (results.isEmpty) _reachedEnd = true;` - the page is all duplicates, never empty, so _reachedEnd stays false and _loadMoreFailed is false (no 3 s window). search_view.dart:72-81 calls `_online.loadMore()` on every ScrollNotification within 320 px of the end when results are non-empty.
+
+**Fix.** In BilibiliSdk.search return [] for page > 1 when the query resolves to a direct id / short link (or have the controller set _reachedEnd when a page adds no new ids for a direct-id query).
+
+## 30. [medium] Re-checking a named part of a multi-part video asks about the whole video: the part's own name is lost once the track is named
+
+- Finder: find:matching (ad4624) · Category: correctness · `lib/services/track_naming.dart:81`
+
+**Scenario.** A two-part video "周深《大鱼》+《光亮》" was downloaded and its parts auto-named 大鱼 and 光亮 by matcher 3 (question = the part name, context = video title). After updating to the build with matcher = 4, playing P1 triggers the re-check: _question now returns the whole video title for both parts, identical except for duration. identify() scores the two bracketed songs (later 《》 pairs get +0.1*bookIdx, line 1068) and returns one answer; whenever it differs from the stored name, lines 188-196 overwrite the correct part name/artist/cover with the other song's. The same wrong question is asked every time the listener taps 智能识别 on an already-named part. This repeats on every future matcher bump.
+
+**Evidence.** track_naming.dart:81-88 `final part = track.partTitle; if (part != null) return (title: part, context: track.rawTitle); return (title: track.rawTitle.isEmpty ? track.title : track.rawTitle, context: '');`
+track.dart:71-78 partTitle is derived from `title` only: `if (rawTitle.isEmpty || !title.startsWith(rawTitle)) return null;`
+track_naming.dart:188-196 naming overwrites `title` with the song name (`title: found.title, ... named: true, matcher: matcher`), so afterwards title no longer starts with rawTitle and partTitle is null for good; nothing else stores the part name (bilibili_sdk.dart:231 only bakes it into `title`).
+track_naming.dart:95-96 `_settled` is false for a track named by an older generation, and `matcher` has been raised in three separate commits (54c7758, 3fbbd22, 6319e4f; now 4), so `_name` re-runs `_ask(before, ...)` -> `_question(before)` with the video title and no context. The same happens in the edit sheet: track_info_sheet.dart:63 `TrackNaming.identify(widget.track)`.
+
+**Fix.** Keep the part name on the Track when it is first named (e.g. a persisted `partName` field set from `partTitle` in `_name` and in the edit sheet's save) and have `_question` use `track.partTitle ?? track.partName` so a named part is still asked by its own name with rawTitle as context.
+
+## 31. [medium] Latin noise keywords (ED, OP, OST, HQ, SQ, LRC, Audio) are matched as substrings, so English song/artist names containing them are discarded
+
+- Finder: find:matching (ad4624) · Category: correctness · `lib/services/lyrics_engine.dart:61`
+
+**Scenario.** Same video, but Bilibili's recognition is unavailable (fetchVideoHints returns hints without music when the player request fails, bilibili_sdk.dart "Half an answer ... is used") or simply did not recognise the song. identify(): _generateCandidates calls add('Unstoppable', '', 0, ...) for the 《》 pair; line 452 rejects it because tokenNoise matches "op". No bookIdx candidate exists, hasUnmarkedBook is false, the remaining candidates are "2023最美的夜" and "周深", and a tag "Unstoppable" would be dropped at line 740 too - the bracketed song is never searched and the track is not named (or is named after whatever the 周深 catalogue query matches). Offline display is hit as well: cleanTitle('Ed Sheeran - Perfect') -> _noisyClean drops the token "Ed" (line 219), leaving "Sheeran - Perfect", so TrackCredit.artistOf shows artist "Sheeran"; likewise "Post Malone" (OST) -> "Malone", "Red Velvet" -> "Velvet", and 《Lost Stars》/《Faded》/《Hope》 are never candidates.
+
+**Evidence.** lyrics_engine.dart:57-64 noiseKeywords: `...|主题曲|片尾曲|片头曲|插曲|推广曲|印象曲|角色曲|宣传曲|ED|OP|OST|` with `caseSensitive: false` and no word boundary (only MV and Live are `\b`-anchored). The glueNoise comment at 70-72 shows this class of bug was fixed there only: "The ASCII glue words are word-anchored so they cannot eat real words out of a token (Alive, Discovery, Deliver must survive)".
+Consumers: line 452 in _generateCandidates.add `if (tokenNoise.hasMatch(s)) return;`; line 219 in _noisyClean `if (tokenNoise.hasMatch(sub)) continue;`; line 740 tags filter `!tokenNoise.hasMatch(t)`; line 87-88 showMarker has the same unanchored `ED|OP|OST`.
+Fixture title (test/fixtures/zhoushen_videos.json, BV1oN4y1q7md): "周深《Unstoppable》神级回眸惊艳全场【2023最美的夜】" - "unstOPpable" matches `OP`. The only test for it (test/recognised_music_test.dart:83-89) passes because it supplies musicTitle 'Unstoppable' and so takes the recognised-music path at line 811, which bypasses candidates.
+
+**Fix.** Word-anchor the ASCII alternatives in noiseKeywords and showMarker the way glueNoise already does: `\bED\b|\bOP\b|\bOST\b|\bHQ\b|\bSQ\b|\bLRC\b|\bAudio\b` (Dart's \b is ASCII-word based, so it still fires next to CJK text such as "动漫OST").
+
+## 32. [medium] _netEaseArtistExists reports a failed request as "not an artist" and never marks the answer incomplete, so a transient failure can be persisted as a wrong name
+
+- Finder: find:matching (ad4624) · Category: resilience · `lib/services/lyrics_engine.dart:1667`
+
+**Scenario.** Title "周深-大鱼" (no 《》). Line 858 asks NetEase whether 周深 and 大鱼 are artists; both normally exist so nothing is settled. If the request for 周深 times out (10 s timeout, 4 connections per host shared with other lookups) while 大鱼 succeeds, known = [false, true]: settledSong = '周深', settledArtist = '大鱼'. Every candidate other than a song literally named 周深 is skipped at line 870-874/972, and `settledSong != null` counts as corroboration (line 1007). The outcome is either a song titled "周深" credited to "大鱼" or a remembered null; nothing flags the answer as retryable. Similarly for the comment's own example (line 757) "【单依纯】大鱼" tagged 周深: a failed artist check makes titleNamesSinger false, the tags join normCredits, 周深's 大鱼 scores as credited+exact and the track is saved as 大鱼 / 周深 with 周深's artwork, permanently.
+
+**Evidence.** lyrics_engine.dart:1643-1668: `final body = await _httpGet(...); if (body != null) { ... return exists; } ... return false;` - a timeout/non-200 returns false (unlike _netEaseSinger at 1514 which returns null and sets `unasked`, and _netEaseSearch at 572 which returns null and sets `incomplete` at 926).
+Decision points that trust it: line 759-762 `titleNamesSinger = ... await _netEaseArtistExists(titleArtist)`; line 763-768 `if (!isCover && !titleNamesSinger) { normCredits += tags... }`; line 773 tagArtist; line 858-863 `if (known[0] != known[1]) { settledSong = known[0] ? right : left; settledArtist = known[0] ? left : right; }`; line 1168 singerInTags; line 1571 _singerInTitle.
+None of these sets `incomplete`, so line 1236 `if (incomplete && !bestExact) return null;` does not protect, the result is memoised (1244) and TrackNaming._name writes it with `matcher: matcher` (track_naming.dart:188-196), after which _settled() never looks again.
+
+**Fix.** Make _netEaseArtistExists return bool? (null when body == null or parsing threw), set `incomplete = true` in identify wherever a null comes back (treating it as false for the decision), and return null without _remember when incomplete - as is already done for searches and for _netEaseSinger.
+
+## 33. [medium] A failed Bilibili hints fetch is treated as "no hints" and the title-only answer is persisted as this generation's final word
+
+- Finder: find:matching (ad4624) · Category: resilience · `lib/services/track_naming.dart:124`
+
+**Scenario.** An amateur cover titled "《大鱼》周深" filed in the 翻唱 zone / tagged 翻唱, 20 s shorter than the release. With hints: isCover and isRendition are true (747-754), line 1125-1129 sets bestExact = false (only the song's own artist is credited and the length differs), and the artist falls through to the UP主. If Bilibili refuses the view/tag requests (risk control, which the code elsewhere expects) while NetEase answers, hints == VideoHints.none: isCover is false, 周深 is credited from the title, the result is exact, and the track is saved as 大鱼 / 周深 with the official release artwork and matcher 4 - a wrong credit that is not re-examined until the matcher constant is next raised. The same applies when only the recognition request fails: the line-1102 guard is skipped because musicTitle is empty.
+
+**Evidence.** track_naming.dart:124-125 `final hints = await BilibiliSdk.fetchVideoHints(before.bvid, cid: before.cid);` - the only emptiness check is inside the legacy branch (134). bilibili_sdk.dart:249-296: "Never throws: offline (or refused) is [VideoHints.none]" and "Half an answer (one request failed) is used but not kept" - not memoised, but TrackNaming keeps what is derived from it: lines 188-196 save with `matcher: matcher`, so _settled (95-96) never revisits.
+In identify the hints decide cover-ness: lyrics_engine.dart:745-756 isCover/isRendition come from `hints.zone`, `hints.tags`, `hints.description` when the title has no marker; 1102 `if (hints.musicTitle.isNotEmpty && !bestApart)` (the backing-track guard) and 811 (recognised song) depend on musicTitle.
+
+**Fix.** Have fetchVideoHints expose completeness (e.g. a `complete` flag, false when view/tags/recognition could not be asked) and in _name, when hints are incomplete, do not save: `_attempted.remove(track.id); return;` (as the legacy branch already does for an empty owner).
+
+## 34. [medium] Marquee keeps scrolling the new title during its 'dwell' and then snaps back to the start when the track changes
+
+- Finder: find:widgets (a91c90) · Category: ux · `lib/widgets/marquee_text.dart:281`
+
+**Scenario.** Player page open, song A has a title too wide for the row (the norm for un-named Bilibili video titles at 22 pt) and is scrolling. The song ends or the listener skips to song B, whose title also overflows. B's title appears already shifted to wherever A's scroll was and keeps scrolling for 1.4 s (the supposed reading pause), then jumps back to offset 0 and immediately scrolls again with no pause. If B's title has the same measured width as A's (two CJK titles of equal length give an identical cycle), the early return at :268 fires: no dwell and no reset at all, B simply continues from A's mid-scroll offset.
+
+**Evidence.** lib/screens/now_playing_page.dart:409-412 builds `MarqueeText(text: track.title, ...)` with no key, so one State (and one AnimationController) lives across track changes.
+lib/widgets/marquee_text.dart:267-292: `if (_syncedRun == shouldRun && _syncedCycle == cycle) return;` ... `if (_dwelledText != widget.text) { WidgetsBinding.instance.addPostFrameCallback((_) { ... _dwellTimer = Timer(widget.dwell, () { ... _dwelledText = widget.text; _syncController(shouldRun: true, cycle: _syncedCycle ?? Duration.zero); }); }); return; }` - nothing stops or resets the controller when the dwell begins.
+The reset only happens after the timer, in :140-145 `if (_controller.duration != cycle) { _controller.duration = cycle; _controller.stop(); _controller.value = 0; } if (!_controller.isAnimating) _controller.repeat();`.
+Meanwhile build keeps painting from the still-running controller, :214-216 `final progress = (_controller.value + widget.phase) % 1.0; return Transform.translate(offset: Offset(-progress * _travel, 0), ...)`.
+test/marquee_dwell_test.dart only covers the first text a widget ever shows.
+
+**Fix.** Treat the text as part of the sync key and reset at the start of the dwell: track `_syncedText` in the early-return comparison, and when `_dwelledText != widget.text` do `_controller.stop(); _controller.value = 0;` in the post-frame callback before starting the dwell timer.
+
+## 35. [medium] Snackbars raised while a sheet stays open are drawn underneath the sheet and never seen
+
+- Finder: find:widgets (a91c90) · Category: ux · `lib/widgets/track_info_sheet.dart:67`
+
+**Scenario.** 编辑信息 -> tap 匹配 on a video the matcher cannot identify (or while offline): the spinner stops and nothing else happens; the message expires behind the sheet. A failed save re-enables 保存 with no explanation. In the queue sheet a failed jump likewise looks like the tap was ignored.
+
+**Evidence.** lib/widgets/track_info_sheet.dart:66-68 `if (found == null) { showAppSnackBar(ScaffoldMessenger.of(context), message: '没有匹配到这首歌'); return; }` and :107 `showAppSnackBar(ScaffoldMessenger.of(context), message: '保存失败，请重试');` - the sheet is not popped in either path.
+lib/widgets/playback_queue_sheet.dart:48-53 `final messenger = ScaffoldMessenger.of(context); ... showAppSnackBar(messenger, message: '暂时无法切换，请重试');` - same, the queue sheet (82% of the screen) stays open.
+lib/widgets/sheet.dart:13 `return showModalBottomSheet<T>(` - a modal route with no Scaffold of its own, so the root ScaffoldMessenger shows the bar in the page Scaffold below the barrier; lib/utils/snack.dart:22-24 makes it a floating pill at that page's bottom edge with a 2 s duration, i.e. exactly where the sheet is. (Flutter scaffold.dart:614-616 starts the dismissal timer regardless, because the root messenger has no ModalRoute.) Also noted by an earlier unverified pass (docs/audit-2026-10-06/findings.md) for the edit sheet; the queue sheet has the same defect.
+
+**Fix.** Show these messages inside the sheet (an inline caption/error line in the sheet's own state), or wrap the builder in showAppSheet with a transparent Scaffold + ScaffoldMessenger so sheet-raised snackbars render above it.
+
+## 36. [medium] Engine started headless by the media service treats the missing permissions channel as "not protected": stale battery hint shown, notification prompt skipped
+
+- Finder: find:native (aa4a5a) · Category: platform · `lib/services/background_protection.dart:27`
+
+**Scenario.** User has already granted the battery exemption (not dismissed the hint). The process is killed; they press play on a Bluetooth headset (or SystemUI binds the MediaBrowserService after reboot). AudioService.onCreate starts the engine headless; HomePage is built, isEnabled() throws MissingPluginException and is read as "not exempt". The user then opens the app: the activity attaches to the existing engine and the home screen shows the "enable background protection" hint although the exemption is already granted. On a first run started this way the POST_NOTIFICATIONS request is also silently dropped for that process lifetime. (Relies on the headless engine building the widget tree in its warm-up frame, which is how audio_service's shared-engine design normally behaves.)
+
+**Evidence.** The `bilibeats/permissions` handler exists only while a MainActivity has configured the engine: android/app/src/main/kotlin/com/bilibeats/app/MainActivity.kt:18-23 `override fun configureFlutterEngine(...) { ... MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "bilibeats/permissions").setMethodCallHandler {...}`.
+But the same shared engine is also created, and Dart main() run, by the service with no activity: audio_service-0.18.19 AudioService.java:345 `flutterEngine = AudioServicePlugin.getFlutterEngine(this);` -> AudioServicePlugin.java:110 `executeDartEntrypoint(DartEntrypoint.createDefault())`. The service is exported with a MediaBrowserService filter and a MEDIA_BUTTON receiver (AndroidManifest.xml:45-58), so a headset/Bluetooth button or SystemUI media resumption can start it in a dead process.
+In that engine: lib/services/background_protection.dart:22-29 `try { return await _channel.invokeMethod<bool>('isIgnoringBatteryOptimizations') ?? false; } catch (_) { return false; }` (MissingPluginException -> false), consumed by lib/screens/home_page.dart:61-62 `final enabled = await BackgroundProtection.isEnabled(); if (mounted && !enabled) setState(() => _showProtectionHint = true);` which runs once in initState. And lib/main.dart:62-66 fires `requestNotifications` once with `.catchError((Object _) {})`. When the activity later attaches to the cached engine, main() and HomePage.initState do not run again.
+
+**Fix.** Do not map a channel error to `false`: return null/unknown on MissingPluginException and leave the hint hidden; re-run the check (and the notification request) on AppLifecycleState.resumed, as settings_sheet.dart already does for its own row.
+
+## 37. [medium] release.sh with an explicit X.Y.Z resets the build number to 1, lowering Android versionCode below the installed build
+
+- Finder: find:release (aa6dad) · Category: build-release · `tool/release.sh:81`
+
+**Scenario.** `tool/release.sh 0.2.0 "note"` on the current tree writes `version: 0.2.0+1`, commits and tags v0.2.0. build_release.sh then produces an APK with versionCode 1. On the phone that has 0.1.3 (versionCode 4) the install is refused as a downgrade (INSTALL_FAILED_VERSION_DOWNGRADE); the only way to install that APK is to uninstall first, which deletes the downloaded audio and the library JSON. The bad number is already committed and tagged by then.
+
+**Evidence.** tool/release.sh:79-82 `*) NEW_SHORT="$BUMP"; NEW_BUILD=1 ;;` while every other branch does `NEW_BUILD=$((BUILD + 1))` (lines 67, 72, 77). pubspec.yaml:4 is `version: 0.1.3+4`; android/app/build.gradle:39 `versionCode = flutter.versionCode`; the merged release manifest in build/ shows versionCode="4". The script's own header (lines 20-21) says: "Android uses it as versionCode; forgetting it makes installs reject updates." The usage line (27) advertises the X.Y.Z form. This path was last used for 0.1.0 (`git show v0.1.0:pubspec.yaml` -> 0.1.0+1, after 6.0.0+53), which was harmless only because the application id changed in the same release.
+
+**Fix.** In the explicit-version branch use `NEW_BUILD=$((BUILD + 1))` like the others (the build number must be monotonic regardless of the version name). Optionally also reject an explicit version that is not greater than the current one and one that contains `+` or `-` (the glob `[0-9]*.[0-9]*.[0-9]*` accepts `1.2.3+9`, producing `1.2.3+9+1`).
+
+## 38. [medium] 'a failed install does not switch the display' passes only because the fake's setAudioSources fails atomically; the real player has already replaced the queue and the handler publishes it
+
+- Finder: find:tests (a41ec6) · Category: correctness · `test/playback_handler_test.dart:141`
+
+**Scenario.** Song A is playing from queue Q1. The listener taps song X whose local file cannot be opened (a truncated/non-audio body that passed the >=1024-byte check, or a file removed outside the app while the .ready marker and the downloaded memo remain). With the real player: Q1 is discarded before the load is attempted, the load throws, the handler publishes Q2 anyway - the player page, mini player, notification and queue sheet switch to a track of Q2, that track is written to 最近播放 although it never played, A stops, and the snack says 无法播放. The class doc's contract (and this test's name) says nothing changes. The test cannot see any of it because the fake models failure as a no-op. The '无法播放' message is asserted by no test either.
+
+**Evidence.** test/playback_handler_test.dart:147-150 `fake.failNextSource = true; await handler.playTrack(t[1], queue: t); expect(handler.currentTrack, t[0]); expect(fake.currentTag, t[0]);`.
+Fake, test/fake_audio_player.dart:190-194: `if (failNextSource) { failNextSource = false; throw ja.PlayerException(1, 'fake source failure', initialIndex); }` comes BEFORE `_children = audioSources.cast<...>().toList();` so a failed load leaves the old playlist, index and sequence untouched.
+Real just_audio 0.10.6, lib/just_audio.dart:891 `await _playlist._init(audioSources, loadRequest.shuffleOrder);` runs before `duration = await load();` (895); _init (3165-3174) does `this.children.replaceRange(0, this.children.length, children);` and `await player._broadcastSequence();`. Nothing restores the old children when load() throws. SequenceState.currentIndex (2154-2155) is `sequence.isNotEmpty ? min(_currentIndex ?? 0, sequence.length - 1) : null`, so currentSource is always an item of the NEW list.
+Handler, lib/services/audio_player_handler.dart:569-580: the catch only records `failure`, then `if (_installing == 0) { _recordHistory = recordHistory; _publish(); ... }` runs unconditionally. _publish (216-231) reads `_player.sequenceState`, sees a different current id and calls `_announce(current)`, which sets nowPlaying, mediaItem and (283) `DatabaseService.addRecentlyPlayed(track)`. Only afterwards (584-587) is '无法播放「…」' emitted and false returned. There is no reinstall of the previous queue anywhere in the file.
+
+**Fix.** Make the fake mirror the real ordering (assign _children/_index and emit the sequence before the delay/throw) so the test exercises what happens on device; then make _install honour the contract, e.g. remember the previous sources/index/position and reinstall them (without recording history) when setAudioSources throws something other than PlayerInterruptedException, and assert the message.
+
+## 39. [medium] No test ever loads a valid persisted store from disk: the write-envelope / read-payload round trip for downloads, playlists, history, prefs and lyrics is unverified
+
+- Finder: find:tests (a41ec6) · Category: test-gap · `lib/services/database_service.dart:418`
+
+**Scenario.** A change to `_envelope` or `_readPayload` (renaming 'data', nesting the payload, a schema bump whose migration is wrong) or to `_parsePlaylistList` passes all 178 tests. On the next real launch every store reads as an empty list without error, so nothing is moved to .unreadable; the first toggleFavorite / addRecentlyPlayed / pin then rewrites bilibeat_playlists.json, bilibeat_recently_played.json or bilibeat_lyrics.json from the empty state. Playlists, favourites and pinned lyrics are gone for good (downloads alone come back through _discoverAudioFiles).
+
+**Evidence.** lib/services/database_service.dart:99-109 `_loadFuture` is a process-wide static with no reset hook, so each test file loads exactly once, and every file starts from an empty temp directory (test/audio_test_harness.dart:160 `Directory.systemTemp.createTemp('bilibeat_$tag')`). The only files present at load time in the whole suite are the deliberately unreadable ones in test/store_safety_test.dart:43-47. After that every assertion reads in-memory lists: store_safety_test.dart:71 `DatabaseService.getRecentlyPlayed()`, download_management_test.dart:85 `getPlaylists()`, lyric_meta_test.dart:72 `getDownloadedTracks`, lyric_ownership_test.dart `LyricsStore.get/peek`. LyricsStore._load's merge branch (lib/services/lyrics_store.dart:64-73 `if (text != null) { final parsed = await compute(_parseLyricsFile, text); ... }`) never executes with a readable file. The only file read back is bilibeat_session.json (playback_handler_test.dart:214). The readers are lenient in a dangerous way: database_service.dart:19-20 `DatabaseService._readPayload(jsonDecode(json)) as List<dynamic>? ?? []` and 425 `return decoded['data'];` - a missing/renamed key yields an empty list, not an exception, so the file is not set aside. test/serialization_test.dart round-trips models only, never `_envelope`/`_readPayload`/`_parsePlaylistList`. The legacy bare-list format (documented at 405-407) is only exercised by render_screens.dart, which is not part of the suite.
+
+**Fix.** Add a restart test: write through the public API in one isolate-fresh file (or add a @visibleForTesting `DatabaseService.resetForTest()` / `LyricsStore.resetForTest()` that clears the static caches), then reload from the same directory and compare downloads, playlists with their tracks, favourites, history, prefs, search history and a pinned + an automatic lyric. Include one fixture in the bare pre-envelope format.
+
+## 40. [medium] The whole of zhoushen_test.dart is tagged live, so about 30 offline cleanTitle regression tests never run in CI
+
+- Finder: find:tests (a41ec6) · Category: test-gap · `test/zhoushen_test.dart:1`
+
+**Scenario.** A change to LyricsEngine.cleanTitle that re-breaks a documented regression (e.g. '【声生不息3】 黄绮珊&周深 《岁月》' crediting 声生不息3 again, or '周深 - Alive' losing its title to the Live noise word) is pushed. CI is green because none of those cases is in an untagged file. cleanTitle feeds TrackCredit.artistOf for every unnamed song, so the wrong artist shows in every list and in the artist lens, and seeds the lyric and matching queries.
+
+**Evidence.** test/zhoushen_test.dart:1-2 `@Tags(['live'])` / `library;` tags every test in the file. .github/workflows/ci.yml runs `flutter test --exclude-tags live`, and the audit baseline (178 tests) was taken the same way. Of the 52 declared tests (plus 10 more generated by the forEach at 71-77), only 29 call `_skipIfOffline()` (22 directly, 7 through `check` at 142-148). The rest are pure, synchronous calls such as 36-43 `LyricsEngine.cleanTitle('周深-世界赠予我的 4k最高音质无损纯享 ...')`, 57-78 (studio-listening titles), 101-139 (knownArtists crediting), 451-482 (【show】 artist 《song》 regressions), 514-527 (English glue noise, standalone separator). The CI-visible parser tests are test/library_features_test.dart:89-121 (5 cases), test/widget_test.dart:274-294 (4 cases) and test/title_parser_test.dart:17-25, which only asserts `parsed['songTitle']` is non-null and non-empty for the 540-title corpus.
+
+**Fix.** Move the tests that do not touch the network into an untagged file (e.g. test/title_rules_test.dart) and leave only the NetEase-backed ones under @Tags(['live']); or tag the individual live tests/groups with `tags: 'live'` instead of the library.
+
+## 41. [medium] Every download test supplies Track.audioUrl, a field production never sets: the playurl lookup and stream selection that every real download depends on has no test
+
+- Finder: find:tests (a41ec6) · Category: test-gap · `lib/services/audio_download_service.dart:297`
+
+**Scenario.** A refactor of the playurl parsing (a wrong cast on `bandwidth`, reading `durl.first['url']` from a changed shape, dropping the https rewrite) makes fetchAudioStream throw into its catch-all and return null. Every download and every 下载并播放 then fails with 无法获取音源下载链接 - the app can no longer add music - while analyze and all tests stay green. Equally, a regression that stops carrying `loudness` into the stored track silently disables levelling for new downloads.
+
+**Evidence.** lib/services/audio_download_service.dart:297-303 `var url = track.audioUrl; if (url == null || url.isEmpty) { final info = await BilibiliSdk.fetchAudioStream(track.bvid, track.cid); url = info?['url']; final loudness = double.tryParse(info?['loudness'] ?? ''); if (loudness != null) track = track.copyWith(loudness: loudness); }`. `grep -rn audioUrl lib` outside models/track.dart finds only that line: nothing in lib/ ever assigns audioUrl, so production always takes the fetchAudioStream branch. Tests always bypass it: test/audio_test_harness.dart:185 `audioUrl: server.urlFor(name)`, test/download_resume_test.dart:124 `audioUrl: server.url`. BilibiliSdk.fetchAudioStream (lib/services/bilibili_sdk.dart:366-447) does its JSON handling inline with the request (durl first, then dash audio sorted by `bandwidth`, baseUrl/base_url/backupUrl, `volume.measured_i`) inside a catch-all that returns null (443-447); there is no parse seam and no test references it. The follow-on `saveTrackMetadata(track, force: track.loudness != null)` (348) is likewise never reached with a loudness.
+
+**Fix.** Extract the body handling into a @visibleForTesting `parseAudioStream(Map json)` (as was done for parseRecognisedMusic / isRiskControlled) and test it with recorded durl-only, dash-only, backupUrl-only and volume-bearing answers; add one download test with audioUrl null and an injectable stream resolver to cover the loudness merge and forced metadata write.
+
+## 42. [medium] Startup discovery and pruning of the downloaded list (_discoverAudioFiles) is untested; it rewrites bilibeat_downloaded.json on every launch that finds a difference
+
+- Finder: find:tests (a41ec6) · Category: test-gap · `lib/services/database_service.dart:261`
+
+**Scenario.** The path convention is duplicated here rather than taken from AudioDownloadService (`_audioPath`/`_readyPath`, audio_download_service.dart:94-100). If one side changes (a new extension, a sub-folder, a different marker), the prune loop sees every stored track as missing on the next launch, clears the in-memory list and persists the empty list; the library screen is empty and, if discovery is affected by the same change, stays empty although the audio is on disk. Conversely a break in the recovery half means a set-aside (damaged) bilibeat_downloaded.json no longer comes back from the per-track .json files. No test fails in either case.
+
+**Evidence.** lib/services/database_service.dart:214-306. Recovery half (220-259): each `audio_<id>.ready` with a non-empty .m4a and a .json is added when `!_downloadedTracks.any((t) => t.id == track.id)`. Prune half (261-296): for each stored track `exists = await ready.exists() && await audio.exists() && await audio.length() > 0;` built from `File('$dirPath/bilibeat_audio/audio_${t.id}.m4a')`; anything else goes to `prunedIds`, and `if (toKeep.length != beforePrune) { _downloadedTracks..clear()..addAll(toKeep); unawaited(_persistDownloaded()); }`. No test reaches either half with data: every suite file loads once from an empty directory (see audio_test_harness.dart:160 and the static `_loadFuture` at database_service.dart:99-109), so `_downloadedTracks` and bilibeat_audio are both empty when _load runs. The only place that seeds .ready/.m4a/.json before a load is test/render_screens.dart:108-113, which is not in the suite and asserts nothing about the list.
+
+**Fix.** Add a test that seeds a documents folder before first load with (a) a downloaded.json entry whose files exist, (b) one whose .m4a is missing, (c) a ready+m4a+json triple not listed, and asserts the loaded list and the rewritten file; have _discoverAudioFiles use AudioDownloadService's path helpers so the convention lives in one place.
+
+## 43. [medium] TrackNaming._name, the only code that renames songs without the listener asking, has no test; only the pure settled() predicate is covered
+
+- Finder: find:tests (a41ec6) · Category: test-gap · `lib/services/track_naming.dart:119`
+
+**Scenario.** A change that loosens one guard - for instance dropping the `stored.named != before.named` comparison, or treating `matcher == null` as re-checkable without the owner comparison - makes the next play of a song the listener renamed through 编辑信息 before 0.1.x (named, matcher null) replace their title, artist and cover with the catalogue's answer in the library, 收藏 and every playlist. All tests pass; CLAUDE.md's instruction to raise `matcher` to re-check old answers makes this path run across the whole library after such a release.
+
+**Evidence.** lib/services/track_naming.dart:119-197. The guards that protect the listener's own naming are all in here: 122 `if (before == null || _settled(before)) return;`, the legacy branch 131-143 (`if (before.uploader.trim() != owner.trim()) { await _save(before.copyWith(rawUploader: owner, matcher: 0)); return; }`), the re-read 162-169 (`stored.title != before.title || stored.uploader != before.uploader || stored.matcher != before.matcher || stored.named != before.named`), and the offline retry 155-159. `_save` (114-117) goes to DatabaseService.updateTrackMetadata, which overwrites the copy in downloads, every playlist and history (database_service.dart:521-544). The suite references TrackNaming only at test/track_test.dart:95-121 (`TrackNaming.matcher` and `TrackNaming.settled`). recognised_music_test / recognition_live_test call LyricsEngine.identify directly, never the apply step. BilibiliSdk.fetchVideoHints is called statically (125) with no injection point, which is why it cannot be driven from a hermetic test today.
+
+**Fix.** Give _name injectable lookups (hints fetcher and identify function, defaulting to the real ones) and test: listener-named (matcher 0) untouched; legacy-named with a different artist than the owner stamped matcher 0 and left alone; an edit made while the lookup is in flight is not overwritten; offline (found null, not settled) leaves the track retryable; a confirmed answer writes title/artist/cover/rawUploader/matcher.
+
+## 44. [medium] A file-write error during a download (disk full) makes `await sink.flush()` hang forever; the download never fails, stays in _inFlight/_tasks and cannot be retried until the process dies
+
+- Finder: find:sweep-async (a34172) · Category: resilience · `lib/services/audio_download_service.dart:543`
+
+**Scenario.** Storage fills up while a song is downloading (ENOSPC on a write). The file consumer fails, the rest of the body is still pulled over the network and discarded, then the coroutine parks on flush(). The row's progress ring and the top-bar 'N downloading' count stay forever, nothing is recorded as failed, tapping download again is ignored, and 下载并播放 for that song shows 'preparing' until another song is chosen. Freeing space does not help; only killing the process does, and the process is long-lived because of the foreground media service. An unhandled async error from the sink's `done` future is also raised.
+
+**Evidence.** lib/services/audio_download_service.dart:534-547 `await for (final chunk in timeoutRes) { sink.add(chunk); ... } await sink.flush(); } finally { try { await sink.close(); } catch (_) {} }`. The sink is `part.openWrite()` (:502, :522), used through add(), never addStream().
+
+Dart SDK, ~/flutter/bin/cache/dart-sdk/lib/io/io_sink.dart `_StreamSinkImpl._controller` getter: when the target's addStream fails while the sink is not bound, the onError branch only runs `_completeDoneError(error, stackTrace)`; `_controllerInstance` and `_controllerCompleter` are left set and the completer is never completed. `flush()` then does `_isBound = true; var future = _controllerCompleter!.future; _controllerInstance!.close(); return future.whenComplete(...)`, a future nobody completes. Later `sink.add(chunk)` calls go to a controller whose subscription was cancelled and are dropped silently, so the loop runs to the end of the body and then parks on flush; the `finally` with close() is never reached.
+
+Callers: ensureDownloaded (:267-293) removes `_inFlight[id]` only in its `finally`, which never runs; `final existing = _inFlight[id]; if (existing != null) return existing;` hands the same hung future to every later request. DownloadManager.startDownload (download_manager.dart:115 `if (_tasks.containsKey(track.id)) return;`, :142-145 removal only in finally) keeps the task forever. The playback path, audio_player_handler.dart:606-618 `preparing.value = track; try { await AudioDownloadService.ensureDownloaded(track); ...`, never returns either.
+
+**Fix.** Do not rely on flush() after add(). Either write with `await sink.addStream(timeoutRes.map(...))` (counting progress in the map), which surfaces the write error, or race the loop against the sink's failure: attach `sink.done.catchError(...)` to a flag or Completer checked on each chunk, and replace `await sink.flush()` with `await sink.close()`, which returns `done` and completes with the error.
+
+## 45. [medium] A lyric lookup that fails for lack of a connection is remembered as 'no lyrics exist' for the whole session
+
+- Finder: find:sweep-async (a34172) · Category: correctness · `lib/state/lyrics_controller.dart:189`
+
+**Scenario.** The listener plays newly downloaded songs with no connection (underground, flight mode, a NetEase timeout). Playing from local files offline is the app's core use. Each song shows no lyrics and its id goes into `_misses`. Back online, replaying those songs still shows no lyrics, with no request made, until the app process is restarted (which can be days with the foreground service) or the listener opens the lyrics sheet and taps 重新匹配 for each song.
+
+**Evidence.** lib/state/lyrics_controller.dart:178-189 `if (_misses.contains(track.id)) { publish(Lyrics.none); return; } ... final fresh = await LyricsEngine.autoFetchLyrics(...); if (fresh.isEmpty) _misses.add(track.id);`. `_misses` is documented at :46-48 as 'Songs the databases had nothing for, this session'.
+
+autoFetchLyrics cannot tell failure from absence: lib/services/lyrics_engine.dart:36-53 `_httpGet` catches every error and returns null (`} catch (e) { debugPrint('Lyrics HTTP error: $e'); } return null;`); fetchFromNetEase (:1908-1910) and fetchFromLRCLIB (:1841-1843) skip a null body; autoFetchLyrics (:2165) then returns `Lyrics(source: 'none', ... lines: const [])`.
+
+`_misses` is only cleared by choose (:83), rematch (:104) or a name change (:134). TrackNaming treats the same situation correctly (track_naming.dart:155-158 'Offline is not "unknown": ask again the next time it plays').
+
+**Fix.** Have the lookup report failure separately from 'not found' (for example `_httpGet` rethrows, or autoFetchLyrics returns a result carrying a `failed` flag when any request errored and nothing was found) and add to `_misses` only on a completed, empty answer.
+
+## 46. [medium] A lyrics lookup that fails for lack of a connection is recorded as "no lyrics exist" for the rest of the session
+
+- Finder: find:sweep-resilience (afbf48) · Category: resilience · `lib/state/lyrics_controller.dart:189`
+
+**Scenario.** Songs always play from local files, so offline listening is normal. Play a song with no cached lyrics while offline (subway, flight mode), or while NetEase times out: the view shows no lyrics and the id goes into _misses. Connection returns; the song comes round again (loop/all, or tapped again). _load hits the _misses branch and publishes empty without any request. Because the foreground service keeps the process alive for days, the song stays lyric-less until the listener opens the lyrics sheet and taps 重新匹配 or kills the app.
+
+**Evidence.** lib/state/lyrics_controller.dart:184-189 `final fresh = await LyricsEngine.autoFetchLyrics(...); if (fresh.isEmpty) _misses.add(track.id);` and :178-181 `if (_misses.contains(track.id)) { publish(Lyrics.none); return; }`. autoFetchLyrics (lib/services/lyrics_engine.dart ~2140-2167) returns `Lyrics(source: 'none', ... lines: const [])` both when the providers have nothing and when every request failed: fetchFromNetEase/fetchFromLRCLIB only see `_httpGet` returning null (lyrics_engine.dart:37-53 swallows every transport error and non-200) and return null. `_misses` is only cleared by rematch(), choose(), or a metadata edit (lyrics_controller.dart:83,104,134). TrackNaming already distinguishes the two cases (track_naming.dart:155-158 `// Offline is not "unknown": ask again the next time it plays.`); lyrics do not.
+
+**Fix.** Have autoFetchLyrics (or the two fetchers) report "could not ask" separately from "asked, nothing found" (e.g. return null / a flag when every _httpGet returned null), and only add to _misses in the second case.
+
+## 47. [medium] Paging a BV-number / link search re-fetches the same video forever; the end of the list is never reached
+
+- Finder: find:sweep-resilience (afbf48) · Category: correctness · `lib/services/bilibili_sdk.dart:467`
+
+**Scenario.** Paste the BV number (or share link) of a multi-part video - an album or concert with 15+ parts, the case the app explicitly supports. The parts list is scrollable; whenever the list is within 320 px of the end every scroll event starts another `x/web-interface/view` request as soon as the previous one finishes, each returning the same parts (all dropped by _seen). The bottom spinner flickers in and out indefinitely (its insertion/removal changes the scroll extent, which itself generates further scroll updates while the user rests at the bottom), and the burst of identical requests is exactly what trips Bilibili risk control (412) for the following real searches and downloads.
+
+**Evidence.** lib/services/bilibili_sdk.dart:460-471 `static Future<List<Track>> search(String query, {int page = 1}) ... final directId = extractBvOrAvId(query); if (directId != null) { final direct = await fetchVideoInfo(directId); if (direct.isNotEmpty) return direct; }` - `page` is ignored on the direct path (same for the b23.tv path at :474-483). lib/state/online_search_controller.dart:109-119 `final results = await BilibiliSdk.search(_query, page: page); ... _page = page; _loadMoreFailed = false; // Only an empty page proves the end; a page of duplicates does not. if (results.isEmpty) _reachedEnd = true;` - a direct result is never empty, so _reachedEnd never becomes true and there is no back-off on success. lib/screens/search_view.dart:72-81 calls `_online.loadMore()` on every ScrollNotification within 320 px of the bottom.
+
+**Fix.** In search(), return [] for page > 1 when the query resolved to a direct id / short link (or return a flag meaning "complete"); in OnlineSearchController.loadMore also set _reachedEnd when a page adds no new ids.
+
+## 48. [medium] Any non-zero Bilibili API code other than -352/412 is read as "no results" / "no such video" instead of a failure
+
+- Finder: find:sweep-resilience (afbf48) · Category: resilience · `lib/services/bilibili_sdk.dart:574`
+
+**Scenario.** The `nav` request for WBI keys times out once (weak signal at launch). For the next two minutes every signed search is signed with the static 2023 key pair; Bilibili answers HTTP 200 with a non-zero code and no data. _searchOnce returns [] for the music zone, search() then tries unfiltered, also []. The UI shows "没有找到，换个关键词或粘贴 BV 号试试" (search_view.dart:239-247) rather than "无法连接哔哩哔哩" with 重试, and the plain fallback endpoint that needs no signature is never used. The same happens under rate limiting (-799): a pasted BV number is reported as not existing and is then keyword-searched as text.
+
+**Evidence.** lib/services/bilibili_sdk.dart:571-583 in _searchOnce: `final data = json['data']; final dynamic rawResult = data is Map ? data['result'] : null; ... if (resultsList != null) {...} return [];` - `json['code']` is never inspected. The only code check is isRiskControlled (:637-645) `if (code == -352 || code == 412) return true;` (Bilibili's documented block code is negative, -412). So in :535-543 a primary answer such as `{"code":-403,...}` or `{"code":-799,"message":"请求过于频繁"}` is kept as `body` (the unsigned fallback at :545-550 is not tried) and yields []. Same in _tracksOfView (:195, :240) `if (json['code'] == 0 && json['data'] != null) {...} return [];` and _viewBody (:143) `if (plain != null && !isRiskControlled(plain)) return plain;`. The stale-key path makes this reachable: lib/services/wbi_signer.dart:138-141,180-181 hands out the hard-coded `_fallbackKeys` for 2 minutes after one failed `nav` fetch, and the comment at :175-177 says such signatures are rejected by the API.
+
+**Fix.** In _searchOnce treat `json['code'] != 0` on the primary as a reason to use the fallback URL, and on the final body throw BiliApiException; add -412/-403/-799 handling. In _tracksOfView return [] only for the known "video missing" codes (-404, 62002, 62004 ...) and throw for the rest.
+
+## 49. [medium] Library/playlist persist failures are swallowed, so edits made while storage is full report success and vanish on restart
+
+- Finder: find:sweep-resilience (afbf48) · Category: data-loss · `lib/services/database_service.dart:473`
+
+**Scenario.** The phone's storage fills up - likely for an app whose job is downloading audio (a download that hits ENOSPC is the usual way to get there). The listener then creates a playlist, adds 30 songs, favourites a few, and corrects a song's title in 编辑信息. Every `tmp.writeAsString` throws ENOSPC; each is caught and discarded; the UI updates from memory, the sheet closes, "已加入「…」" is shown. When the process is next killed (30-minute idle stop, OEM task killer) all of it is gone with no indication anything was wrong.
+
+**Evidence.** lib/services/database_service.dart:473-486 `static Future<void> _persistPlaylists() async { try { ... await _writeJsonAtomically(...); } catch (e) { debugPrint('DatabaseService _persistPlaylists error: $e'); } if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null); }`; identical catch-and-log in _persistDownloaded (:453-461), _persistRecentlyPlayed (:463-471), setPref (:836-843). debugPrint is a no-op in release (lib/main.dart:20). _writeJsonAtomically itself rethrows (:389-391), so the information is available and dropped one level up. The caller that expects it: lib/widgets/track_info_sheet.dart:99-107 `try { await DatabaseService.updateTrackMetadata(updated); ... if (mounted) Navigator.pop(context); } catch (error, stack) { ... showAppSnackBar(..., message: '保存失败，请重试'); }` - that catch can never fire. Contrast lib/services/lyrics_store.dart:110-115 / lyrics_sheet.dart:89-96, where the failure does propagate ("歌词已应用，但未能保存").
+
+**Fix.** Let the _persist* helpers rethrow (or return bool) and surface one toast (e.g. via a DatabaseService error stream listened to in AppShell) such as "存储空间不足，更改未保存"; keep the swallow only for the fire-and-forget callers at startup.
+
+## 50. [medium] Partial downloads (.part) of failed downloads are never cleaned up once the session's failure record is gone
+
+- Finder: find:sweep-resilience (afbf48) · Category: resource-leak · `lib/services/audio_download_service.dart:355`
+
+**Scenario.** Tap 下载并播放 on a two-hour concert (150 MB+). The connection drops at 80 % (`CDN chunk timeout` / `下载不完整`). The listener picks something else, or the app is restarted. ~120 MB of `audio_<id>.m4a.part` now sits in Documents/bilibeat_audio permanently: nothing lists it, nothing counts it, nothing deletes it unless that exact video is downloaded again to completion. Repeated on a flaky network this silently eats storage - and when the failure was itself ENOSPC, the leftover keeps the disk full.
+
+**Evidence.** lib/services/audio_download_service.dart:354-360 `} catch (e) { // Deliberately keep the .part file: the next attempt resumes it ... _emit(...); rethrow; }`. The only code that deletes a `.part` is delete(track) (:229-235), reached only through DatabaseService.removeDownloadedTrack (database_service.dart:779-781), which the UI offers only for downloaded tracks (track_sheet.dart:222-228 `if (downloaded) SheetAction(... '删除下载')`, download_management_sheet.dart:160-170 iterates `_downloaded`). Failure records are session-only: lib/services/download_manager.dart:58-61 `Never persisted`, and playback-path failures are never recorded at all (:26-28). storageBreakdown (:191-214) counts only `.m4a` with a `.ready`, so the bytes are invisible in 下载管理. `grep -rn "\.part" lib` shows no startup sweep. The same directory also keeps the `audio_<id>.json` written before the download starts (:275).
+
+**Fix.** At startup (in _discoverAudioFiles or a small sweep in AudioDownloadService) delete `*.part` / `*.part.json` (and `.json` without `.ready`) older than a few days and not in _inFlight; also delete the part on DownloadManager.dismissFailed.
+
+## 51. [medium] Lock-screen/notification artwork is fetched and decoded at original resolution for every song (no CDN sizing, no artDownscale)
+
+- Finder: find:sweep-performance (a5dadf) · Category: performance · `lib/services/audio_player_handler.dart:391`
+
+**Scenario.** Play through a playlist on mobile data. For each song not played recently, audio_service downloads the full original cover (Bilibili video covers are typically 1920x1080 and a few hundred KB; NetEase album originals applied by auto-matching are commonly 1-3 MB and can be thousands of pixels square), although the app already holds a size-matched thumbnail of the same cover. Android then decodes it unscaled: 1920x1080 is ~8 MB of bitmap, a 3000x3000 album cover ~36 MB, a 12 MP photo picked as a custom cover ~48 MB, retained in a native LruCache of up to 1/8 of the heap for the life of the service. A bitmap larger than that cache is never retained, so it is re-decoded on every mediaItem update (track start, the duration update in _onDuration, every metadata edit). Net effect: megabytes of avoidable data per listening session for an app whose audio is fully offline, and tens of MB of extra memory in exactly the backgrounded state the Dart-side cache limit was meant to protect. Sizes are derived from the code paths and typical cover sizes, not measured.
+
+**Evidence.** lib/services/audio_player_handler.dart:391-397 `artUri: track.coverUrl.isEmpty ? null : Uri.tryParse(track.coverUrl.startsWith('/') ? 'file://${track.coverUrl}' : track.coverUrl,)` - the raw cover URL, not CachedCoverImage.sizedUrl. Sources of coverUrl are originals: bilibili_sdk.dart:199/595 (`data['pic']`, `item['pic']`), lyrics_engine.dart:1612-1618 (NetEase `album.picUrl` returned unparameterised), utils/cover_picker.dart:11-19 (gallery file copied as-is, no maxWidth).
+lib/main.dart:41-51 `config: const AudioServiceConfig(androidNotificationChannelId: ..., androidNotificationChannelName: 'BiliBeats', androidStopForegroundOnPause: false)` - artDownscaleWidth/Height are not set.
+Plugin (audio_service-0.18.19): lib/audio_service.dart:1031-1090 the mediaItem listener calls `_loadArtwork` -> :1251-1253 `cacheManager.getSingleFile(mediaItem.artUri!.toString())` (DefaultCacheManager, a second cover cache beside bilibeat_covers) for any non-file artUri; AudioService.java:218-236 only sub-samples `if (config.artDownscaleWidth != -1)`, otherwise `BitmapFactory.decodeFile(artUri.getPath())` at full size; :242 `artBitmapCache.put(...)` into an LruCache sized `maxMemory / 8` (:332-336); :809-813 puts that bitmap into the metadata twice (ALBUM_ART and DISPLAY_ICON).
+Contrast lib/main.dart:22-27, which deliberately caps Flutter's own image cache at 40 MB / 150 entries because 'A large cache is what gets a backgrounded app killed first under memory pressure'.
+
+**Fix.** Set `artDownscaleWidth: 512, artDownscaleHeight: 512` in AudioServiceConfig (main.dart), and build artUri from `CachedCoverImage.sizedUrl(track.coverUrl, 512, 512)` for remote covers (or, better, point it at the already cached thumbnail file with a file:// URI so no second download happens).
+
+## 52. [medium] Changing only the cover of an un-named song marks it as named by the listener with the raw video title as its song name
+
+- Finder: find:sweep-conformance (ab0254) · Category: correctness · `lib/widgets/track_info_sheet.dart:90`
+
+**Scenario.** A download the matcher has not (yet) named, e.g. title '【4K60帧】周深《大鱼》现场 纯享版'. The listener opens 编辑信息, taps the cover, picks a picture and presses 保存 without touching the text fields. The track is stored with named=true, matcher=0, title = the whole video title. From then on: (1) automatic matching never looks at it again, in this or any later matcher generation (CLAUDE.md: matcher 0 = the listener) so the row keeps the video title forever; (2) automatic lyrics are searched with the whole video title as the song name instead of the parsed '大鱼' (or, for a part of a multi-part video, with '<video> - P3: <part>' instead of the part name), so the lookup misses or accepts any NetEase song whose 2+ character name happens to be contained in that title; (3) the parsed credit (which falls back to the UP主) is frozen into `uploader` and fed to the offline parser as a known artist.
+
+**Evidence.** lib/widgets/track_info_sheet.dart:81-98: the early return only fires when title, artist AND cover are unchanged; otherwise `final updated = track.copyWith(title: title, uploader: artist.isEmpty ? TrackCredit.artistOf(track) : artist, coverUrl: _cover, named: true, matcher: 0, rawUploader: track.isNamed ? null : track.uploader);`. For an un-named track `_title` was initialised to `widget.track.title` (line 37), i.e. the video title (or `<video> - P3: <part>`), and `_artist` to the parsed credit (line 39). Consumers of the flag: lib/services/track_naming.dart:95-96 `_settled(track) => track.isNamed && (track.matcher == 0 || track.matcher == matcher)` and :101 `if (!enabled || _settled(track) ...) return;`; lib/state/lyrics_controller.dart:61-64 `track.isNamed ? (song: track.title, artist: track.uploader) : (song: track.partTitle, artist: null)`; lib/services/lyrics_engine.dart:2146 `final title = song ?? cleaned['songTitle']!;` then :1899 queries NetEase with `'$artist $title'`, and :1753 isTitleMatching accepts by containment; lib/state/library_controller.dart:219-226 teaches `LyricsEngine.knownArtists` from every `isNamed` track.
+
+**Fix.** In _save, treat the text as edited only when it differs from what the sheet opened with: if title == track.title and artist == TrackCredit.artistOf(track), save `track.copyWith(coverUrl: _cover)` only (leave named/matcher/uploader/rawUploader as they were). Set named: true / matcher: 0 only when the title or artist field actually changed.
+
+## 53. [medium] Every library write failure is swallowed, so 编辑信息 / playlists / favourites report success and the edit is lost on next launch; '保存失败，请重试' is unreachable
+
+- Finder: find:sweep-conformance (ab0254) · Category: data-loss · `lib/services/database_service.dart:453`
+
+**Scenario.** Storage is full (a music downloader fills storage by design) or the documents volume returns an I/O error. The listener renames a song, creates a playlist, adds 20 songs to it, favourites a track. Each sheet closes normally and the UI shows the change, because the in-memory lists were mutated before the write. On the next launch the old JSON files are loaded: the names, the playlist and the favourites are gone, with no message ever shown. Lyrics behave differently ('歌词已应用，但未能保存'), which shows the intended contract.
+
+**Evidence.** lib/services/database_service.dart:453-461 `static Future<void> _persistDownloaded() async { try { ... await _writeJsonAtomically(...); } catch (e) { debugPrint('DatabaseService _persistDownloaded error: $e'); } }`; identical catch-and-log in _persistRecentlyPlayed (:463-471), _persistPlaylists (:473-487, which then still emits the library update), _persistSearchHistory (:489-497), setPref (:836-843) and savePlaybackSession (:864-874). lib/services/audio_download_service.dart:141-143 saveTrackMetadata: `} catch (e) { debugPrint('saveTrackMetadata error: $e'); }`. So DatabaseService.updateTrackMetadata (:521-548) cannot throw for a write failure. Caller: lib/widgets/track_info_sheet.dart:99-108 `try { await DatabaseService.updateTrackMetadata(updated); AppServices.instance.handler.updateTrackMetadata(updated); if (mounted) Navigator.pop(context); } catch (error, stack) { ... showAppSnackBar(..., message: '保存失败，请重试'); }` - the catch branch is dead. _writeJsonAtomically itself (:389-391) rethrows and even verifies the bytes that landed (:375-387), but no caller except writeStoreFile (lyrics, :890-893) lets that reach the UI. debugPrint is a no-op in release (lib/main.dart:20), so nothing is logged either.
+
+**Fix.** Let the _persist* helpers rethrow (keep the debugPrint), and have the mutators either roll back the in-memory change or surface the failure: at minimum TrackInfoSheet's existing catch then works, and playlist/favourite actions can show one shared snackbar ('未能保存，请检查存储空间'). Keep swallowing only for best-effort stores (session, recently played).
+
+## 54. [medium] 下载并播放 that finishes while the app is in the background starts playback without a foreground service on Android 12+ (no notification, no wake lock, no media session)
+
+- Finder: find:journey-first-play (ad56e0) · Category: platform · `lib/services/audio_player_handler.dart:590`
+
+**Scenario.** Android 12+, battery-optimisation exemption not granted. Open the app (cold start, or more than 30 minutes after pausing), search, tap a result that is not downloaded -> 下载并播放 (snackbar 下载完成后播放). Nothing has played in this process, so the media service is not in the foreground. Lock the screen or switch apps while the file downloads (a long recording on mobile data takes well over the ~5 s grace period). When the download lands, _install calls _player.play(): ExoPlayer starts, but audio_service's enterPlayingState throws inside startForegroundService. Result: the song plays from a background process with no notification, no lock-screen/headset controls and no wake lock, and is cut off when the system freezes or kills the cached process (or the song never audibly starts). The state only heals when the listener returns to the app and toggles pause/play. When a song was already playing or paused earlier in the session the service is already foreground and the path works, which is why this is easy to miss in testing.
+
+**Evidence.** lib/services/audio_player_handler.dart:638 `if (!await _ensureLocal(track, token)) return;` ... :657 `await _install(tracks, start, token: token);` and in _install :590 `if (autoplay) _startPlayback();` -> :596 `unawaited(_player.play()...)`. Nothing on this path looks at the app lifecycle or at whether the media service is already in the foreground.
+
+The handler's own header (:38-42) states the constraint: "resuming after an audio interruption never has to start a foreground service from the background — which Android 12+ forbids". main.dart:50 `androidStopForegroundOnPause: false` only keeps the service in the foreground AFTER something has played; on a fresh launch (session restored paused, :717 `autoplay: false`) or after the 30-minute idle stop the service is not in the foreground.
+
+audio_service-0.18.19 AudioService.java:523-526 `boolean wasPlaying = this.playing; ... this.playing = playing;` then :559-560 `if (!wasPlaying && playing) { enterPlayingState();` and :705-712 `private void enterPlayingState() { ContextCompat.startForegroundService(this, new Intent(AudioService.this, AudioService.class)); ... acquireWakeLock(); mediaSession.setSessionActivity(contentIntent); internalStartForeground(); }` - no try/catch; startForegroundService throws ForegroundServiceStartNotAllowedException when the app is in the background (targetSdk = flutter.targetSdkVersion, android/app/build.gradle:38). The throw is caught only at AudioServicePlugin.java:998-1000 `catch (Exception e) { e.printStackTrace(); result.error(e.getMessage(), null, null); }` and on the Dart side swallowed at audio_service.dart:1137-1138 `catch (e) { _asyncError.add(e); }`. Because `this.playing` was already set to true before the throw, later setState calls see wasPlaying == true and never retry enterPlayingState; mediaSession.setActive(true), acquireWakeLock() and startForeground() are all skipped for that whole stretch of playback. ExoPlayer itself is started by just_audio independently, so audio does begin.
+
+**Fix.** Do not autoplay from the background unless the service is already in the foreground. In playTrack/_install, when the request had to wait for a download and `WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed` and nothing has played since launch/idle stop (track a `_serviceForeground` flag set on the first playing=true and cleared in stop()), install with autoplay: false and start playback on the next `resumed` (AppShell already observes the lifecycle), or simply leave it ready and say so. Alternatively put the service in the foreground when a play-path download starts (a brief play/pause-free `AudioService` foreground entry is not exposed by the plugin, so the lifecycle gate is the minimal fix).
+
+## 55. [medium] Saving 编辑信息 after changing only the cover marks an un-named song as listener-named with its raw video title
+
+- Finder: find:journey-library (aab062) · Category: correctness · `lib/widgets/track_info_sheet.dart:90`
+
+**Scenario.** A song has just been downloaded (auto-matching is still running its lookups, or is switched off, or found nothing), so its title is still e.g. "【4K60帧】周深《大鱼》现场 纯享版". The listener opens 编辑信息, taps the artwork, picks a picture and presses 保存 without touching the text fields. The track is stored as named=true, matcher=0, title = the video title, uploader = whatever the offline parser guessed (the UP主 when the title has no readable singer). From then on: automatic matching never names it (this or any later matcher generation), the in-flight lookup is discarded (track_naming.dart:170-177 sees `named` changed), lyric lookup searches for the full video title as a song name instead of the parsed 大鱼, and the guessed artist (possibly the UP主) is fed to the matcher as a known singer for other videos.
+
+**Evidence.** lib/widgets/track_info_sheet.dart:81-98: the early-out only fires when title, artist AND cover are all unchanged; otherwise `final updated = track.copyWith(title: title, uploader: artist.isEmpty ? TrackCredit.artistOf(track) : artist, coverUrl: _cover, named: true, matcher: 0, rawUploader: track.isNamed ? null : track.uploader);` -- `named: true` and `matcher: 0` are set unconditionally, even when the title field still holds the prefilled video title (line 37 `TextEditingController(text: widget.track.title)`) and the artist field the parsed guess (line 39).
+Consumers of that flag: lib/services/track_naming.dart:97-98 `_settled(track) => track.isNamed && (track.matcher == 0 || track.matcher == matcher)` so autoName/_name never look at it again; lib/state/lyrics_controller.dart:61-64 `_namedBy` returns `(song: track.title, artist: track.uploader)` for a named track, and :184-188 passes that to `LyricsEngine.autoFetchLyrics(track.rawTitle, song: named.song, ...)`, where lyrics_engine.dart:2146 `final title = song ?? cleaned['songTitle']!` uses the whole video title as the song name; lib/state/library_controller.dart:219-225 teaches `LyricsEngine.knownArtists` from every `isNamed` track, and lyrics_engine.dart:1350 `if (isOwn(norm) || _knownArtists.containsKey(norm)) return true;` then trusts that name as a singer without asking NetEase.
+
+**Fix.** In _save, only claim the name when the listener actually changed title or artist: if `title == track.title && artist == TrackCredit.artistOf(track)` keep `named`, `matcher`, `uploader` and `rawUploader` as they are and write just the new cover (`track.copyWith(coverUrl: _cover)`).
+
+## 56. [medium] The session "no lyrics" memo is keyed by track id only: a song renamed while it is not the playing track keeps showing 暂无歌词 and is never looked up under its new name
+
+- Finder: find:journey-lyrics (aecb45) · Category: correctness · `lib/state/lyrics_controller.dart:178`
+
+**Scenario.** 1) Download several songs from search and play through them. Song A (title e.g. a messy live-clip title) starts; the lyric lookup uses the raw-title parse, finds nothing, A enters `_misses`, pane shows 暂无歌词. 2) The listener skips on (or A ends). A's automatic naming, queued behind the other new downloads, completes now and names it 大鱼 / 周深 - or the listener, having seen 暂无歌词, opens A's row in the library and fixes the name in 编辑信息 precisely so that lyrics can be found. 3) A plays again in the same process (the playback service keeps the process alive for hours or days): no request is made, 暂无歌词 again, although the song now has a name that both providers would match. Only 重新匹配, a second edit while it is playing, or killing the app recovers. The controller's own comment at 131 says a better name deserves a fresh lookup; that only holds when the rename happens while the song is on air.
+
+**Evidence.** lib/state/lyrics_controller.dart:46-48 `/// Songs the databases had nothing for, this session ...` / `final Set<String> _misses = {};`
+lib/state/lyrics_controller.dart:178-181 `if (_misses.contains(track.id)) { publish(Lyrics.none); return; }` - consulted before any request, with no regard to the name the miss was recorded for.
+lib/state/lyrics_controller.dart:189-190 `if (fresh.isEmpty) _misses.add(track.id);` / `if (!owns()) return;` - the miss is recorded for the query built from the Track instance passed to that _load (183-188 `_namedBy(track)` / `autoFetchLyrics(track.rawTitle, song: named.song, artist: named.artist)`), and is recorded even when that lookup no longer owns the track.
+The only rename handling is for the track that is playing at the moment of the rename: lib/state/lyrics_controller.dart:130-135 `if (track.id == _trackId) { ... if (nameKey == _nameKey || state.value.lyrics.pinned) return; _misses.remove(track.id); }`. A rename of a track that is not current never reaches the controller: lib/services/audio_player_handler.dart:932-935 `updateTrackMetadata` only does `_latest[updated.id] = updated; _publish();` and _publish (229-237) touches nowPlaying only when the current source is that track. When the song is played later, `track.id != _trackId`, so line 134 is skipped and line 178 answers from the stale memo.
+Both rename routes hit this: lib/widgets/track_info_sheet.dart:99-100 (编辑信息 opened from any list row via track_sheet.dart:210, for a song that is not playing) and lib/services/track_naming.dart:115-118 `_save` (automatic naming is a serial queue, track_naming.dart:105-107 `_queue = _queue.then((_) => _name(track))`, so with several fresh downloads it routinely lands after the listener has moved to another song).
+
+**Fix.** Record what was asked, not just for whom: make `_misses` a `Map<String, String>` of track id -> `_nameKeyOf(track)` (the name the empty lookup was made with) and treat it as a miss only when the stored key equals the current track's key (`_misses[track.id] == _nameKeyOf(track)`). Also move the `_misses` write below the `owns()` check or key it with the looked-up track's name, so a lookup made under an old name cannot mark the renamed song.
+
+## 57. [medium] A naming answer reached with missing or partial Bilibili hints is written to the library as final (matcher = current)
+
+- Finder: find:journey-matching (a38eca) · Category: correctness · `lib/services/track_naming.dart:124`
+
+**Scenario.** Bilibili refuses the view/tag or the WBI-signed player/wbi/v2 request (412 risk control, the state release 0.1.2 was about) while NetEase answers. A cover uploaded by UP主 小明 in the 翻唱 zone, titled e.g. "大鱼 周深", is downloaded. With hints the zone/tags mark it a rendition and the performer becomes the UP主; with VideoHints.none (or with musicTitle silently empty because only the recognition request failed) the title-only path credits 周深 as exact, replaces the thumbnail with the release artwork, and stores matcher 4. Because the song is now settled it is never asked about again when Bilibili is reachable. The same happens on a matcher bump: the one re-check of an old answer is spent without hints and stamped with the new generation.
+
+**Evidence.** track_naming.dart:124-125 `final hints = await BilibiliSdk.fetchVideoHints(before.bvid, cid: before.cid);` -- the result is never checked for completeness outside the legacy branch (134 `if (hints.owner.isEmpty && before.rawUploader == null)` is inside `if (legacy)`).
+bilibili_sdk.dart:247-248 "Never throws: offline (or refused) is [VideoHints.none], and is asked again next time"; 261 `if (view is! Map && tags is! List) return VideoHints.none;`; 269 `final music = part == 0 ? null : await _recognisedMusic(bvid, part);` then 288 `musicTitle: music?.title ?? ''`; 291-292 "Half an answer (one request failed) is used but not kept." -- only the in-memory memo declines to keep it.
+lyrics_engine.dart:926 `var incomplete = results.contains(null);` tracks only NetEase failures; with hints empty the function still reaches 1244 `_remember(memoKey, identity)`, so track_naming.dart:148 `identitySettled` is true and 188-196 saves `named: true, matcher: matcher` (or 180-183 stamps an older answer with the new matcher).
+track_naming.dart:95-96 `_settled` then stops any further look.
+
+**Fix.** Have fetchVideoHints report completeness (e.g. a `complete` flag false when view, tags or music could not be fetched) and in `_name` treat an incomplete fetch like the offline case: `_attempted.remove(track.id); return;` before asking, for both the legacy and normal paths.
+
+## 58. [medium] Parts of a multi-part video are named after a song the video-wide tags mention, not the part
+
+- Finder: find:journey-matching (a38eca) · Category: correctness · `lib/services/lyrics_engine.dart:902`
+
+**Scenario.** A concert uploaded as parts: video "周深 2023演唱会" tagged 周深, 大鱼; P1 "开场", P2 "大鱼", P3 "Talk", P4 a song NetEase does not list. P1/P3/P4 are downloaded. Their own names find nothing; the tag query "周深 大鱼" returns 大鱼 by 周深, credited through the video title, so each part is saved as 大鱼 / 周深 with the 大鱼 release artwork (bestExact) whenever Bilibili recognised no music in that part (speech, or the recognition request failed). The library ends up with several different recordings all named 大鱼.
+
+**Evidence.** track_naming.dart:81-83 asks about `track.partTitle` with `context: track.rawTitle`; bilibili_sdk.dart:257 fetches tags per bvid (video-wide), only music is per cid.
+lyrics_engine.dart:902-906 adds up to two tags as song queries: `queries.putIfAbsent('$searchArtist $t'.trim(), () => {'song': t, 'tag': '1'});`
+970 `final named = isolated || inRaw || tagNorms.contains(nameNorm);` -- a tag alone makes the song "named".
+730 `var normCredits = normRaw + _normalize(_preprocess(context));` so the singer in the video title credits every part; 1021-1022 `final onlyTags = !inRaw && (fromTag || !isolated); if (onlyTags && inTitle.isEmpty && !original) continue;` therefore passes.
+1084 `bestExact = inTitle.isNotEmpty && !bestRendition;` and the only veto is 1102 `if (hints.musicTitle.isNotEmpty && !bestApart)`, which needs Bilibili to have recognised some other music in that part.
+
+**Fix.** When `context` is non-empty (a part), do not let a tag stand in for the name: skip the tag-song queries, or require `inRaw` (the part's own name contains the song) for tag-sourced candidates.
+
+## 59. [medium] Switching 自动匹配歌曲信息 off does not stop lookups already queued or in flight
+
+- Finder: find:journey-matching (a38eca) · Category: correctness · `lib/services/track_naming.dart:119`
+
+**Scenario.** The listener batch-downloads an album (20 parts). Each arrival is enqueued by LibraryController.reload (library_controller.dart:202-204) on the serial `_queue`; each lookup takes seconds. Seeing the first few songs renamed wrongly, the listener opens 设置 and turns the toggle off. The remaining ~17 queued songs are still looked up and renamed over the next minute, with the switch showing off. Each must then be fixed by hand.
+
+**Evidence.** track_naming.dart:100-106: `if (!enabled || _settled(track) || !_attempted.add(track.id)) return; _queue = _queue.then((_) => _name(track))...` -- `enabled` is read only when a job is enqueued.
+track_naming.dart:119-197 `_name` never reads `enabled`; 188-196 writes the new title/artist/cover unconditionally.
+track_naming.dart:48-51 `setEnabled` only flips the flag and saves the pref.
+
+**Fix.** Check `if (!enabled) { _attempted.remove(track.id); return; }` at the top of `_name` and again just before the final `_save` calls.
+
+## 60. [medium] Lyrics fetched from the raw-title parse survive a rename to a different song
+
+- Finder: find:journey-matching (a38eca) · Category: correctness · `lib/state/lyrics_controller.dart:151`
+
+**Scenario.** A new download starts playing. Lyrics are fetched for what the offline parser reads from the video title (say the show name in the first 《》, or the right name but another artist's song of that name, since no artist is known) and stored. Seconds later auto-naming names it a different song/artist using Bilibili's recognition. nowPlaying notifies, the name key differs, `_load` runs again, finds the stored lyrics, `_matches` passes because the stored title still matches the raw-title parse, and the old lyrics are republished. They stay on every later play (the store is persistent) until the listener manually re-matches. If naming happens to finish first the result is correct, so the outcome depends on request timing.
+
+**Evidence.** lyrics_controller.dart:131-134 "Same song, edited metadata. A better name deserves a fresh lookup" -> `_load(track, generation)`.
+lyrics_controller.dart:148-154 `_matches`: `final parsed = LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ?? ''; return LyricsEngine.isTitleMatching(storedTitle, parsed) || LyricsEngine.isTitleMatching(storedTitle, track.title);`
+lyrics_controller.dart:172-177 `if (stored != null && stored.isNotEmpty && (stored.pinned || _matches(stored, track))) { publish(stored); return; }` -- returns before the fresh lookup at 183-188 that would use `named.song` / `named.artist`.
+The first lookup on a new download runs from the parse (61-64 `_namedBy` gives no song/artist for an unnamed track) and is stored by putAutomatic (192) typically before TrackNaming's slower chain (hints + several searches) lands via handler.updateTrackMetadata.
+
+**Fix.** For a named track compare stored lyrics only against `track.title` (drop the raw-title parse branch when `track.isNamed`), and when the name key changed on the playing track skip the stored-automatic shortcut altogether.
+
+## 61. [medium] Once a download has filled the disk, every library write fails silently while the UI confirms it; the kept .part keeps the disk full
+
+- Finder: find:journey-hostile (aa1f92) · Category: data-loss · `lib/services/database_service.dart:483`
+
+**Scenario.** Storage runs out while a long video downloads (ENOSPC). The partial file stays on disk, so the app's free space stays at zero. The listener, unaware, keeps using the app: favourites three songs (heart turns on), creates a playlist and adds songs ('已加入「…」'), edits a song's name in 编辑信息 (sheet closes as saved), plays for an hour. Every one of those writes failed in the temp-file step and was only logged. When the process is next killed, all of it is gone: favourites, the playlist, the edit, the listening position and 最近播放 revert to the last state written before the disk filled. Nothing ever told the listener a save failed.
+
+**Evidence.** Every persister swallows the write error. lib/services/database_service.dart:473-487 `_persistPlaylists`: `} catch (e) { debugPrint('DatabaseService _persistPlaylists error: $e'); }` followed by `if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);` - the success event is emitted even when the write failed. Same pattern at :453-461 (_persistDownloaded), :463-471 (_persistRecentlyPlayed), :864-874 (savePlaybackSession), :836-843 (setPref). Callers then confirm: lib/widgets/track_sheet.dart:304-305 `await DatabaseService.addTracksToPlaylist(playlist.id, tracks); showAppSnackBar(messenger, message: '已加入「${playlist.name}」');`; database_service.dart:736-738 toggleFavorite `await _persistPlaylists(); return true;`. lib/widgets/track_info_sheet.dart:99-108 has a `catch` that shows '保存失败，请重试', but DatabaseService.updateTrackMetadata (:521-548) can never throw, so that path is dead. Each write needs room for a second full copy: :358-359 `tmp = File('$path.$unique.tmp'); await tmp.writeAsString(payload, flush: true);`. What holds the disk full: lib/services/audio_download_service.dart:354-357 `// Deliberately keep the .part file: the next attempt resumes it via Range` - the partial file that consumed the last free bytes is never removed (no code in lib/ deletes a .part except AudioDownloadService.delete, :233, reachable only for a track that is already in the downloaded list).
+
+**Fix.** Let persist failures surface: have the _persist* helpers return success (or rethrow) and make the mutating API propagate it, so callers show '保存失败' instead of the success snackbar (track_info_sheet already has the branch). At minimum emit one user-facing message through a stream AppShell listens to when a write fails. Separately, delete the .part (and its note) when the transfer fails with a FileSystemException rather than a network error.
+
+## 62. [low] Re-downloading from a search result re-registers the raw video copy, and auto-matching then overwrites the listener's own naming that 删除下载 promised to keep
+
+- Finder: find:downloads (aa27dc) · Category: data-loss · `lib/services/database_service.dart:770`
+
+**Scenario.** The listener names a song by hand (编辑信息), keeps it in 收藏, later uses 删除下载 to free space. Weeks later they search for it again and download it from the Bilibili results. The library, player and track sheet now show the raw video title/UP主; with 自动匹配 on (default) the matcher runs on that raw copy and its guess overwrites the hand-edited title/artist/cover in 收藏 and every playlist. Downloading from the playlist row instead keeps the edit.
+
+**Evidence.** lib/services/database_service.dart:775-786 removeDownloadedTrack: `/// Deletes the local audio for [track] but preserves the user's collection: playlist membership, Favorites, metadata and history all stay.` — it drops the entry from `_downloadedTracks` (:782) and AudioDownloadService.delete removes the meta JSON (audio_download_service.dart:229-235), so the edited copy survives only in playlists/recents. database_service.dart:767-771 saveDownloadedTrack: `if (_downloadedTracks.any((t) => t.id == track.id)) return; _downloadedTracks.insert(0, track);` inserts whatever copy the caller holds; from search that is the raw API Track (bilibili_sdk.dart:616-625, title = video title, named = false). library_controller.dart:202-204 `if (!known.contains(track.id)) TrackNaming.autoName(track);`; track_naming.dart:122-124 `_name` reads the library copy (`before = await _stored(track.id)`), which is not settled, and :195-203 saves the matcher's answer through DatabaseService.updateTrackMetadata, which (database_service.dart:532-537) does `pl.tracks[idx] = updated` for every playlist — replacing the copy with `named: true, matcher: 0`. models/track.dart:45-48 states the matcher must never revisit the listener's answers.
+
+**Fix.** In saveDownloadedTrack, when a playlist or recents already holds this id with isNamed, register that copy (carrying over loudness) instead of the caller's.
+
+## 63. [low] Abandoned partial downloads are never removed and are invisible in storage management
+
+- Finder: find:downloads (aa27dc) · Category: resource-leak · `lib/services/audio_download_service.dart:355`
+
+**Scenario.** Start downloading a long video (a concert or compilation, 100+ MB), lose the connection at 80 %, then tap 忽略 or simply restart the app and never download that exact video again. The `.part` stays in bilibeat_audio for the life of the install, is not listed or counted anywhere in the app, and cannot be removed short of clearing app data. Every abandoned or failed 下载并播放 adds another.
+
+**Evidence.** lib/services/audio_download_service.dart:354-359 `} catch (e) { // Deliberately keep the .part file: the next attempt resumes it ...`. The only code that deletes `.part` / `.part.json` is `delete()` (:229-235, reached only through removeDownloadedTrack for a completed download) and `_discardPart` inside a new attempt for the same id. download_manager.dart:105-108 `void dismissFailed(String trackId) { if (_failed.remove(trackId) != null) _notify(trackId); }` drops only the record; :58-61 failures are not persisted, so after a restart nothing references the file. Playback-path failures (audio_player_handler.dart:608-615) are never listed at all. `grep -rn "\.part" lib` finds no sweep; database_service.dart:214-306 `_discoverAudioFiles` only looks at `.ready` files. audio_download_service.dart:201-205 storageBreakdown counts only `.m4a` files with a `.ready` sibling, so the bytes do not appear in the 下载 sheet total. ensureDownloaded also writes `audio_<id>.json` before any byte is fetched (:275), which is likewise left behind.
+
+**Fix.** Delete the partial in dismissFailed, and sweep bilibeat_audio at startup (next to _discoverAudioFiles) for `.part`, `.part.json`, `.tmp` and meta/audio files with no `.ready` sibling older than a few days.
+
+## 64. [low] A failed download stays listed as failed after the same song is downloaded through 下载并播放
+
+- Finder: find:downloads (aa27dc) · Category: ux · `lib/services/download_manager.dart:127`
+
+**Scenario.** Tap 下载 on a search result; it fails. Then open the song's sheet and tap 下载并播放 (track_sheet.dart:86-91 -> handler.playTrack -> ensureDownloaded, untracked); it succeeds and plays. The home top bar keeps showing the red error icon, and the 下载 sheet shows the song twice — once as '下载失败' with 重试/忽略 and once as a stored download — until the user taps one of those buttons.
+
+**Evidence.** lib/services/download_manager.dart:58-61 `Cleared per item on success, retry, or explicit dismiss.` but the only removals are :94 (retry), :107 (dismiss) and :130 (a new tracked start). A playback-path completion reaches :149-156 `if (task == null) { ... if (p.done) _notify(p.trackId); return; }` — `_failed` is untouched; and :127 `if (alreadyDownloaded) return;` returns before :130 `_failed.remove(track.id);`. library_controller.dart:209/:240 feed `failedTasks.length` to app_shell.dart:244-245/:264-266 (red icon); download_management_sheet.dart:133-137 lists every `_failed` entry as '下载失败' while :160-170 lists the same track under downloaded.
+
+**Fix.** Remove `_failed[p.trackId]` in _onProgress when a `done` event arrives, and in startDownload before returning on `alreadyDownloaded`.
+
+## 65. [low] The 416 'already complete' shortcut skips the size sanity check, so a rejected sub-1 KiB body is accepted as a finished download on the next attempt
+
+- Finder: find:downloads (aa27dc) · Category: correctness · `lib/services/audio_download_service.dart:454`
+
+**Scenario.** A CDN node answers 200 with a short non-audio body that is not text/* or JSON (e.g. a 300-byte application/octet-stream error) with Content-Length 300. Attempt 1 correctly fails with 音频文件异常 but leaves a 300-byte .part and a note with total 300. On retry, if the link resolves to the same object, `bytes=300-` gets 416, total == existing, and the 300-byte file becomes a 'downloaded' song in the library that the player can only skip ('有歌曲无法播放，已跳过').
+
+**Evidence.** lib/services/audio_download_service.dart:555-557 `if (received < 1024) { throw Exception('音频文件异常 ($received 字节)'); }` runs after the body was written and the note saved (:514-516 `{'total': total, 'validator': ...}`), and the catch at :354-359 keeps both files. On the next attempt :437-438 sends `Range: bytes=$existing-`; :451-456 `if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable && existing > 0) { await res.drain<void>(); if (known?.total == existing) { return (received: existing, total: existing); }` returns success without re-applying the <1024 check, and _download (:319-353) renames the part, writes `.ready`, sets the memo and registers the track.
+
+**Fix.** Discard the part and note before throwing at :555-557 (such a body is never worth resuming), and/or require `existing >= 1024` in the 416 branch.
+
+## 66. [low] The 重试 button for a failed results page does nothing for 3 seconds after it appears
+
+- Finder: find:network (a127be) · Category: ux · `lib/state/online_search_controller.dart:98`
+
+**Scenario.** Scroll to the end of results while offline: the next page fails and 重试 appears. Tap it straight away (within 3 s): loadMore returns before `_loadingMore = true`, so there is no spinner, no request and no feedback - the button looks dead. Only a tap after the window has passed works.
+
+**Evidence.** online_search_controller.dart:98-101 `if (_loadMoreFailed &&` / `DateTime.now().difference(_lastFailure) < const Duration(seconds: 3)) {` / `return;`. `_lastFailure` is set at the moment the failure is published (123-124), which is the moment the button is shown: search_view.dart:253-254 `else if (_online.loadMoreFailed)` / `SliverToBoxAdapter(child: Center(child: _retry(_online.loadMore))),`. The explicit tap and the scroll trigger share the one throttled entry point.
+
+**Fix.** Give the button its own entry point (e.g. `loadMore({bool force = false})` or a `retryLoadMore()` that skips the quiet-window check); keep the window for scroll-triggered calls only.
+
+## 67. [low] A failed recommendations page is retried on every scroll notification (no quiet window, unlike search)
+
+- Finder: find:network (a127be) · Category: resilience · `lib/state/recommendations_controller.dart:81`
+
+**Scenario.** Bilibili starts refusing search (412 / -352) while the listener scrolls 为你推荐. Every scroll notification near the bottom starts a new pass of up to 16 requests the instant the previous one fails, for as long as the finger moves - hammering the API precisely when it is rate-limiting, and toggling the footer spinner each time. Offline the same loop spins without the network.
+
+**Evidence.** recommendations_controller.dart:81-86 `} catch (e) {` / `debugPrint('Load more recommendations error: $e');` / `if (pass != _pass) return;` / `}` / `_loadingMore = false;` / `notifyListeners();` - no failure flag, no timestamp. The guard at 62 is only `if (_loading || _loadingMore || _reachedEnd || _tracks.isEmpty) return;`. Caller: search_view.dart:77-78 `if (widget.query.value.trim().isEmpty) {` / `_recs.loadMore();` on every ScrollNotification within 320 px of the end. OnlineSearchController has the guard for exactly this (96-101 `A failed page gets a quiet retry window instead of re-firing on every scroll pixel`). One attempt is 4 seeds (recommendation_engine.dart:186-188), each up to two _searchOnce calls of two HTTP requests (bilibili_sdk.dart:496-501, 535-550).
+
+**Fix.** Mirror the search controller: record `_lastFailure` in the catch block and return early from loadMore for a few seconds after a failure (with a separate path for an explicit retry).
+
+## 68. [low] Short-link resolution downloads the whole video page inside a 6 s budget and discards a redirect it already has
+
+- Finder: find:network (a127be) · Category: resilience · `lib/services/bilibili_sdk.dart:108`
+
+**Scenario.** On a slow mobile connection paste `【周深《大鱼》-哔哩哔哩】 https://b23.tv/AbCdEfG`. b23.tv answers its 302 in a second, but connecting to www.bilibili.com and reading the page pushes the total past 6 s; the outer timeout fires and the Location that already named the BV is thrown away. The app then keyword-searches the title-plus-URL text and shows unrelated results or 没有找到.
+
+**Evidence.** bilibili_sdk.dart:108-115 `// Let HttpClient follow redirects automatically; we inspect redirects` / `final res = await req.close().timeout(const Duration(seconds: 5));` / `final body = await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 5)).catchError((_) => '');` - the id is read from `res.redirects.last.location` (117-118) only after the final page (the www.bilibili.com video HTML, hundreds of KB) has been fetched. The caller caps everything: 478-479 `await _resolveShortLink(query).timeout(const Duration(seconds: 6));`, and on TimeoutException (484-486) falls through to a keyword search of the whole share text.
+
+**Fix.** Set `req.followRedirects = false` and read the `Location` header of the first response (looping manually over at most a couple of b23.tv/bilibili.com hops); only fall back to reading a body when there is no redirect.
+
+## 69. [low] Short-link handling accepts any URL that merely contains "b23.tv" and follows redirects to arbitrary hosts and schemes
+
+- Finder: find:network (a127be) · Category: security · `lib/services/bilibili_sdk.dart:97`
+
+**Scenario.** The listener pastes share text containing `https://b23.tv.example.cn/x` or `https://example.cn/?u=b23.tv`. The app sends a GET to that host (revealing the device's IP), follows its redirects wherever they lead - including plain http and LAN addresses such as http://192.168.1.1/ - buffers up to 5 s of response in memory, and shows whichever video the page's first BV id names as the result of the search.
+
+**Evidence.** bilibili_sdk.dart:87-91: when the short-domain regex does not match, `RegExp(r'https?://[^\s]+').firstMatch(input)` takes the first URL of any host; the only check is a substring test, 97-99 `if (!urlStr.contains('b23.tv') && !urlStr.contains('bili2233.cn') && !urlStr.contains('acg.tv')) {`. Line 94 keeps a pasted `http://`. Redirects are followed by default (dart:io `_followRedirects = true`, `_maxRedirects = 5`, any http/https target; Flutter's engine leaves `may_insecurely_connect_to_all_domains = true`, so the manifest's `usesCleartextTraffic="false"` does not constrain dart:io). The body of whatever answers is read without a size limit (111-115) and its first BV-shaped string is trusted: 122-123 `final bvInBody = _bvId.firstMatch(body);` / `if (bvInBody != null) return 'BV${bvInBody.group(1)}';`.
+
+**Fix.** Parse the URL and require `uri.scheme == 'https'` and `uri.host` equal to (or a subdomain of) b23.tv / bili2233.cn / acg.tv; do not follow redirects automatically - accept a Location only when its host ends with bilibili.com (or one of the short domains); drop the body scan or cap its size.
+
+## 70. [low] Past the last music-zone page, load-more continues with unfiltered results starting at that page number
+
+- Finder: find:network (a127be) · Category: correctness · `lib/services/bilibili_sdk.dart:501`
+
+**Scenario.** A narrow query has two pages (about 40) of music-zone matches. Scrolling to page 3 gets an empty music answer, so page 3 of the all-zone ranking is appended instead - items 41-60 of a different list, i.e. gameplay/lecture videos, while the 40 best all-zone hits are never shown. The list then keeps growing with such results (two searches per page) instead of ending where the music results end.
+
+**Evidence.** bilibili_sdk.dart:494-501: `musical = await _searchOnce(query, musicOnly: true, page: page);` ... `if (musical != null && musical.isNotEmpty) return musical;` / `return _searchOnce(query, musicOnly: false, page: page);`. The empty-means-fallback rule was written for page 1 (comment 489-493: `fall back to an unfiltered search rather than telling the user their song does not exist`) but applies to every page; a page past the end of the music zone is a normal empty answer (630 `return [];`). The filter's purpose is stated at 522-523: `a keyword search that returns lectures, gameplay and news is noise`. RecommendationEngine pages the same call (recommendation_engine.dart:188).
+
+**Fix.** Decide the mode on page 1 and keep it: have the controller remember whether page 1 came from the music zone (or pass a `musicOnly` flag back), and for page > 1 query only that mode so an empty page ends the list.
+
+## 71. [low] A multi-part video found by keyword is offered as one song: part 1's audio under the whole video's title and total length
+
+- Finder: find:network (a127be) · Category: correctness · `lib/services/bilibili_sdk.dart:616`
+
+**Scenario.** Search 周深 专辑 and tap a result that is a 12-part album upload shown as 48:00. Only P1 (one 4-minute song) is downloaded, stored under the album video's title with duration 2880 s; there is no sign that eleven more parts exist and no way to reach them except finding the BV number elsewhere and pasting it. Because 2880 s exceeds the 15-minute limit, the matcher never names the track either.
+
+**Evidence.** bilibili_sdk.dart:611-625: `// Search results are always the video's first part, and the search API does not return a cid` ... `id: '${bvid}_p1',` / `cid: item['cid'] as int? ?? 0,` / `title: cleanTitle,` / `duration: durationSec,` (the video's total). Download: audio_download_service.dart:299 `BilibiliSdk.fetchAudioStream(track.bvid, track.cid)` -> bilibili_sdk.dart:369-373 `if (cid == 0) { final infoList = await fetchVideoInfo(bvid); if (infoList.isNotEmpty) { cid = infoList.first.cid; } }` - the page list is fetched but only the first cid is used, and nothing writes the part's title, cid or duration back to the Track. Naming then uses that duration (track_naming.dart:74 `durationSeconds: track.duration`). The parts are only listed on the id path (_tracksOfView, 221-237).
+
+**Fix.** When fetchAudioStream (or the track sheet) resolves a cid-less track and `infoList.length > 1`, surface the parts (e.g. open the id-path listing) or at least store P1's own cid, `"<video> - P1: <part>"` title and part duration on the downloaded Track.
+
+## 72. [low] Links and BV numbers in the search history become taste terms and recommendation seeds
+
+- Finder: find:network (a127be) · Category: correctness · `lib/services/recommendation_engine.dart:102`
+
+**Scenario.** The listener adds songs by pasting links (the empty state suggests 粘贴 BV 号). After three pasted URLs `https`, `www`, `bilibili`, `com` and `video` weigh 6 each, more than a title bigram from a single favourite (3). Two of them become seed queries sent to Bilibili search, and candidates with e.g. `Official Video` or `HTTPS` in the title are boosted by that weight, so unrelated videos enter and rise in 为你推荐.
+
+**Evidence.** recommendation_engine.dart:101-105 `for (final q in searches) { for (final token in tokenize(q)) { terms[token] = (terms[token] ?? 0) + _searchWeight; } }` with tokenize (61-63) taking every `[a-zA-Z0-9]{2,}` run of `LyricsEngine.cleanTitle(text)['songTitle']`. Every submitted query is recorded, pasted links included (online_search_controller.dart:69 `DatabaseService.addSearchHistory(query)`, up to 12 kept). cleanTitle leaves a URL intact apart from splitting on `/` (_noisyClean, lyrics_engine.dart:203), so `https://www.bilibili.com/video/BV1…` yields https, www, bilibili, com, video and the lower-cased id, each +2.0 per link. seedQueries (132-137) takes the heaviest terms after two uploaders; score() (113-115) adds the same weights to any candidate whose title contains them.
+
+**Fix.** Skip history entries that are ids or links when building the profile (`BilibiliSdk.extractBvOrAvId(q) != null || q.contains('://') || q.contains('b23.tv')`), or strip URLs before tokenising.
+
+## 73. [low] Scrolling library matches under an edited, unsubmitted query loads more pages of the previous Bilibili search
+
+- Finder: find:network (a127be) · Category: correctness · `lib/screens/search_view.dart:79`
+
+**Scenario.** Search 周深 on Bilibili, then change the field to 周 without submitting: the view now shows the library matches and the 在哔哩哔哩搜索 row. Scrolling that list near its end silently requests page 2, 3, … of the old 周深 search - network traffic for results that are not on screen, and a previous result list that has grown when the old query is typed back.
+
+**Evidence.** search_view.dart:77-81 `if (widget.query.value.trim().isEmpty) {` / `_recs.loadMore();` / `} else if (_online.hasSearched && _online.results.isNotEmpty) {` / `_online.loadMore();` - there is no check that the on-screen query is the submitted one (`_online.query == query`, the `submitted` test used at 188 to decide what is drawn). OnlineSearchController.loadMore pages `_query`, the last submitted text (online_search_controller.dart:109). The class comment (22-23) promises `Bilibili is only queried on submit ... so typing never fires network requests`; the 3.8.1 fix covered only the cleared field (app_shell.dart:92 `if (text.trim().isEmpty) _services.onlineSearch.clear();`).
+
+**Fix.** Only page online results when they are what is displayed: `else if (_online.query == widget.query.value.trim() && _online.results.isNotEmpty) _online.loadMore();`.
+
+## 74. [low] Favouriting an already-named song from Bilibili results stores the raw search copy in 收藏
+
+- Finder: find:persistence (a475ad) · Category: correctness · `lib/widgets/track_sheet.dart:104`
+
+**Scenario.** A song that is downloaded and named (library shows 大鱼 / 周深 with the album cover) appears in the 哔哩哔哩 section of a search, or in 为你推荐. The listener opens its sheet (⋯ or long-press; the sheet header correctly shows the named copy) and taps the heart. 收藏 now lists it under the raw video title (e.g. 【4K60帧】周深《大鱼》现场 纯享版), with the video thumbnail and a title-parsed artist, while 歌曲 lists 大鱼 — 周深. Nothing reconciles the two until the next 编辑信息 save or a matcher generation bump rewrites all copies.
+
+**Evidence.** lib/widgets/track_sheet.dart:102-105 `Future<void> _toggleFavorite() async { Haptics.light(); await DatabaseService.toggleFavorite(widget.track); }` -- while everything shown in the sheet, and 加入歌单 at :188 `PlaylistPicker.show(parent, [track]);`, uses `_latest()` (:236-243 `/// The library's copy carries any edits made since the sheet's caller captured its [Track].`).
+lib/services/database_service.dart:736 `favorites.tracks.insert(0, track);` (caller's copy stored verbatim).
+lib/screens/search_view.dart:250 `_songs(_online.results),` and 266-269 `return SongTile(track: track, queue: queue, onTap: ...)` -- online rows carry raw search Tracks.
+lib/widgets/song_tile.dart:120-121 `services.library.isDownloaded(track.id) ? _MoreButton(track: track, queue: queue)` and :147 `onPressed: () => TrackSheet.show(context, track, queue: queue),` (also :57 onLongPress).
+
+**Fix.** Pass `_latest()` to toggleFavorite. More robustly, let DatabaseService substitute its own downloaded copy by id whenever it inserts a track into a playlist (toggleFavorite, addTrackToPlaylist, addTracksToPlaylist).
+
+## 75. [low] Artwork of downloaded songs is missing offline: the cover cache only hits on the exact pixel size, and a failed load is never retried
+
+- Finder: find:persistence (a475ad) · Category: resilience · `lib/widgets/cached_cover_image.dart:187`
+
+**Scenario.** On Wi-Fi the listener downloads a batch of songs from search results; only the 48-pt row thumbnails are fetched and cached. Offline (flight, subway) they play them: the mini player (52 pt), the blurred backdrop (64 pt) and the player artwork each ask for a different `@{w}w_{h}h` URL, miss the cache, fail the request and show the music-note placeholder -- for fully downloaded songs whose cover is already on disk at another size. When the connection returns, a widget that already failed (the player artwork or mini player for the current song) stays on the placeholder until the track changes or the page is reopened.
+
+**Evidence.** lib/widgets/cached_cover_image.dart:176-177 `final fetchUrl = CachedCoverImage.sizedUrl(widget.url, _targetW, _targetH);` and 187-188 `final md5Key = md5.convert(utf8.encode(fetchUrl)).toString(); final file = File('${cacheDir.path}/img_$md5Key.img');` -- the cache key is the size-specific URL; there is no lookup of other cached sizes of the same cover.
+:209-211 `} catch (_) { _settle(token, null); }` and :254-256 `} catch (_) { return null; }` -> `_CoverStatus.failed`; the only reload trigger is :131 `if (oldWidget.url != widget.url) {`.
+Sizes requested for one cover: lib/widgets/song_tile.dart:35 `static const double artSize = 48;`; lib/widgets/mini_player.dart `static const double _art = 52;`; lib/widgets/artwork_backdrop.dart:44-45 `width: 64, height: 64`; lib/screens/now_playing_page.dart:622-624 `url: track.coverUrl, width: size, height: size` (full-width artwork); also 104, 112 and 176 pt elsewhere.
+
+**Fix.** Name cache files by source URL plus size (e.g. `img_<md5(url)>_<w>.img`) and, when the wanted size is absent and the fetch fails, fall back to the largest cached variant of the same source; or store one canonical cover per song when it is downloaded. Reset a failed state on the next didChangeDependencies/rebuild after a delay so it retries.
+
+## 76. [low] Cover-cache trim orders by access time, which Android and iOS do not update: it evicts the oldest-downloaded covers, not the least-recently-used
+
+- Finder: find:persistence (a475ad) · Category: platform · `lib/widgets/cached_cover_image.dart:73`
+
+**Scenario.** A library of roughly a thousand played songs: each leaves a ~1000-px player cover (100-250 KB) plus several thumbnails, so the cache passes 200 MB. At the next launch trimCache removes files by oldest `accessed` down to 150 MB. With noatime that is the order the files were first downloaded, so the covers thrown away belong to the longest-held library songs however often they are played, while thumbnails of search results seen once last week survive. Online they are re-fetched (and the churn repeats each launch); offline those songs show the placeholder.
+
+**Evidence.** lib/widgets/cached_cover_image.dart:55-57 doc `Once per launch, when it has outgrown [maxBytes], the covers unused longest go until it is back under three quarters of that.` and :73 `files.sort((a, b) => a.$2.accessed.compareTo(b.$2.accessed));`
+Cache hit path, :190-193 `if (await file.exists() && await file.length() > 0) { _settle(token, file); return; }` -- nothing touches the file on use.
+test/cover_cache_test.dart:15 sets the timestamp by hand (`await file.setLastAccessed(now.subtract(Duration(days: 10 - i)));`), so the test passes regardless of mount options. Android userdata (f2fs/ext4) and the iOS data volume are mounted noatime, so st_atime stays at creation time; this is platform knowledge, not verified on a device.
+
+**Fix.** Record use explicitly: on a cache hit call `file.setLastModified(DateTime.now())` (only when the stamp is older than, say, a day, to avoid a write per row) and sort by `stat.modified`; adjust the test to set modified times.
+
+## 77. [low] Lyrics store rewrites, fsyncs and reads back its whole multi-megabyte file on the UI isolate for every new song and every calibration nudge
+
+- Finder: find:persistence (a475ad) · Category: performance · `lib/services/lyrics_store.dart:155`
+
+**Scenario.** After a few weeks of listening the store holds 300 automatic entries plus pins: about 60 lines x ~75 bytes each, i.e. 1.5-3 MB of JSON. The first play of any new song, and each tap while calibrating lyric timing, builds ~20k line maps, encodes the whole file on the UI isolate, fsyncs it, then reads all of it back, decodes it and compares the strings. That is tens of milliseconds of UI-isolate work per event (dropped frames during the track-change animation and while dragging to calibrate) and megabytes of flash writes per song; session and playlist saves queue behind it on the shared write lock. Figures are estimates from the code, not measured.
+
+**Evidence.** lib/services/lyrics_store.dart:40 `static const int _maxAutomatic = 300;`; :137 `await _persist();` (every putAutomatic); :99 `return _persistIfCurrent(trackId, revision);` (every pin); :155-158 `static Future<void> _persist() => DatabaseService.writeStoreFile(_file, _entries.map((id, lyrics) => MapEntry(id, lyrics.toMap())),);`
+lib/services/database_service.dart:355 `final payload = jsonEncode(data);` (calling isolate), :359 `await tmp.writeAsString(payload, flush: true);`, :378 `if (await File(path).readAsString() == payload) return;`, all under the single `_writeLock` (:349-352).
+lib/screens/now_playing_page.dart:176 `unawaited(_lyrics.setOffset(track, offset)...` -> LyricsController.setOffset -> choose -> LyricsStore.pin, once per calibration action.
+
+**Fix.** Store lyrics one file per track (`bilibeat_lyrics/<id>.json`) with a small index for eviction, so a save touches a few KB. Failing that, encode large payloads with compute/Isolate.run and skip the read-back comparison for this store.
+
+## 78. [low] Every cold start re-reads each song's metadata file and stats three files per song sequentially before the library can load
+
+- Finder: find:persistence (a475ad) · Category: performance · `lib/services/database_service.dart:218`
+
+**Scenario.** With 2,000 downloads each launch performs about 14,000 awaited file operations one after another, parses 2,000 JSON files whose result is discarded, and runs a 2,000 x 2,000 id comparison, all before _ensureLoaded completes. Until then the home page is blank, restoreSession cannot rebuild the queue, and a media-button cold start (handler.play -> restoreSession) waits. Roughly 1-2 s on a phone by estimate, growing with the library; at a few hundred songs it is a few hundred milliseconds.
+
+**Evidence.** lib/services/database_service.dart:118-119 `await _loadTracks('$dir/bilibeat_downloaded.json', _downloadedTracks); await _discoverAudioFiles(dir);` (inside _load, which every getter awaits through _ensureLoaded).
+:228-235 per `.ready` file: `if (await audioFile.exists() && (await audioFile.length()) > 0 && await metaFile.exists()) { ... final metaContent = await metaFile.readAsString(); final trackMap = Map<String, dynamic>.from(jsonDecode(metaContent)); final track = Track.fromMap(trackMap);` -- done even when the track is already in bilibeat_downloaded.json.
+:251 `if (!_downloadedTracks.any((t) => t.id == track.id)) {` (linear scan per file: quadratic overall).
+:272-278 prune loop: `exists = await ready.exists() && await audio.exists() && await audio.length() > 0;` per track, although :218 `final entities = await audioDir.list().toList();` already holds every file name.
+lib/screens/home_page.dart:112 `child: !_library.loaded ? const SizedBox(height: 120)`.
+
+**Fix.** Build a Set of file names from the listing already fetched and decide ready/audio presence from it; keep a Set of downloaded ids and read a metadata file only for keys not in it (the recovery case).
+
+## 79. [low] TrackCredit's cache is emptied wholesale at 2,000 entries, so a larger unnamed library re-parses every title on each library update
+
+- Finder: find:persistence (a475ad) · Category: performance · `lib/services/track_credit.dart:29`
+
+**Scenario.** 自动匹配歌曲信息 is switched off (nothing is ever named), or the matcher could not name them, and the library passes 2,000 songs. One pass over the library needs more than 2,000 distinct cache entries, so the cache is cleared mid-pass and can never serve the next one. Each favourite toggle, finished download or loudness backfill triggers reload; the 歌手 lens, 歌手 sort (N log N comparator calls, two lookups each) and every queue publish then run the regex-heavy LyricsEngine.cleanTitle thousands of times on the UI isolate, giving a visible hitch per library change.
+
+**Evidence.** lib/services/track_credit.dart:18 `if (track.isNamed) return track.uploader.trim();` (only unnamed tracks use the cache), :22-25 `final parsed = LyricsEngine.cleanTitle(track.rawTitle, defaultArtist: track.uploader,)['artist'];`, :29 `if (_cache.length > 2000) _cache.clear();`
+Callers that walk the whole library: lib/state/library_controller.dart:106-111 (artist sort comparator calls `artistOf(a)`/`artistOf(b)` per comparison), :146-147 (`for (final track in _downloaded) { for (final name in artistNamesOf(track)) {`), lib/services/audio_player_handler.dart:252 `queue.add(List<MediaItem>.unmodifiable(tracks.map(_mediaItemFor)));` with :388 `artist: TrackCredit.artistOf(track),`.
+lib/state/library_controller.dart:197 `_downloaded = List.unmodifiable(results[0] as List<Track>);` -- a new list identity on every reload, so the sorted/artists caches (:97, :142) are recomputed after any library event.
+
+**Fix.** Evict instead of clearing (drop the oldest entries of the insertion-ordered map), or compute credits once per reload into a map keyed by track id and let the sort, the artists view and SongTile read from that.
+
+## 80. [low] Covers referenced by a set-aside store are kept for one launch only; the next launch's sweep deletes them
+
+- Finder: find:persistence (a475ad) · Category: data-loss · `lib/services/database_service.dart:125`
+
+**Scenario.** bilibeat_playlists.json cannot be read (damaged tail, or written by a newer build on iOS/macOS where an older build can be installed over it) and is renamed to bilibeat_playlists.json.unreadable; the sweep is skipped in that launch. On the following launch the flag is false again, the playlist store is the fresh empty one, and every picked playlist cover (and track covers referenced only from playlists) older than a day is unreferenced and deleted. When the set-aside file is later repaired or restored, its coverUrl paths point at files that no longer exist.
+
+**Evidence.** lib/services/database_service.dart:124-125 `// With a store set aside, what it referenced is unknown: keep it all.` / `if (!_setAsideAny) unawaited(_sweepCovers(dir));`
+:430-431 `/// Whether a file was set aside in this launch (see [_setAside]).` / `static bool _setAsideAny = false;` -- a process-lifetime flag, set only at :438 inside _setAside.
+:179-191 the sweep keeps only paths referenced by the stores as loaded now: `final used = <String>{ for (final t in _downloadedTracks) local(t.coverUrl), ... }; ... if (entity is! File || used.contains(entity.path)) continue; if ((await entity.lastModified()).isAfter(cutoff)) continue; await entity.delete();`
+
+**Fix.** Skip the sweep whenever any `*.unreadable` file is present in the documents directory (one directory listing), rather than relying on the in-memory flag.
+
+## 81. [low] On iOS the downloaded audio sits in Documents with no backup exclusion, unlike Android where all app data is excluded
+
+- Finder: find:persistence (a475ad) · Category: platform · `lib/services/audio_download_service.dart:67`
+
+**Scenario.** On an iPhone with iCloud Backup on, a multi-gigabyte bilibeat_audio folder is included in every device backup and counts against the iCloud quota (a 5 GB plan fills and backups start failing), and it travels in device-to-device transfers -- the opposite of what the Android configuration states the app intends.
+
+**Evidence.** lib/services/audio_download_service.dart:67-68 `final docs = await getApplicationDocumentsDirectory(); final path = '${docs.path}/bilibeat_audio';`
+android/app/src/main/res/xml/data_extraction_rules.xml: `Nothing in BiliBeat is worth restoring: downloads are re-downloaded and playlists re-created by hand. Opt everything out so no cached audio or credentials ever leak through a device-to-device migration.` with every domain excluded for cloud-backup and device-transfer.
+A search for `isExcludedFromBackup` / `ExcludedFromBackup` across ios/, macos/ and lib/ returns nothing. iOS backs up an app's Documents directory by default (platform behaviour, not verified on a device).
+
+**Fix.** Set `isExcludedFromBackup` (URLResourceValues) on Documents/bilibeat_audio once at startup from the iOS runner, or keep audio under Application Support with that flag set.
+
+## 82. [low] 重新匹配 deletes the song's pinned lyrics from disk before the new lookup, with no confirmation; a failed lookup leaves nothing
+
+- Finder: find:lyrics (a0a674) · Category: data-loss · `lib/state/lyrics_controller.dart:105`
+
+**Scenario.** The listener pasted lyrics for a song the databases do not have and calibrated them. Later they tap 重新匹配 (to see whether a match exists now, or by mis-tap next to 编辑), or do so while offline. The pasted, calibrated lyrics are removed from bilibeat_lyrics.json at once; the automatic lookup finds nothing (or cannot reach the network); the song shows 暂无歌词 and there is no undo.
+
+**Evidence.** lib/widgets/lyrics_sheet.dart:128-132 `void _rematch() { Haptics.light(); Navigator.pop(context); unawaited(_save(() => _lyrics.rematch(widget.track))); }` — one tap on a 48 pt footer button directly beside 编辑 (183-192), no confirmAction.
+lib/state/lyrics_controller.dart:103-110 `_misses.remove(track.id); final cleared = LyricsStore.clear(track.id); if (_isCurrent(track.id)) { ... unawaited(_load(track, generation)); }`
+lib/services/lyrics_store.dart:103-108 clear(): `_entries.remove(trackId); ... return _persistIfCurrent(trackId, revision);` — pinned entries included ("Forgets a track's lyrics (pinned or not)"), written to disk immediately.
+The following _load then goes through autoFetchLyrics; on failure it publishes none and records a miss (lyrics_controller.dart:189). The editor asks before discarding unsaved text (lyrics_sheet.dart:384-386 '放弃修改？') but saved, hand-made lyrics get no such guard, although the store calls them "the listener's work" (lyrics_store.dart:76).
+
+**Fix.** Keep the existing entry until the new lookup returns something (replace on success, restore on an empty/failed result), or ask for confirmation when the current lyrics are pinned.
+
+## 83. [low] Renaming a song does not refresh its automatic lyrics: the reload re-publishes the entry cached under the old name
+
+- Finder: find:lyrics (a0a674) · Category: correctness · `lib/state/lyrics_controller.dart:174`
+
+**Scenario.** An unnamed download titled "光 现场" gets the first NetEase song called 光, which is another artist's. The listener opens 编辑信息 and sets the artist to 陈粒 expecting the lyrics to follow. The controller shows the loading state, finds the cached entry titled 光, `_matches` is true, and the same wrong lyrics come back; no "陈粒 光" search is made. Likewise when auto-matching renames a song a few seconds after its first lyric lookup.
+
+**Evidence.** lib/state/lyrics_controller.dart:130-135 `// Same song, edited metadata. A better name deserves a fresh lookup — unless the listener already settled the lyrics themselves.` ... `_misses.remove(track.id);` then a new `_load`.
+`_load` first consults the cache: 170-177 `final stored = await LyricsStore.get(track.id); ... if (stored != null && stored.isNotEmpty && (stored.pinned || _matches(stored, track))) { publish(stored); return; }`
+`_matches` (148-154) accepts the entry if its title matches the raw video title's parse OR track.title; the artist is never compared. So an artist-only edit always hits the cache, and so does a title edit whenever the cached lyrics were found from the raw-title parse (the normal case for a song first played before it was named, since the lyric lookup and auto-naming start together on the same nowPlaying notification: track_naming.dart:42-45).
+
+**Fix.** On the same-id rename path bypass the cache for unpinned entries (go straight to autoFetchLyrics and keep the old entry only if the new lookup returns nothing), or record the song/artist the lookup was made with on the stored entry and treat a different pair as stale.
+
+## 84. [low] NetEase lyrics without timestamps are discarded in both the automatic lookup and the manual picker
+
+- Finder: find:lyrics (a0a674) · Category: correctness · `lib/services/lyrics_engine.dart:2035`
+
+**Scenario.** A less common Chinese song whose NetEase entry only has unsynced text (lyric body without time tags, which NetEase serves for many user-uploaded tracks). Automatic lookup: 暂无歌词. Manual search in the sheet: the song is not listed, or 没有找到歌词. The text exists at the provider the app queried; the listener has to find and paste it by hand.
+
+**Evidence.** Automatic: lib/services/lyrics_engine.dart:1935 `final lines = parseLrc(rawLrc);` and 1962 `if (lines.isNotEmpty) {` — parseLrc drops every line without a `[mm:ss]` tag (1774-1775 `if (matches.isEmpty) continue;`), so plain-text lyrics yield no lines and the song is skipped with no fallback.
+Manual: 2035 `final lines = parseLrc((json['lrc']?['lyric'] ?? '') as String);` in _netEaseLines, and candidates with no lines are filtered out (2089-2092 `if (l.isNotEmpty) l`).
+LRCLIB's untimed text is kept on both paths (1877-1884 `lines: plainLines(rawLrc)`; 2110 `final lines = parseAny(raw);`), the view has a plain-page mode (lyrics_view.dart:22) and the picker a 无时间轴 badge (lyrics_sheet.dart:302-306). CHANGELOG 6.0.0 lists "无时间轴纯文本展示" as a feature.
+
+**Fix.** Use parseAny for the NetEase body in both places (as the LRCLIB paths do), preferring a synced candidate when one exists.
+
+## 85. [low] With a calibration offset, tapping a line often highlights the previous line (float round-trip between seek target and active-line test)
+
+- Finder: find:lyrics (a0a674) · Category: correctness · `lib/widgets/lyrics_view.dart:109`
+
+**Scenario.** Lyrics calibrated to -0.83 s. While paused, tap a line to jump to it: the player seeks to that line's time, but for roughly one line in six `_indexAt` returns the line before it, so the previous line is highlighted and centred until playback is resumed. While playing, the same lines flash the previous line for one position tick before correcting.
+
+**Evidence.** Seek target: lib/widgets/lyrics_view.dart:172-173 `final seconds = (line.time + widget.lyrics.offset).clamp(0.0, 86400.0); widget.onSeek?.call(Duration(milliseconds: (seconds * 1000).round()));`
+Active-line test: 103 `final at = position.inMilliseconds / 1000.0 - widget.lyrics.offset;` and 109 `if (_lines[mid].time <= at) {`.
+The two are not inverse in IEEE doubles: (t + o) rounded to ms, divided by 1000, minus o can land one ulp below t. Reproducing exactly this arithmetic over random mm:ss.mmm line times gave `t <= at` false for 14–20% of lines with offsets such as -5.2, +0.35, +1.27, -0.83 (and 0.1% with offset 0). Offsets come from calibration rounded to centiseconds (165-168).
+
+**Fix.** Compare in integer milliseconds (precompute each line's displayed time as `((time + offset) * 1000).round()` and test against `position.inMilliseconds`), or add a half-millisecond tolerance to the comparison.
+
+## 86. [low] The lyric sheet's default search ignores the part name of a multi-part video
+
+- Finder: find:lyrics (a0a674) · Category: correctness · `lib/state/lyrics_controller.dart:71`
+
+**Scenario.** An album or concert uploaded as one multi-part video, e.g. part "周深演唱会全场 - P3: 大鱼" that auto-matching did not name. The automatic lookup searches 大鱼. Opening 歌词选项 searches the video title instead, so the candidate list is empty or unrelated and the listener has to retype the song name for every part.
+
+**Evidence.** Automatic lookup uses the part's own name: lib/state/lyrics_controller.dart:61-64 `track.isNamed ? (song: track.title, artist: track.uploader) : (song: track.partTitle, artist: null);`
+The sheet's pre-filled query does not: 67-73 `if (track.isNamed) {...} final parsed = LyricsEngine.cleanTitle(track.rawTitle); return '${parsed['artist'] ?? ''} ${parsed['songTitle'] ?? ''}'.trim();` — rawTitle is the whole video's title (lib/models/track.dart:67-78: parts are titled "<video> - P3: <part>").
+The sheet searches that query as soon as it opens (lib/widgets/lyrics_sheet.dart:47-48, 57).
+
+**Fix.** In defaultQuery use `track.partTitle` as the song when it is non-null (with the artist parsed from rawTitle), mirroring `_namedBy`.
+
+## 87. [low] macOS: scrolling the lyrics with a mouse wheel never enters browsing mode, so the view snaps back at the next line
+
+- Finder: find:lyrics (a0a674) · Category: platform · `lib/widgets/lyrics_view.dart:151`
+
+**Scenario.** macOS build, wheel mouse: the listener scrolls down to read ahead. `_browsing` stays false, no 回到当前 button appears, and as soon as the sung line changes (a few seconds) the list animates back to it. "Scrolling by hand takes over" holds for touch and trackpad only.
+
+**Evidence.** lib/widgets/lyrics_view.dart:151-154 `if (notification is ScrollStartNotification && notification.dragDetails != null) { _resumeTimer?.cancel(); if (!_browsing) setState(() => _browsing = true); }` — browsing is only recognised for drag-initiated scrolls.
+Pointer-signal scrolling does not produce drag details: flutter/lib/src/widgets/scroll_position_with_single_context.dart:224-234 pointerScroll() does `goIdle(); ... forcePixels(targetPixels); didStartScroll(); ... didEndScroll();`, and the idle activity's start notification is `ScrollStartNotification(metrics: metrics, context: context)` (scroll_activity.dart:99-101) with no dragDetails; only DragScrollActivity sets them (scroll_activity.dart:484-491).
+While `_browsing` is false every active-line change calls `_follow()` (lyrics_view.dart:123).
+
+**Fix.** Also enter browsing on a UserScrollNotification, or on a ScrollUpdateNotification that arrives while no programmatic follow is in flight (set a flag around `_follow`).
+
+## 88. [low] Batch add to a playlist reverses the order of the selection (two of the three callers miss the compensation)
+
+- Finder: find:screens (abef45) · Category: correctness · `lib/screens/playlist_page.dart:409`
+
+**Scenario.** Playlist X holds A, B, C in that order. 编辑 → 全选 → 加入歌单 → 新建歌单 (or any other playlist): the target shows C, B, A. Likewise 添加歌曲: tick the first three rows of the picker and they land in the playlist in the opposite order to the one just shown.
+
+**Evidence.** lib/services/database_service.dart:703 `playlist.tracks.insertAll(0, toAdd.reversed.toList());` (doc at :684-687: 'the batch's last item ends up first'). lib/screens/artist_page.dart:34-36 knows this and compensates: `// Inserted front-first, so reverse to keep the page's order.` / `await DatabaseService.addTracksToPlaylist(playlist.id, group.tracks.reversed.toList());`. The other two callers pass display order unchanged: lib/screens/playlist_page.dart:407-409 `final picked = await _SongPicker.show(context, candidates); ... await DatabaseService.addTracksToPlaylist(playlist.id, picked);` (picked is built in picker order at :474-477), and lib/widgets/track_sheet.dart:304 `await DatabaseService.addTracksToPlaylist(playlist.id, tracks);`, reached from playlist_page.dart:331-332 `PlaylistPicker.show(context, selectedTracks)` where selectedTracks is in playlist order (:311-314).
+
+**Fix.** Make the batch keep the caller's order (`playlist.tracks.insertAll(0, toAdd)`) and drop the `.reversed` in ArtistPage._saveAsPlaylist; update the doc comment.
+
+## 89. [low] Player top bar leaves only (width − 312) px for its centre: sleep badge overflows its pill and the calibration hint shrinks to ~5 px on 360 dp phones
+
+- Finder: find:screens (abef45) · Category: ux · `lib/screens/now_playing_page.dart:290`
+
+**Scenario.** On a 360 dp-wide Android phone the centre is 48 px: with any sleep timer running the pill is 48 px wide and its text runs 26–44 px past it (a RenderFlex overflow in debug); during 校准 the only instruction is scaled to 48/126 ≈ 0.38 → ~5 px glyphs. On 390–393 dp phones (the width the goldens render at, without a timer) 播完本首 still overflows by 11–14 px and the hint is ~9 px.
+
+**Evidence.** lib/screens/now_playing_page.dart:286-291 `Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [SizedBox(width: 144, ...` and :324-325 `SizedBox(width: 144,` — the Expanded centre gets screenWidth − 24 − 288. The badge (:715-732) is `Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), child: Row(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.bedtime_rounded, size: 14, ...), const SizedBox(width: 6), Text(sleep.mode == SleepTimerMode.endOfTrack ? '播完本首' : formatDuration(sleep.remaining), ...` — the Text is not Flexible, so it needs 44 px + text (≈74 px for mm:ss, ≈92 px for 播完本首). The hint (:309-320) is `FittedBox(fit: BoxFit.scaleDown, child: Text('点一下正在唱的那句', style: TextStyle(... fontSize: 14 ...` ≈126 px wide. Both side boxes stay 144 px even when they hold only 重置 / 完成.
+
+**Fix.** Give the centre the room it needs: e.g. lay the bar out as a Stack with the badge/hint centred over a Row of the two button groups sized to their content, or size the side boxes to their content while calibrating / when fewer than three buttons show; wrap the badge in a FittedBox(scaleDown) as a floor.
+
+## 90. [low] Favouriting from a search/recommendation row stores Bilibili's raw copy instead of the library's named song
+
+- Finder: find:screens (abef45) · Category: correctness · `lib/widgets/track_sheet.dart:104`
+
+**Scenario.** A song is in the library as 大鱼 / 周深 (named). Search 周深, find the same video in the 哔哩哔哩 results (it shows ⋯ because it is downloaded), open the sheet — the header shows 大鱼 — and tap the heart. 收藏 now lists it as 【4K60帧】周深《大鱼》现场 纯享版 with the video thumbnail, and that copy is persisted in bilibeat_playlists.json until the next metadata edit of the song; the favourites cover on the home grid uses the thumbnail too.
+
+**Evidence.** lib/widgets/track_sheet.dart:102-105 `Future<void> _toggleFavorite() async { Haptics.light(); await DatabaseService.toggleFavorite(widget.track); }` while the sheet itself knows better at :236-243 `/// The library's copy carries any edits made since the sheet's caller captured its [Track].` `Track _latest() {...}` (used for the header, 加入歌单 and 编辑信息 but not here). lib/services/database_service.dart:736 `favorites.tracks.insert(0, track);` stores that object verbatim. Search rows hand over Bilibili's own copy (lib/screens/search_view.dart:250 `_songs(_online.results)`; lib/services/bilibili_sdk.dart:616-625 `title: cleanTitle, rawTitle: cleanTitle, uploader: author, ...`, not named, no loudness).
+
+**Fix.** `await DatabaseService.toggleFavorite(_latest());` (and likewise prefer the library copy inside DatabaseService.toggleFavorite when the id is downloaded).
+
+## 91. [low] When the queue empties, the player pops whatever route is on top instead of itself, and can be left stale or blank
+
+- Finder: find:screens (abef45) · Category: correctness · `lib/screens/now_playing_page.dart:124`
+
+**Scenario.** Play the single song of an artist (queue = 1), open the player, open 播放队列, long-press the row → 删除下载. The queue sheet is popped instead of the player; the player keeps showing the deleted song with dead transport controls. Tapping the artwork/歌词 (setState) turns the page into an empty dark screen with no controls — on iOS there is then no way to leave it. Same outcome when an artist/playlist page sits above the player (it gets popped), or while calibrating (PopScope swallows the pop and _endCalibration rebuilds to blank).
+
+**Evidence.** lib/screens/now_playing_page.dart:120-128 `if (track == null) { Future.microtask(() { if (!mounted) return; if (ModalRoute.of(context)?.isActive ?? false) { Navigator.of(context).maybePop(); } }); return; }` — `isActive` is true for any route still in the stack, `maybePop` pops the top-most route and honours the page's own PopScope (:195 `canPop: _calibrating == null`); no setState is made. A later rebuild hits :214 `child: track == null ? const SizedBox.shrink() : _player(track),` inside a non-positioned child of a Stack under the Scaffold's loose body constraints, so the Stack collapses to zero width (no artwork, no drag surface). Reachable because every row has lib/widgets/song_tile.dart:57 `onLongPress: () => TrackSheet.show(context, track, queue: queue)`, including queue rows (lib/widgets/playback_queue_sheet.dart:87), and lib/widgets/track_sheet.dart:107-110 `final parent = _dismiss(); await DatabaseService.removeDownloadedTrack(track);` leads to lib/services/audio_player_handler.dart:861-865 `if (_player.sequenceState.sequence.isEmpty) { await _player.stop(); _announce(null); _publish(); }`.
+
+**Fix.** Remove this page's own route: `_endCalibration(); final route = ModalRoute.of(context); if (route != null && route.isActive) Navigator.of(context).removeRoute(route);` (or popUntil(route) then pop), instead of maybePop.
+
+## 92. [low] 播放 from a queue row's long-press sheet replaces the queue with the whole library
+
+- Finder: find:screens (abef45) · Category: correctness · `lib/widgets/playback_queue_sheet.dart:87`
+
+**Scenario.** Start a 5-song playlist, open the player's 播放队列, long-press a row and tap 播放 in its sheet. Instead of jumping to that song inside the queue (what a tap does), the queue is reinstalled as every downloaded song in the library; the playlist context and its order are gone.
+
+**Evidence.** lib/widgets/playback_queue_sheet.dart:87-90 `child: SongTile(track: track, // Tapping the current song does not restart it.` `onTap: current ? null : () => _select(track.id),` — no `queue:` is passed. lib/widgets/song_tile.dart:57 `onLongPress: () => TrackSheet.show(context, track, queue: queue),` → lib/widgets/track_sheet.dart:90-91 `unawaited(AppServices.instance.handler.playTrack(widget.track, queue: widget.queue));` → lib/services/audio_player_handler.dart:643 `final base = (queue == null || queue.isEmpty) ? library.values : queue;`.
+
+**Fix.** Pass the queue to the row (`SongTile(track: track, queue: snapshot.tracks, ...)`) so the sheet's 播放 stays within it.
+
+## 93. [low] Song-info sheet reports 'no match' and 'save failed' with snack bars that render underneath the sheet
+
+- Finder: find:screens (abef45) · Category: ux · `lib/widgets/track_info_sheet.dart:67`
+
+**Scenario.** 编辑信息 → tap 匹配 on a video the catalogues do not know (or while offline). The spinner stops and nothing else changes: the message '没有匹配到这首歌' is drawn behind the sheet and has expired by the time the sheet closes. A failed save looks the same — the button re-enables with no explanation.
+
+**Evidence.** lib/widgets/track_info_sheet.dart:66-68 `if (found == null) { showAppSnackBar(ScaffoldMessenger.of(context), message: '没有匹配到这首歌'); return; }` and :107 `showAppSnackBar(ScaffoldMessenger.of(context), message: '保存失败，请重试');`. The sheet is a modal route with no Scaffold of its own (lib/widgets/sheet.dart:13 `return showModalBottomSheet<T>(`), so the root ScaffoldMessenger draws the bar in the page Scaffolds below the barrier; lib/utils/snack.dart:22-24 places it floating at the page's bottom edge (`margin: const EdgeInsets.symmetric(horizontal: 48, vertical: 12)`), exactly where the ~300 px sheet sits. Other sheets pop before showing a snack (e.g. settings_sheet.dart:107-110); this one stays open.
+
+**Fix.** Show the outcome inside the sheet (e.g. a short inline line under the 匹配 row / above 保存 held in state), or wrap the sheet body in its own ScaffoldMessenger + transparent Scaffold.
+
+## 94. [low] Scrolling local matches pages a hidden, stale Bilibili query in the background
+
+- Finder: find:screens (abef45) · Category: correctness · `lib/screens/search_view.dart:79`
+
+**Scenario.** Submit 周深 (Bilibili results load), then edit the field to 周. The view now shows only library matches for 周 plus the 在哔哩哔哩搜索 row. Scrolling that list to within 320 px of its end fires `BilibiliSdk.search('周深', page: 2)`, then page 3 on the next scroll, and so on — invisible requests against a service that rate-limits this app, and when the user returns to 周深 the list has silently grown by several pages.
+
+**Evidence.** lib/screens/search_view.dart:77-81 `if (widget.query.value.trim().isEmpty) { _recs.loadMore(); } else if (_online.hasSearched && _online.results.isNotEmpty) { _online.loadMore(); }` — it never checks that the online results belong to what is typed, although the view itself does at :188 `final submitted = _online.query == query;` and only shows them when true. The controller keeps the old query until the field is emptied (lib/app/app_shell.dart:92 `if (text.trim().isEmpty) _services.onlineSearch.clear();`). The class doc promises (:22-23) 'Bilibili is only queried on submit ... so typing never fires network requests.'
+
+**Fix.** Gate on the visible query: `else if (_online.query == widget.query.value.trim() && _online.results.isNotEmpty) _online.loadMore();`.
+
+## 95. [low] The 重试 button for a failed results page is ignored for its first three seconds
+
+- Finder: find:screens (abef45) · Category: ux · `lib/state/online_search_controller.dart:98`
+
+**Scenario.** Page 2 of a search fails (network blip). 重试 appears at that instant; tapping it within three seconds does nothing — no spinner, no request — so it looks broken. It only works on a later tap.
+
+**Evidence.** lib/state/online_search_controller.dart:96-101 `// A failed page gets a quiet retry window instead of re-firing on every scroll pixel.` `if (_loadMoreFailed && DateTime.now().difference(_lastFailure) < const Duration(seconds: 3)) { return; }` with :123-124 `_loadMoreFailed = true; _lastFailure = DateTime.now();`. The explicit button calls the very same method: lib/screens/search_view.dart:253-254 `else if (_online.loadMoreFailed) SliverToBoxAdapter(child: Center(child: _retry(_online.loadMore))),`.
+
+**Fix.** Let a deliberate retry bypass the window: `Future<void> loadMore({bool force = false})` skipping the time check when forced, and wire the button to `() => _online.loadMore(force: true)`.
+
+## 96. [low] Recommendations paging has no failure back-off: every scroll notification at the end re-fires all seed searches
+
+- Finder: find:screens (abef45) · Category: resilience · `lib/state/recommendations_controller.dart:81`
+
+**Scenario.** Recommendations are on screen and Bilibili starts refusing requests (risk control) or the network drops. Dragging at the bottom of the list starts a new batch of up to 4 seeds × several requests as soon as the previous batch fails, for as long as the finger moves; the spinner flickers in and out, there is no 重试 row, and the burst deepens the rate limit the changelog already works around.
+
+**Evidence.** lib/state/recommendations_controller.dart:62 `if (_loading || _loadingMore || _reachedEnd || _tracks.isEmpty) return;` and :81-86 `} catch (e) { debugPrint('Load more recommendations error: $e'); if (pass != _pass) return; } _loadingMore = false; notifyListeners();` — a failure records nothing. lib/screens/search_view.dart:74-78 calls `_recs.loadMore()` on every vertical ScrollNotification within 320 px of the end. The sibling controller was fixed for exactly this (online_search_controller.dart:96-101 'instead of re-firing on every scroll pixel'). One attempt is one search per seed (lib/services/recommendation_engine.dart:186-198, up to 4 seeds), each of which tries the music zone and then the unfiltered endpoint (lib/services/bilibili_sdk.dart:494-501).
+
+**Fix.** Mirror OnlineSearchController: keep `_loadMoreFailed`/`_lastFailure`, return early inside a few-second window, expose the flag and render a 重试 row in SearchView._recommendations.
+
+## 97. [low] Home loses its lens and scroll position every time search is entered
+
+- Finder: find:screens (abef45) · Category: ux · `lib/app/app_shell.dart:137`
+
+**Scenario.** Browse 歌手 (or 歌单), or scroll far down 歌曲; tap the search bar — even by accident — and 取消. Home comes back on 歌曲 scrolled to the top. Since search is the only way to add music, this happens on every download round-trip; a protection hint the user just acted on with 开启 (but has not yet granted) reappears as well.
+
+**Evidence.** lib/app/app_shell.dart:133-146 `child: AnimatedSwitcher(... child: _searchActive ? SearchView(key: const ValueKey('search'), ...) : HomePage(key: const ValueKey('home'), onSearch: _searchFocus.requestFocus),` — HomePage leaves the tree while search is active, so its State is disposed. The lens lives only in that State: lib/screens/home_page.dart:45 `_Lens _lens = _Lens.songs;`, and the CustomScrollView (home_page.dart:77) has no PageStorageKey, so its offset is not kept either. `_checkProtection()` (home_page.dart:53) also re-runs each time.
+
+**Fix.** Keep HomePage mounted while searching (IndexedStack/Offstage with the fade applied on top), or lift `_lens` into _AppShellState and give the scroll view a PageStorageKey.
+
+## 98. [low] Orientation is not locked, and the player and the song sheet do not survive landscape
+
+- Finder: find:screens (abef45) · Category: platform · `lib/screens/now_playing_page.dart:548`
+
+**Scenario.** With auto-rotate on, turn a 412×915 phone sideways on the player: the safe box is ~364 px high, leaving ~86 px for the Expanded area and, after its 38 px padding, a ~48 px artwork; in lyrics mode the pane is shorter than one lyric line. On a 360×640 phone the artwork is 0–20 px. Opening ⋯ in landscape overflows the sheet so 编辑信息 / 删除下载 are cut off below the screen. (An artwork first loaded at that size also stays a tiny thumbnail after rotating back, since CachedCoverImage only reloads on a URL change.)
+
+**Evidence.** android/app/src/main/AndroidManifest.xml: the MainActivity element has no `android:screenOrientation`; ios/Runner/Info.plist:62-67 lists `UIInterfaceOrientationLandscapeLeft` / `LandscapeRight` for iPhone; lib/main.dart never calls `SystemChrome.setPreferredOrientations`. lib/screens/now_playing_page.dart:548-556 assumes the artwork is width-bound: `final art = box.maxWidth - 2 * _NowPlayingPageState._gutter;` ... `final spare = box.maxHeight - _rows - text - art;` `final s = spare < 96 ? 96.0 : spare;` — in landscape the fixed rows (222) plus the minimum gaps (96) take almost the whole height. lib/widgets/track_sheet.dart:126-231 is a `Column(mainAxisSize: MainAxisSize.min, ...)` with no scroll view (header + primary button + up to six 52 px actions ≈ 480 px).
+
+**Fix.** Lock to portrait: `await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);` in main(), `android:screenOrientation="portrait"` on the activity, and drop the landscape entries from UISupportedInterfaceOrientations (iPhone).
+
+## 99. [low] Artist splitter treats any name starting with 'feat' or 'ft' as a separator
+
+- Finder: find:screens (abef45) · Category: correctness · `lib/state/library_controller.dart:123`
+
+**Scenario.** A song credited to FTISLAND (named, or an untouched download whose UP主 is e.g. 'Feather羽毛') is split into ['', 'ISLAND'] / ['', 'her羽毛']: the 歌手 lens and the song sheet show an artist called ISLAND while the song row says FTISLAND, and 'ISLAND' is taught to the offline title parser as a known artist.
+
+**Evidence.** lib/state/library_controller.dart:122-123 `static final RegExp _artistSeparators = RegExp(r'\s*(?:[&、,，/／×]|\bfeat\.?|\bft\.?)\s*', caseSensitive: false);` — `\bfeat\.?` / `\bft\.?` have a leading word boundary but nothing after, so they match the first letters of a longer word. Used by :129-133 `artistNamesOf(track) => artistOf(track).split(_artistSeparators).map((name) => name.trim()).where((name) => name.isNotEmpty).toList();`, which feeds the 歌手 lens (:146-151), the artist rows in the song sheet (track_sheet.dart:124, 192-203) and `LyricsEngine.knownArtists` (:219-225). The rows themselves show the unsplit credit via `artistOf`.
+
+**Fix.** Require the token to end: `r'\s*(?:[&、,，/／×]|\bfeat(?:\.|\b)|\bft(?:\.|\b))\s*'` (a dot or a word boundary after feat/ft).
+
+## 100. [low] Deleting a download that sits before the playing song briefly announces the following song and records it in 最近播放
+
+- Finder: find:playback (ac30e4) · Category: correctness · `lib/services/audio_player_handler.dart:858`
+
+**Scenario.** Queue [A, B, C, D], C is playing (index 2). The user deletes A's download from a list (track_sheet.dart:110 / download_management_sheet.dart:101). Dart's sequence becomes [B, C, D] with index still 2, so _publish announces D: D is written to the recently-played history as if it had been played, the notification/now-playing title and loudness gain flip to D, and a moment later the native index (1) arrives and C is announced again. Net result: a song never heard appears in 最近播放 and the UI/volume flickers.
+
+**Evidence.** lib/services/audio_player_handler.dart:853-859 removeTracks calls `await _player.removeAudioSourceAt(i)`. just_audio-0.10.6 just_audio.dart:3088-3100 removeAt first mutates `children`, then `await player._broadcastSequence()` (which emits `sequenceState.copyWith(sequence: ...)`, :963-967, keeping the old currentIndex) and only then sends concatenatingRemoveRange to the platform; the corrected index arrives later via a playback event (:324-326, Java onTimelineChanged -> updateCurrentIndex, AudioPlayer.java:304-306). SequenceState.currentIndex (:2155-2156) only clamps to the last item, it does not shift.
+
+The handler publishes on every sequence event (:187 `_player.sequenceStateStream.listen((_) => _publish())`), and :229-231 `if (current?.id != previous?.id) { _announce(current); }` -> :283 `if (_recordHistory) unawaited(DatabaseService.addRecentlyPlayed(track));` plus mediaItem.add and _applyLoudness for the wrong track. removeTracks has no test (no reference in test/playback_handler_test.dart).
+
+**Fix.** Hold publishing across the removal the way _install does (increment _installing around the removeAudioSourceAt loop and publish once afterwards, after the platform call has returned and the index event has been delivered), or in _publish ignore a current-track change whose previous track is still in the sequence at index-1 while a removal is in flight.
+
+## 101. [low] play() during an in-flight restoreSession returns without playing (the cold-start case the comment says is handled)
+
+- Finder: find:playback (ac30e4) · Category: concurrency · `lib/services/audio_player_handler.dart:690`
+
+**Scenario.** Process was killed; the app (or the service via a headset button) starts. main() kicks off restoreSession (reads bilibeat_session.json and the library, then loads the queue natively). A headset/Bluetooth play press delivered before that finishes calls play(): restoreSession() returns immediately, audioSources is still empty, play() returns - the press is silently dropped and the session is then restored paused. The window is the duration of the restore (file IO + native load), longer with a large library.
+
+**Evidence.** lib/services/audio_player_handler.dart:689-692 `Future<void> restoreSession() async { if (_restoreStarted) return; _restoreStarted = true; ...` - a second caller gets an already-completed future, not the running restore. :750-756 `if (_player.audioSources.isEmpty) { // A media button can cold-start the service before the UI restores. await restoreSession(); if (_player.audioSources.isEmpty) return; }`. lib/main.dart:58 always starts the restore first: `unawaited(handler.restoreSession());` immediately after AudioService.init, so by the time any platform `play`/`click` message can be dispatched `_restoreStarted` is already true.
+
+**Fix.** Memoize the restore future (`Future<void>? _restore; Future<void> restoreSession() => _restore ??= _doRestore();`) so play() actually awaits the running restore before checking audioSources.
+
+## 102. [low] A failed download stays listed as 下载失败 after the same song is fetched successfully by playback
+
+- Finder: find:downloads (a6d0e7) · Category: correctness · `lib/services/download_manager.dart:155`
+
+**Scenario.** A download started with the row button fails (network drop). The listener taps the song to play it; the handler's `ensureDownloaded` resumes the .part and finishes. The song is now in 本地 and plays, but the 下载 sheet still shows it under 下载失败 with 重试/忽略 next to its downloaded row, and the failed count on the home page stays raised until the listener taps one of them or restarts the app.
+
+**Evidence.** download_manager.dart:148-157 `_onProgress`: `final task = _tasks[p.trackId]; if (task == null) { if (p.done) _notify(p.trackId); return; }` only relays the id; `_failed` is removed solely in `retryDownload` (94), `dismissFailed` (107) and after a new `startDownload` claims the slot (130). `startDownload` returns at 127 (`if (alreadyDownloaded) return;`) before reaching 130. download_management_sheet.dart:133-159 renders every `_failed` entry, and library_controller.dart reads `failedTasks.length` into `_failedCount`.
+
+**Fix.** In `_onProgress`, when `p.done` arrives for an id, also `_failed.remove(p.trackId)` before notifying; likewise clear `_failed` in `startDownload` when `alreadyDownloaded` is true.
+
+## 103. [low] Partial downloads that are abandoned are never cleaned up and cannot be seen or removed in the app
+
+- Finder: find:downloads (a6d0e7) · Category: resource-leak · `lib/services/audio_download_service.dart:355`
+
+**Scenario.** The listener starts a long video by mistake (there is no cancel, so the way out is to close the app) or a download fails and is dismissed with 忽略. Tens of megabytes of `.part` stay in `bilibeat_audio/` for good unless that exact track is later downloaded to completion. They are not included in the 下载 sheet's size total and there is no in-app way to delete them short of clearing all app data, which would also delete the library.
+
+**Evidence.** audio_download_service.dart:354-359 keeps `audio_<id>.m4a.part` and `.part.json` on any failure by design; 275 `await saveTrackMetadata(track)` creates `audio_<id>.json` before any byte is fetched. The only code that removes these files is `delete(track)` (229-235), reached only through `removeDownloadedTrack`, which the UI offers only for downloaded tracks (track_sheet.dart `if (downloaded) ... 删除下载`; download_management_sheet.dart:160-170). `DownloadManager.dismissFailed` (download_manager.dart:106-108) only drops the in-memory record. `storageBreakdown` (201) counts only `.m4a` files with a `.ready` marker, and `_discoverAudioFiles` (database_service.dart:221) looks only at `.ready` files, so nothing sweeps the leftovers.
+
+**Fix.** Delete the track's `.part`, `.part.json` and (when no `.ready` exists) `.json` in `dismissFailed`, and sweep at startup in `_discoverAudioFiles`: remove `.part`/`.part.json` and marker-less metadata files older than a few days.
+
+## 104. [low] 收藏 from a track sheet stores the caller's stale Track instead of the library's copy
+
+- Finder: find:persistence (a99d2d) · Category: correctness · `lib/widgets/track_sheet.dart:104`
+
+**Scenario.** A song is downloaded and named 大鱼 / 周深 (by matching or by hand, possibly with a picked cover). The listener later meets the same video in search results, long-presses the row and taps the heart. The sheet header shows 大鱼 (from _latest), but 收藏 receives the search-result Track: title = the full video title, uploader = the UP主, the video thumbnail, named = false. The 收藏 page shows the raw video title for that row permanently, since the library copy is already settled and nothing calls updateTrackMetadata for it again; the same song shows two names in 本地 and 收藏.
+
+**Evidence.** track_sheet.dart:102-105 `await DatabaseService.toggleFavorite(widget.track);` while the same sheet deliberately resolves the fresh copy for everything else: track_sheet.dart:236-243 `_latest()` ('The library's copy carries any edits made since the sheet's caller captured its [Track]') is used for display (:121), 加入歌单 (:188 `PlaylistPicker.show(parent, [track])`) and 编辑信息 (:210). database_service.dart:736 `favorites.tracks.insert(0, track);` persists that object verbatim, and playlist_page.dart:73-75 / song_tile.dart:98 render the playlist's own copy (`track.title`).
+
+**Fix.** Use `_latest()` in `_toggleFavorite` (as the other actions do), or have DatabaseService.toggleFavorite/addTracksToPlaylist prefer the `_downloadedTracks` entry with the same id over the passed object.
+
+## 105. [low] Cover cache eviction sorts by file access time, which Android/iOS app storage does not maintain - it evicts the oldest-downloaded (library) covers, not the least used
+
+- Finder: find:persistence (a99d2d) · Category: platform · `lib/widgets/cached_cover_image.dart:73`
+
+**Scenario.** After months of browsing search results the cache passes 200 MB. On the next launch trimCache deletes ~50 MB of the files with the oldest atime - on Android those are the first covers ever fetched, i.e. the listener's long-standing library songs shown every day - while keeping thumbnails of search results seen once last week. Offline (the app is meant to play from local files without a connection) those library rows and the player page show the placeholder note icon until the device is online again; online they are silently re-downloaded and the cycle repeats.
+
+**Evidence.** cached_cover_image.dart:55-57 'the covers unused longest go'; :73 `files.sort((a, b) => a.$2.accessed.compareTo(b.$2.accessed));` then :74-78 deletes from the front until under 3/4 of 200 MB. Nothing in the read path touches the file's atime explicitly (:190-193 just `_settle(token, file)`), so the order depends on the filesystem updating atime on read. Android's /data (and iOS app containers) are mounted noatime, so `accessed` stays at creation time. The only test (test/cover_cache_test.dart:15) sets atime by hand with setLastAccessed, so it cannot see this. The cache is the only local copy of every cover (:181-182), and it is filled by search/recommendation browsing as well as the library.
+
+**Fix.** Touch the file on a cache hit (e.g. `file.setLastAccessed(DateTime.now())` or setLastModified, throttled to once per launch per file) and sort by that timestamp, or exempt covers whose source URL belongs to a library/playlist track from eviction.
+
+## 106. [low] Every launch re-reads and re-parses every track's meta JSON and does ~7 sequential file round-trips per song before any library data is available
+
+- Finder: find:persistence (a99d2d) · Category: performance · `lib/services/database_service.dart:220`
+
+**Scenario.** With a library of ~3,000 songs each cold start performs roughly 21,000 awaited filesystem calls plus 3,000 JSON parses and ~4.5 million id comparisons before `_ensureLoaded` completes. Until then LibraryController.reload, restoreSession (audio_player_handler.dart:698 `_library()`) and a media-button cold start (`play()` -> restoreSession) are all blocked: the home screen stays empty and the first press of play does nothing for a second or more, growing linearly-to-quadratically with the library. The compute() isolate added for parsing downloaded.json does not help, because this work runs on the main isolate.
+
+**Evidence.** database_service.dart:118-119: `_discoverAudioFiles(dir)` is awaited inside `_load`, which every getter awaits through `_ensureLoaded`. For EVERY `.ready` file (i.e. every downloaded song, not just unknown ones) :228-235 does `audioFile.exists()`, `audioFile.length()`, `metaFile.exists()`, `metaFile.readAsString()`, `jsonDecode` and `Track.fromMap` on the UI isolate, and only then checks :251 `if (!_downloadedTracks.any((t) => t.id == track.id))` - a linear scan per file, so O(n^2) id comparisons. The prune loop :265-289 then does three more awaited stats per track (`ready.exists()`, `audio.exists()`, `audio.length()`). The id needed for the membership test is already in the file name (:241-245 computes `fileKey`), so the read/parse is wasted for known tracks.
+
+**Fix.** Build a Set of known ids once; derive the id from the file name and only read/parse the meta JSON when that id is not in the set. Replace the per-track stats in the prune loop with one directory listing into a Set of names (the listing is already in `entities`).
+
+## 107. [low] updateTrackMetadata rewrites (and reads back) the whole playlists file on every call, even when no playlist contains the track
+
+- Finder: find:persistence (a99d2d) · Category: performance · `lib/services/database_service.dart:538`
+
+**Scenario.** After TrackNaming.matcher is raised (as CLAUDE.md prescribes when matching improves), every previously auto-named song is re-checked the first time it plays. With a few thousand downloads and large playlists, each track change then encodes on the UI isolate, writes, fsyncs and re-reads downloaded.json, playlists.json and recently_played.json (several MB in total) - even though the track is in no playlist - while playback and scrolling are in progress, producing visible jank at each song change during that period.
+
+**Evidence.** database_service.dart:532-538: the loop only assigns when `idx != -1`, but `await _persistPlaylists();` is unconditional (contrast setTrackLoudness :566-570, which tracks `playlistsChanged`). _persistPlaylists (:473-487) serialises every playlist with a full copy of every track, and _writeJsonAtomically (:359, :378) writes it with flush and then reads the whole file back to compare. The call also follows `_persistDownloaded()` (:526) and `_persistRecentlyPlayed()` (:543), each a full rewrite + read-back, plus the meta JSON. Callers: every automatic naming (track_naming.dart:115, reached from the nowPlaying listener at :42-45 for every not-yet-settled song that starts playing, including the `noBetter` branch :179-183 that only stamps the matcher version) and every manual edit.
+
+**Fix.** Track whether any playlist entry was replaced and only then call _persistPlaylists; otherwise emit the library update directly. (Optionally drop the read-back verification for files other than the first write after launch.)
+
+## 108. [low] A set-aside store is never read again, and from the second launch on the cover sweep deletes the picked covers it references
+
+- Finder: find:persistence (a99d2d) · Category: data-loss · `lib/services/database_service.dart:125`
+
+**Scenario.** The listener sideloads a build with a newer schemaVersion, then goes back to the previous build (or playlists.json is read during a transient IO error). Launch 1 of the old build renames bilibeat_playlists.json to .unreadable and shows empty playlists; the sweep is skipped. Launch 2 (a day later): the sweep runs and deletes every custom playlist cover and every picked song cover that only the set-aside playlists referenced. When the newer build is installed again it loads the fresh empty bilibeat_playlists.json; the .unreadable file with all the playlists is still on disk but is never offered or merged, and its cover images are already gone. On a sideloaded Android build the user cannot reach the app's private documents folder to recover it by hand.
+
+**Evidence.** database_service.dart:124-125 `// With a store set aside, what it referenced is unknown: keep it all.` / `if (!_setAsideAny) unawaited(_sweepCovers(dir));` - but `_setAsideAny` (:431) is an in-memory flag set only in the launch that performs the rename (:438). On the next launch the fresh, empty file parses fine, the flag is false, and _sweepCovers (:173-192) deletes every file in bilibeat_covers older than a day that the new stores do not mention. Separately, nothing in lib ever opens a `*.unreadable` file (grep: only the rename at :442-446 and comments), so the 'kept' data has no way back even when it becomes readable.
+
+**Fix.** Skip the sweep whenever any `*.unreadable` file exists in the documents directory (a directory check, not a per-launch flag), and on load try `<name>.unreadable` when the primary file is missing/empty and the aside file parses under the current schema.
+
+## 109. [low] Recommendation loadMore has no failure back-off: each scroll tick re-fires all seeds while Bilibili is refusing
+
+- Finder: find:network (aee1ec) · Category: resilience · `lib/state/recommendations_controller.dart:81`
+
+**Scenario.** Risk control starts answering -352/412 (or the phone goes offline) while the user is at the bottom of 为你推荐. Every scroll movement there starts a new pass of up to 16 HTTP requests the moment the previous one fails (fast when refused), for as long as the finger moves - which extends the risk-control ban that also blocks search and downloads. There is also no visible failure/retry affordance: only a flickering spinner.
+
+**Evidence.** recommendations_controller.dart:61-86: the guard is `if (_loading || _loadingMore || _reachedEnd || _tracks.isEmpty) return;`; the catch block (81-84) only logs, then `_loadingMore = false; notifyListeners();` - no failure flag or timestamp, unlike OnlineSearchController.loadMore (online_search_controller.dart:98-101, 'A failed page gets a quiet retry window instead of re-firing on every scroll pixel'). search_view.dart:77-78 calls `_recs.loadMore()` on every scroll notification near the end. One recommend() call (recommendation_engine.dart:186-195) runs up to 4 seeds, each BilibiliSdk.search = music + unfiltered attempt, each attempt = signed + fallback request.
+
+**Fix.** Mirror the search controller: record _loadMoreFailed + _lastFailure and skip loadMore for a few seconds after a failure (and surface a retry row).
+
+## 110. [low] Recommendations recommend songs the user already downloaded (knownIds covers only favourites and the last 30 plays)
+
+- Finder: find:network (aee1ec) · Category: correctness · `lib/services/recommendation_engine.dart:165`
+
+**Scenario.** Library of 200 downloaded 周深 songs, few favourited. The top seed is '周深'; Bilibili's page-1 hits for it are the most popular uploads - exactly the ones already downloaded and not among the last 30 plays. 为你推荐 ('to download') is then largely made of songs already in the library, and since ranking prefers title-token overlap with the profile, already-owned songs score highest.
+
+**Evidence.** recommendation_engine.dart:20 '/// Tracks the user already has; never recommend these back.'; knownIds is filled only in absorb() (84-86), called for `favourites` (94-96) and `history.take(30)` (98-100). recommend() loads only `getFavoritesPlaylist()`, `getRecentlyPlayed()` and `getSearchHistory()` (165-167); `DatabaseService.getDownloadedTracks()` (database_service.dart:788) is never consulted, and line 202 filters solely on `profile.knownIds`.
+
+**Fix.** Add the downloaded track ids to the exclusion set in recommend() (knownIds ∪ downloaded ids), without letting them add taste weight if that is not wanted.
+
+## 111. [low] buvid refresh failure is never backed off, and concurrent callers each fetch their own identity / WBI keys
+
+- Finder: find:network (aee1ec) · Category: resilience · `lib/services/fingerprint_service.dart:64`
+
+**Scenario.** (a) App alive > 1 h (normal for a music player) and the spi endpoint is slow or refused while the rest of api.bilibili.com answers: every search, view fallback and recognised-music lookup first waits on a new spi attempt (up to 10 s connect + 10 s headers + 10 s body) before doing its real request, indefinitely. (b) Cold start with search open: the 4 seed searches issue 4 spi and 4 nav requests at once and are sent with 4 different freshly minted buvid3 cookies (last writer wins in the statics) - a burst pattern from unactivated device ids that invites -352.
+
+**Evidence.** fingerprint_service.dart:26-30 returns the cache only while `now.difference(_cacheTime!).inHours < 1`. On a failed refresh, 63-68 `if (_buvid3.isEmpty) { ...; _cacheTime = now; }` updates _cacheTime only when there was no previous value; with an existing buvid3 the old value is returned but _cacheTime stays stale, so the next call fetches again. WbiSigner has a `_retryAfter` for exactly this reason (wbi_signer.dart:83-87); FingerprintService has none. Neither service shares an in-flight future: getBuvid (24-71) and _getWbiKeys (130-182) start a new request per caller. RecommendationEngine fires up to 4 searches concurrently (recommendation_engine.dart:186), each calling getCookieString then signParams (bilibili_sdk.dart:512, 529).
+
+**Fix.** Set a retry-after timestamp on refresh failure (keep serving the old buvid), and memoise the in-flight Future in both getBuvid and _getWbiKeys so concurrent callers share one request.
+
+## 112. [low] Timeouts abandon requests without aborting them; stalled sockets keep their slot in the per-host pool
+
+- Finder: find:network (aee1ec) · Category: resource-leak · `lib/services/bilibili_sdk.dart:42`
+
+**Scenario.** Wi-Fi to cellular hand-over (or a captive/black-holing network) while 为你推荐 is loading: the 4 seeds have ~8-10 requests in flight on api.bilibili.com whose sockets go half-open (request already ACKed, no response ever arrives). All time out in Dart after 10 s but remain active. The pool for that host is now full: every later getUrl is queued and itself times out after 10 s, so search, video info and audio-stream lookups (downloads) all fail on a working network until the OS finally kills the dead sockets or the app is restarted.
+
+**Evidence.** bilibili_sdk.dart:34-47: `await _httpClient.getUrl(...).timeout(10s)`, `await req.close().timeout(10s)`, `res.transform(utf8.decoder).join().timeout(10s)`. Future.timeout only stops waiting: the HttpClientRequest is never `abort()`ed and the response subscription is never cancelled, so the connection stays in `_active`. Same pattern at 104-115, wbi_signer.dart:144-157 and fingerprint_service.dart:33-46. The clients are static, never closed, with `maxConnectionsPerHost` 10 / 4 (bili_http.dart:17, bilibili_sdk.dart:26-28). Dart's pool queues when full (sky_engine _http/http_impl.dart:2664-2672: `if (_active.length + _connecting >= maxConnectionsPerHost) { ... _pending.add(...)`), and idleTimeout applies only to idle connections; no TCP keepalive is set.
+
+**Fix.** On timeout call `req.abort()` (and cancel the body subscription / `res.detachSocket` is unnecessary - abort suffices), e.g. wrap each request in a helper that aborts in the timeout handler; alternatively recreate the client with close(force: true) after repeated timeouts.
+
+## 113. [low] Short-link resolver validates the host by substring, keeps http://, and follows redirects anywhere
+
+- Finder: find:network (aee1ec) · Category: security · `lib/services/bilibili_sdk.dart:97`
+
+**Scenario.** The user pastes share text from a chat such as '好听 https://b23.tv.evil.example/a' or 'https://evil.example/x?from=b23.tv': the app issues a GET (with the Bilibili Referer and spoofed UA, revealing the device IP) to that host, follows its redirects, and if the returned HTML contains any BV number shows and offers to download that video as 'the' result for the pasted link. With 'http://b23.tv/xxxx' the resolve request goes out in cleartext, where an on-path party can answer with a body naming a different BV.
+
+**Evidence.** bilibili_sdk.dart:474-476 enters the resolver when `query.contains('b23.tv')` (anywhere in the text). 87-91 falls back to `RegExp(r'https?://[^\s]+').firstMatch(input)` - the first URL of any host - and 97-101 accept it when `urlStr.contains('b23.tv')` (path, query or a look-alike host such as b23.tv.example.com all pass; `Uri.host` is never checked). 94 `if (!urlStr.startsWith('http')) urlStr = 'https://$urlStr';` leaves an explicit http:// link as cleartext. 104-109 use the default HttpClient redirect following (no followRedirects/maxRedirects set anywhere in lib), so even a genuine short link is followed to whatever host it redirects to, and 122-123 trusts any BV number found in the final page body.
+
+**Fix.** Parse with Uri and require `uri.host` to equal (or be a subdomain of) b23.tv / bili2233.cn / acg.tv, force the scheme to https, set `req.followRedirects = false`, read the Location header yourself and only accept a location whose host ends with bilibili.com (or one of the short-link hosts).
+
+## 114. [low] A nav answer whose wbi_img URLs are empty/short makes every signed request throw, and search then skips its plain fallback
+
+- Finder: find:network (aee1ec) · Category: resilience · `lib/services/wbi_signer.dart:164`
+
+**Scenario.** Bilibili changes or blanks the wbi_img fields (e.g. returns relative/empty URLs for anonymous clients): every search shows '无法连接哔哩哔哩' and every download fails to get a stream, each after an extra nav round-trip, even though the unsigned search endpoint and static fallback keys would still have worked.
+
+**Evidence.** wbi_signer.dart:160-169: with `wbi_img` present, `imgUrl = wbiImg['img_url'] as String? ?? ''` and `_cachedImgKey = imgUrl.split('/').last.split('.').first;` are stored and returned without checking length; `_cacheTime` is set and `_retryAfter = null`. _getMixinKey (94-96) does `mixinKeyEncTab.map((n) => orig[n])` with indices up to 63, so a combined key shorter than 64 chars throws RangeError from signParams. Because the cache check (131-136) requires non-empty keys, the nav request is repeated on every call with no back-off. In bilibili_sdk.dart:510-554 signParams is inside the same try as both the primary and the fallback request, so the throw becomes `BiliApiException('search request failed')` and the unsigned fallback at 545-550 is never attempted; fetchAudioStream (389, 442-446) returns null.
+
+**Fix.** Validate that both keys are 32 chars before caching; otherwise fall through to the fallback-keys path (with _retryAfter). In _searchOnce, catch a signing failure separately and still try the plain fallback URL.
+
+## 115. [low] The `echo` penalty in identify can never apply: its condition is self-contradictory
+
+- Finder: find:matching (ad4624) · Category: correctness · `lib/services/lyrics_engine.dart:987`
+
+**Scenario.** Video titled "遥遥 周深"; NetEase returns a search-farm track whose name is "遥遥 周深" by an unrelated account, the same length as the real song. nameNorm "遥遥周深" equals normRaw, so inRaw is true; gap <= 2 corroborates it (line 1005) and adds +4.0. The intended -5.0 never applies, so whenever the genuine recording is absent from the result pages (or its length differs), the farm track wins and the song is saved with the title "遥遥 周深".
+
+**Evidence.** lyrics_engine.dart:986-990 `// Search-farm uploads are named like the query itself ("遥遥 周深"). final echo = artists.isNotEmpty && inTitle.isEmpty && normRaw.length > nameNorm.length && nameNorm == normRaw;` - `nameNorm == normRaw` implies equal lengths, so `normRaw.length > nameNorm.length` is always false alongside it; `echo` is constantly false and line 1064 `if (echo) score -= 5.0;` is dead. (fetchFromNetEase has a working version of the same idea at 1969-1973.)
+
+**Fix.** Express the intended test, e.g. `final echo = artists.isNotEmpty && inTitle.isEmpty && nameNorm == normRaw && nameNorm.length > candNorm.length;` (the song's name is the whole video title rather than the candidate that was searched).
+
+## 116. [low] Legacy branch writes back the pre-lookup copy of the track without re-reading it, discarding an edit made during the hints fetch
+
+- Finder: find:matching (ad4624) · Category: data-loss · `lib/services/track_naming.dart:140`
+
+**Scenario.** A song named in an older version (named, matcher == null, artist != UP主) starts playing; _name begins and waits on fetchVideoHints over a slow connection. Meanwhile the listener opens 编辑信息 on it, corrects the title and saves (track_info_sheet.dart:88-100, matcher 0). When the hints arrive, line 140 saves `before` - the pre-edit title, artist and cover - over the listener's edit, and also pushes it to the player. The edit is silently lost. It also re-creates the entry if the listener deleted the download in that window is not possible (updateTrackMetadata only replaces), but playlists/recents copies are overwritten too.
+
+**Evidence.** track_naming.dart:121 `final before = await _stored(track.id);` ... 124-125 `await BilibiliSdk.fetchVideoHints(...)` (network, up to several 10 s timeouts) ... 139-141 `if (before.uploader.trim() != owner.trim()) { await _save(before.copyWith(rawUploader: owner, matcher: 0)); return; }`. The re-read that protects against concurrent edits ("The listener may have edited (or deleted) it while the lookup ran", 161-169) comes only after this early return. _save -> DatabaseService.updateTrackMetadata replaces the stored track wholesale (database_service.dart:523-526) and force-writes the on-disk metadata.
+
+**Fix.** Re-read before writing in the legacy branch: `final stored = await _stored(track.id); if (stored == null || stored.title != before.title || stored.uploader != before.uploader || stored.matcher != before.matcher || stored.named != before.named) return; await _save(stored.copyWith(rawUploader: owner, matcher: 0));`
+
+## 117. [low] Lookups that end with no usable search are never marked settled, so the track is looked up again on every play
+
+- Finder: find:matching (ad4624) · Category: performance · `lib/services/lyrics_engine.dart:916`
+
+**Scenario.** A download titled only in kana or hangul, e.g. "아이유 - 좋은 날": every candidate normalises to '' and is dropped, tags normalise below 2 chars (738), the parsed artist is not a bare name so no catalogue query is added -> queries is empty -> null without a memo. Or any title for which NetEase's searches all return empty lists. _name then removes the id from _attempted, so each time the song starts (including on repeat-one or every pass of a looped playlist) the whole lookup runs again - hints fetch (three Bilibili requests whenever the recognition request did not complete, since such hints are not memoised) plus up to nine NetEase searches - for a question whose answer cannot change this session.
+
+**Evidence.** lyrics_engine.dart:916 `if (queries.isEmpty) return null;` (no _remember) and 1093-1097 `if (best == null) { if (anyResponse && !incomplete) _remember(memoKey, null); return null; }` where anyResponse is only set by `if (songs.isNotEmpty) anyResponse = true;` (950) - successful searches that all return zero songs look the same as being offline.
+track_naming.dart:155-159 `if (found == null && !settled) { _attempted.remove(track.id); return; }` and 42-45 the nowPlaying listener calls autoName on every track start.
+_normalize (1722-1727) keeps only 一-龥, a-z, 0-9 and ·, and _generateCandidates.add drops empty norms (451), so a kana/hangul-only title produces no candidates.
+
+**Fix.** Distinguish "asked and nothing came back" from "could not ask": at 916 `_remember(memoKey, null)` before returning, and at 1095 remember null whenever `!incomplete` (every search returned a list), keeping the retry only for null (failed) searches.
+
+## 118. [low] Turning 自动匹配歌曲信息 off does not stop lookups already queued or in flight from renaming songs
+
+- Finder: find:matching (ad4624) · Category: ux · `lib/services/track_naming.dart:119`
+
+**Scenario.** The listener downloads a 20-track playlist; LibraryController.reload enqueues 20 lookups. Seeing the first songs being renamed in a way they dislike, they open 设置 and switch 自动匹配歌曲信息 off. The remaining queued lookups still run and still rewrite title, artist and artwork of the other tracks (each stamped matcher 4), despite the switch being off.
+
+**Evidence.** track_naming.dart:100-107 `if (!enabled || _settled(track) || !_attempted.add(track.id)) return; _queue = _queue.then((_) => _name(track))...` - `enabled` is read only when the work is enqueued. _name (119-197) never reads it again before `_save` at 188. setEnabled (48-51) only flips the flag and the pref. Lookups are serialised on `_queue` and each can take many seconds (hints + ~10 NetEase requests with 10 s timeouts), so several can be pending after skipping through tracks or after a batch of downloads arrives (library_controller.dart:201-204 enqueues every new download).
+
+**Fix.** Re-check the flag where the write happens: at the top of _name `if (!enabled) { _attempted.remove(track.id); return; }` and again just before each `_save`.
+
+## 119. [low] Releasing a seek-bar drag after the track changed seeks the new song to the old drag position
+
+- Finder: find:widgets (a91c90) · Category: correctness · `lib/widgets/player_seek_bar.dart:84`
+
+**Scenario.** The listener grabs the thumb in the last seconds of a song and holds it (or scrubs slowly near the end). The song finishes underneath and the next one starts; on release `onSeek` runs against the new song with the held value, e.g. 3:40 into a 3:45 song, so the new song plays a few seconds and ends too - two songs are skipped from one scrub. With a shorter next song the value clamps to its full length and it completes immediately.
+
+**Evidence.** lib/widgets/player_seek_bar.dart:34 `double? _drag;` and :82-88 `onChangeStart: (v) => setState(() => _drag = v), onChanged: (v) => setState(() => _drag = v), onChangeEnd: (v) { Haptics.light(); widget.onSeek(seconds(v)); setState(() => _drag = null); }`. Nothing clears `_drag` or cancels the gesture when `widget.duration` / the track changes; :53-54 only clamps the held value to the new max.
+lib/screens/now_playing_page.dart:264-269 creates `PlayerSeekBar(...)` without a per-track key, so the State and the in-progress Slider drag survive `_onTrackChanged`'s setState. Playback continues while the thumb is held (seek happens only on release).
+
+**Fix.** Drop the drag when the song changes: give the bar `key: ValueKey(track.id)` in now_playing_page.dart, or in the State remember the duration/track at onChangeStart and ignore onChangeEnd (just clear `_drag`) if it differs.
+
+## 120. [low] Artist marquee rests 35% into its text, so an overflowing artist line never shows its beginning during the reading pause
+
+- Finder: find:widgets (a91c90) · Category: ux · `lib/widgets/marquee_text.dart:214`
+
+**Scenario.** A song credited to several performers (or an un-named track with a long UP主 name) whose artist line is wider than the title column: on opening the player the line is shown starting about a third of the way through, with its leading characters scrolled off and faded, held there for 1.4 s, and the first name only comes into view after ~65% of a full cycle.
+
+**Evidence.** lib/screens/now_playing_page.dart:414-416 `MarqueeText(text: LibraryController.artistOf(track), phase: 0.35, ...`.
+lib/widgets/marquee_text.dart:214-216 `final progress = (_controller.value + widget.phase) % 1.0; return Transform.translate(offset: Offset(-progress * _travel, 0), child: child);` - with the controller at 0 (the whole dwell, and each restart at :143 `_controller.value = 0`) the offset is `-0.35 * (textWidth + gap)`, not 0. The doc at :8 says motion 'holds the static start for [dwell] first'.
+
+**Fix.** Apply the phase only once scrolling has begun (e.g. start the controller with `_controller.forward(from: phase)`/`repeat` after the dwell and paint `-_controller.value * _travel`), or drop `phase: 0.35` at the single call site since the two lines already start at different times.
+
+## 121. [low] Content-sized sheets cannot scroll: showAppSheet lays the builder out with unbounded height, so TrackInfoSheet's scroll view is inert and TrackSheet overflows on short viewports
+
+- Finder: find:widgets (a91c90) · Category: ux · `lib/widgets/sheet.dart:19`
+
+**Scenario.** Phone in landscape (about 340-390 px usable height) or an Android split-screen window: long-press a downloaded song - the sheet overflows and 删除下载 / 编辑信息 are cut off below the screen with no way to scroll to them. 编辑信息 with the keyboard up in landscape leaves about 140-190 px for a 285 px form: the 保存 button and the 匹配 row are clipped until the keyboard is dismissed. (Landscape was also raised by an earlier unverified pass as an orientation issue; the root cause in this file is the unbounded slot.)
+
+**Evidence.** lib/widgets/sheet.dart:19-25 `final body = Column(mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min, ... children: [const _Handle(), if (expand) Expanded(child: builder(context)) else builder(context)],);` - a non-flex Column child gets an unbounded max height.
+lib/widgets/track_info_sheet.dart:114-116 `return SingleChildScrollView(padding: ..., child: Column(mainAxisSize: MainAxisSize.min, ...` therefore always takes its full content height (about 285 px with the handle) and never scrolls; the outer Column overflows instead.
+lib/widgets/track_sheet.dart:126-231 is a plain `Column(mainAxisSize: MainAxisSize.min` (header + primary button + up to six 52 px SheetActions, roughly 380-470 px).
+Orientation is not locked (AndroidManifest MainActivity has no screenOrientation; ios/Runner/Info.plist:62-67 lists both landscape orientations).
+
+**Fix.** In showAppSheet's non-expand branch wrap the builder in `Flexible(child: SingleChildScrollView(child: builder(context)))` (keeping MainAxisSize.min) so content is height-bounded and scrolls when it does not fit; then remove TrackInfoSheet's own scroll view.
+
+## 122. [low] Mini player's 'open player' semantics node has no tap action, so a screen reader cannot open the player
+
+- Finder: find:widgets (a91c90) · Category: accessibility · `lib/widgets/mini_player.dart:146`
+
+**Scenario.** With TalkBack or VoiceOver on, focus the docked card: it is announced as a button, but double-tap does nothing because the node exposes no tap action. The full player (lyrics, queue, seek, sleep timer) is unreachable by assistive activation; only 播放/暂停 and 下一首 work.
+
+**Evidence.** lib/widgets/mini_player.dart:146-160 `child: Semantics(button: true, label: '打开播放器：${track.title}，$artist', child: ExcludeSemantics(child: GestureDetector(onHorizontalDragEnd: ..., child: InkWell(onTap: onTap,` - the Semantics widget declares a button but no `onTap`, and ExcludeSemantics removes the InkWell's tap action (and the text) from the tree. Compare lib/widgets/track_info_sheet.dart:123-127 and now_playing_page.dart:582-586, where the GestureDetector is not excluded and its tap action merges into the labelled node.
+
+**Fix.** Add `onTap: onTap` to the Semantics widget (keep ExcludeSemantics for the inner text), or drop ExcludeSemantics and use MergeSemantics so the InkWell's action is retained.
+
+## 123. [low] SongTile is a fixed 64 px while its two text lines scale with the system font; rows overflow from about 1.7x
+
+- Finder: find:widgets (a91c90) · Category: accessibility · `lib/widgets/song_tile.dart:60`
+
+**Scenario.** Android 14+ font size set to 180-200%: every song row in the library, search, playlists and queue needs about 67-74 px for its text; the centred Column overflows the 64 px row and, since Flex does not clip, the title and artist lines paint into the neighbouring rows (and report RenderFlex overflow in debug).
+
+**Evidence.** lib/widgets/song_tile.dart:59-60 `child: SizedBox(height: extent,` with `static const double extent = 64;` and the text column at :88-111: title `AppTypography.body.copyWith(... height: 1.25)` (15 pt -> 18.75 px), `SizedBox(height: 3)`, second line `AppTypography.caption.copyWith(fontSize: 13)` (height 1.3 -> 16.9 px) = 38.65 px at 1.0x, i.e. 35.65*s + 3 > 64 once s > 1.71. playback_queue_sheet.dart:78 additionally pins `itemExtent: SongTile.extent`. The mini player was given exactly this allowance (mini_player.dart:50-52 `// Text can grow with the system font size; the card grows with it.`) but the row was not.
+
+**Fix.** Grow the row with the text scaler as the mini player does (compute `extent + max(0, scaler.scale(15)-15)*1.25 + max(0, scaler.scale(13)-13)*1.3`, and use the same value for the queue's itemExtent), or cap the text scale for these two lines with `MediaQuery.withClampedTextScaling`.
+
+## 124. [low] Three icon-only controls are below the project's 48 pt minimum touch target
+
+- Finder: find:widgets (a91c90) · Category: conformance · `lib/widgets/lyrics_view.dart:329`
+
+**Scenario.** In the downloads sheet a failed row shows 重试 and 忽略 as two adjacent 44 px-wide targets with 21 px glyphs; a slightly off tap on 重试 lands on 忽略 and removes the failed entry (and with it the only retry affordance for that song). The lyrics 回到当前 button is 44x44 at the pane's right edge.
+
+**Evidence.** lib/widgets/lyrics_view.dart:327-331 `child: const Tooltip(message: '回到当前', child: SizedBox(width: 44, height: 44,` (the InkWell is sized by this box: 44x44).
+lib/widgets/download_management_sheet.dart:184-187 `return SizedBox(width: 44, height: 48, child: IconButton(tooltip: tooltip, padding: EdgeInsets.zero,` - used for 重试 / 忽略 / 删除下载, with 重试 and 忽略 side by side at :138-157.
+CLAUDE.md UI conventions: 'Touch targets are at least 48 pt'.
+
+**Fix.** Use 48x48 for `_icon` in download_management_sheet.dart and for `_ResumeButton` in lyrics_view.dart.
+
+## 125. [low] Missing key.properties silently produces a debug-signed "release" APK with exit code 0
+
+- Finder: find:native (aa4a5a) · Category: build-release · `android/app/build.gradle:59`
+
+**Scenario.** On a fresh checkout (or after key.properties is lost) `tool/build_release.sh` succeeds and yields bilibeats-0.1.x-arm64-v8a.apk signed with that machine's debug key; the warning scrolls past in Gradle output. Installed over the real install it fails with a signature mismatch; installed clean (new phone, or after uninstalling to "fix" the mismatch) it works, but every later properly-signed build can no longer update it, and the only way forward is an uninstall that wipes the whole downloaded library and playlists (no backup by design).
+
+**Evidence.** android/app/build.gradle:59-66 `signingConfig = hasReleaseKey ? signingConfigs.release : signingConfigs.debug` followed only by `logger.warn("WARNING: android/key.properties not found — signing this release with the DEBUG key...")`.
+tool/build_release.sh:80-85 likewise only echoes a WARNING when `android/key.properties` is absent, then continues to `flutter build apk --release` and copies the result to `bilibeats-${SHORT_VERSION}-arm64-v8a.apk` (line 98-99), the same name a properly signed build gets. key.properties and the .jks are gitignored (android/.gitignore:11-13), so any fresh clone / new machine is in this state. AndroidManifest.xml:19-21 disables all backup, so app data cannot survive an uninstall.
+
+**Fix.** Make the release script fail (exit 1) when android/key.properties is missing unless an explicit opt-in such as ALLOW_DEBUG_SIGNING=1 is set; optionally throw a GradleException for assembleRelease/bundleRelease in the same case, or suffix the artifact name with `-DEBUGSIGNED`.
+
+## 126. [low] Android launch/normal themes are light when the system is in light mode, so the dark-only app cold-starts on a white screen
+
+- Finder: find:native (aa4a5a) · Category: ux · `android/app/src/main/res/values/styles.xml:4`
+
+**Scenario.** Phone set to the light system theme (default on many devices, or daytime auto-schedule). Every cold start shows a full white screen until AudioService.init completes and Flutter draws its first #08080A frame; the white NormalTheme window background can also show through behind the Flutter surface during resizes/transitions. With the system in dark mode the problem does not appear, which is why it is easy to miss.
+
+**Evidence.** android/app/src/main/res/values/styles.xml:4 `<style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">` with `windowBackground` = `@drawable/launch_background`; drawable-v21/launch_background.xml: `<item android:drawable="?android:colorBackground" />` (white under Theme.Light); drawable/launch_background.xml: `@android:color/white`. styles.xml:15-16 NormalTheme is also `Theme.Light.NoTitleBar` with `?android:colorBackground`. Only values-night/styles.xml uses Theme.Black. The app is dark only (CLAUDE.md) and the first Flutter frame is delayed until after `await AudioService.init(...)` (lib/main.dart:39-51) because runApp is called at the end of main().
+
+**Fix.** Make both values/ and values-night/ themes dark: parent `@android:style/Theme.Black.NoTitleBar` and a fixed dark colour (the app background, #08080A) for `windowBackground` in LaunchTheme and NormalTheme / launch_background.xml.
+
+## 127. [low] Orientation is not restricted on any platform although the UI is laid out for portrait only
+
+- Finder: find:native (aa4a5a) · Category: platform · `ios/Runner/Info.plist:62`
+
+**Scenario.** With auto-rotate on, the user tilts the phone while the player page is open. The viewport becomes roughly 800x360 pt: fixed rows (~220 pt) + minimum gaps (96 pt) + status/navigation insets leave about 20 pt or less for the cover, which collapses to a sliver (or the column overflows on shorter devices); the home grid and mini player are likewise stretched. Nothing in the app was designed or golden-tested for landscape (test renders are portrait).
+
+**Evidence.** ios/Runner/Info.plist:62-67 lists `UIInterfaceOrientationLandscapeLeft` and `UIInterfaceOrientationLandscapeRight` for iPhone; android/app/src/main/AndroidManifest.xml:22-30 declares MainActivity with no `android:screenOrientation`; `grep -rn "orientation\|Orientation" lib` returns nothing (no SystemChrome.setPreferredOrientations). The player page budget assumes a tall box: lib/screens/now_playing_page.dart:545 `static const double _rows = 48 + 52 + 46 + _PlayButton.size;` and :553-556 `final spare = box.maxHeight - _rows - text - art; final s = spare < 96 ? 96.0 : spare;` - fixed rows plus at least 96 pt of gaps, with the artwork taking whatever is left.
+
+**Fix.** Lock to portrait: `android:screenOrientation="portrait"` on MainActivity (or `SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp])` in main()) and remove the two landscape entries from the iPhone `UISupportedInterfaceOrientations` array.
+
+## 128. [low] web/, linux/ and windows/ are checked-in scaffolding for targets that cannot run
+
+- Finder: find:native (aa4a5a) · Category: platform · `linux/flutter/generated_plugins.cmake:5`
+
+**Scenario.** `flutter run -d linux` / `-d windows` builds and opens a window, then AudioService.init / the first AudioPlayer call throws MissingPluginException before runApp, leaving a blank window; `flutter run -d chrome` fails at the first file-system call. The directories look like maintained targets (they were kept in sync during the package rename) but none of them can start, and CLAUDE.md lists only Android, iOS and macOS.
+
+**Evidence.** linux/flutter/generated_plugins.cmake:5-7 `list(APPEND FLUTTER_PLUGIN_LIST file_selector_linux )` - no audio plugin is registered; just_audio-0.10.6/pubspec.yaml:44-55 declares platforms android, ios, macos, web only, and audio_service has no Linux/Windows implementation either. lib/main.dart:39 `final handler = await AudioService.init(...)` runs before `runApp` (line 68). For web, persistence and playback go through dart:io (`File`, `Platform`, `HttpClient` in database_service.dart, audio_download_service.dart, bili_http.dart), which is unsupported in the browser. Yet web/index.html and web/manifest.json are branded ("BiliBeats — 在手机上听 B 站音乐...") and linux/windows CMake files carry the renamed binary/application id, and lib still has `Platform.isWindows` branches (audio_download_service.dart:109, database_service.dart:365).
+
+**Fix.** Delete web/, linux/ and windows/ (and the two `Platform.isWindows` branches), or state in CLAUDE.md that they are unsupported scaffolding; if desktop is ever wanted, add just_audio_media_kit/just_audio_windows and guard AudioService.init.
+
+## 129. [low] build_release.sh succeeds and emits the publishable APK name when signing fell back to the debug key
+
+- Finder: find:release (aa6dad) · Category: build-release · `tool/build_release.sh:79`
+
+**Scenario.** On a fresh clone or a second machine where the .jks was restored but key.properties was not (both are gitignored), `tool/build_release.sh all` finishes normally and leaves bilibeats-0.1.4-arm64-v8a.apk ready to attach. Installed over the existing app it is rejected for a signature mismatch; if it is attached to the GitHub release, anyone who installs it can never update to a properly signed build without uninstalling (losing downloads and playlists).
+
+**Evidence.** tool/build_release.sh:79-84 only prints `WARNING: android/key.properties not found — this build will be signed with the DEBUG key and must not be published.` and continues; lines 97-98 then copy the result to `bilibeats-${SHORT_VERSION}-arm64-v8a.apk`, the exact asset name the README tells users to download, and the script exits 0. android/app/build.gradle:59-61 `signingConfig = hasReleaseKey ? signingConfigs.release : signingConfigs.debug`. The warning is printed before several minutes of Gradle output and is not repeated in the closing summary. Commit 3e6c2b9's message records that v1.0.0 through v2.2.0 shipped debug-signed this way.
+
+**Fix.** Make the missing key a hard error in build_release.sh (`exit 1` unless e.g. ALLOW_DEBUG_SIGNING=1 is set), and when the override is used name the copy `...-DEBUG-SIGNED.apk`. Optionally run `apksigner verify --print-certs` after the build and fail if the signer is CN=Android Debug.
+
+## 130. [low] README states Android 6.0+ but the shipped APK has minSdkVersion 24 (Android 7.0)
+
+- Finder: find:release (aa6dad) · Category: docs · `README.md:14`
+
+**Scenario.** Someone follows the README on an Android 6.0/6.0.1 device (API 23): the package installer refuses the APK with a parse/incompatible error although the README says the device is supported.
+
+**Evidence.** README.md:14 `在 Android 设备上打开下载的 .apk 文件（需 Android 6.0 及以上版本）。` android/app/build.gradle:37 `minSdk = flutter.minSdkVersion`; ~/flutter/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt:26 `val minSdkVersion: Int = 24` (Flutter 3.44.8, the version pinned in CI). build/app/intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml contains minSdkVersion="24" for the 0.1.3 build whose sha256 matches the published release asset.
+
+**Fix.** Change the README to Android 7.0 (API 24), or pin `minSdk` explicitly in android/app/build.gradle so a Flutter upgrade cannot move it silently and the README can state a fixed number.
+
+## 131. [low] release.sh leaves a bumped, uncommitted, untagged tree when a step after the version edit fails
+
+- Finder: find:release (aa6dad) · Category: build-release · `tool/release.sh:94`
+
+**Scenario.** `git commit` fails inside `tool/release.sh patch "..."`: the version reads 0.1.4+5 in pubspec.yaml and the changelog has a 0.1.4 entry, but there is no commit and no tag. Re-running refuses with 'working tree is dirty'; running build_release.sh at this point builds an APK labelled 0.1.4 from an unreleased tree. Separately, running the script while a redesign branch is checked out commits and tags the release on that branch, not on main.
+
+**Evidence.** tool/release.sh:94 rewrites pubspec.yaml in place; the CHANGELOG failure branch (124-128) removes only `CHANGELOG.md.new` and `/tmp/release_entry.md` and exits without restoring pubspec.yaml; lines 135-137 `git add` / `git commit` / `git tag` run under `set -e` with no trap, so a failing commit (pre-commit hook, signing, missing identity) exits with pubspec.yaml and CHANGELOG.md modified and staged and no tag. The preflight at line 42 then blocks the retry: `error: working tree is dirty`. The script also never checks the current branch (the repo has `redesign-v5` and `redesign-v6` next to `main`), and the origin check at line 49 only warns.
+
+**Fix.** Add `trap 'git checkout -- pubspec.yaml CHANGELOG.md 2>/dev/null; git reset -q pubspec.yaml CHANGELOG.md 2>/dev/null' ERR` (cleared after the tag succeeds), and in preflight refuse unless `git rev-parse --abbrev-ref HEAD` is `main`.
+
+## 132. [low] Version numbers 1.0.0 through 6.0.0 are already tagged, so the restarted 0.x series cannot be released past 0.x
+
+- Finder: find:release (aa6dad) · Category: build-release · `tool/release.sh:86`
+
+**Scenario.** `tool/release.sh major "..."` computes 1.0.0 and stops with 'tag v1.0.0 already exists'. The same happens for any later bump that lands on a number used by the old series (2.0.0, 2.1.0, 3.0.0-3.13.0, 4.0.0, 5.0.0, 6.0.0). Working around it by deleting the old tag orphans that GitHub release and leaves two `## [1.0.0]` headings in CHANGELOG.md for different apps.
+
+**Evidence.** tool/release.sh:86-89 `if git rev-parse "v$NEW_SHORT" ... echo "error: tag v$NEW_SHORT already exists"; exit 1`. `git tag -l` lists v1.0.0, v2.0.0 ... v6.0.0 (57 tags from the pre-rename series) alongside v0.1.0-v0.1.3, and CHANGELOG.md already has `## [1.0.0] - 2026-07-28` (line 366) through `## [6.0.0]` (line 48) below the 0.1.x entries. pubspec.yaml:4 is 0.1.3+4.
+
+**Fix.** Decide the scheme now: either namespace the old series (retag as `legacy-vX.Y.Z` and mark those CHANGELOG sections as the pre-rename app `com.bilibeat.bilibeat`), or document that the new series must skip to 7.0.0 for its first major and make `major` do that.
+
+## 133. [low] build_release.sh builds whatever is checked out under the pubspec version and overwrites that version's symbols
+
+- Finder: find:release (aa6dad) · Category: build-release · `tool/build_release.sh:57`
+
+**Scenario.** After tagging 0.1.x the user fixes something in lib/ and runs `tool/build_release.sh` to try it on the phone before cutting the next release. The script produces a second, different `bilibeats-0.1.x-arm64-v8a.apk` with the same versionName/versionCode and replaces symbols/0.1.x+N/app.android-arm64.symbols. A crash trace from the published 0.1.x build now symbolizes against the wrong file (wrong or garbage frames), and two different binaries carry the same version.
+
+**Evidence.** tool/build_release.sh:55-58 `VERSION=$(grep '^version:' pubspec.yaml ...)`, `SYMBOLS_DIR="symbols/$VERSION"`, `mkdir -p`; lines 91-94 write `--split-debug-info="$SYMBOLS_DIR"` unconditionally. There is no check that the tree is clean or that HEAD is the commit tagged `v$SHORT_VERSION`. Today HEAD (9e5b784) is two commits past v0.1.3 with pubspec still at 0.1.3+4, and build/app/outputs/flutter-apk/bilibeats-0.1.3-arm64-v8a.apk was rewritten at 23:11 on Oct 5, after the release assets were uploaded (22:03Z). Those two commits touched no Dart, so the bytes happen to match the published asset (sha256 951418a7...), but nothing enforces that.
+
+**Fix.** In build_release.sh refuse (or require an explicit `--dev` flag that writes to `symbols/dev/` and names the artifact `-dev`) unless `git status --porcelain` is empty and `git describe --exact-match --tags HEAD` equals `v$SHORT_VERSION`.
+
+## 134. [low] CI never compiles iOS or any release-mode build, so the configurations that are actually shipped are untested
+
+- Finder: find:release (aa6dad) · Category: test-gap · `.github/workflows/ci.yml:49`
+
+**Scenario.** A dependency bump (e.g. the pending image_picker_ios 0.8.13+6 -> +9 or jni 1.0.2 -> 1.1.0 from `flutter pub outdated`) breaks the iOS SwiftPM build or needs a new R8 keep rule. CI stays green; the break is found only when `tool/build_release.sh all` runs after release.sh has already committed and tagged the version, or, for an R8 strip, at runtime on the phone.
+
+**Evidence.** .github/workflows/ci.yml:49-55 matrix is only `flutter build apk --debug` (ubuntu) and `flutter build macos --debug`. The comment at 40-43 says the job exists to catch 'a bad SPM/CocoaPods file ... a native API gone in a plugin update', but there is no iOS entry although an unsigned .ipa is published for every release and `image_picker_ios` has no macOS counterpart. Release-only Android configuration is also never exercised: android/app/build.gradle:70-75 (`minifyEnabled`, `shrinkResources`, proguard-rules.pro), 95-101 (release-variant jniLibs excludes), the lintVital step that tool/build_release.sh:22-24 says needs JDK 21, and `--obfuscate`.
+
+**Fix.** Add matrix entries `flutter build ios --release --no-codesign` on macos-latest and `flutter build apk --release --target-platform android-arm64` on ubuntu with `actions/setup-java` (temurin 21); the debug-key fallback already lets the release APK build without secrets.
+
+## 135. [low] make_keystore.sh writes an unverified password and cannot be re-run after a partial run
+
+- Finder: find:release (aa6dad) · Category: build-release · `tool/make_keystore.sh:51`
+
+**Scenario.** The user mistypes the re-entered password (or presses Ctrl-C at that prompt). Case 1: key.properties holds a wrong password and the next release build fails in Gradle's signing task with a keystore error. Case 2: the .jks exists but key.properties does not, so build_release.sh warns, signs with the debug key and points at make_keystore.sh, which now exits with 'already exists. Refusing to overwrite'. Neither script says how to recover (hand-write key.properties).
+
+**Evidence.** tool/make_keystore.sh:50-51 `printf 'Re-enter the keystore password ...'; read -rs PASS` and 59-65 write it straight into key.properties with no check against the keystore keytool just created (41-47). `read` with default IFS also strips leading/trailing whitespace from the password. Lines 26-30 refuse to run when `$KEYSTORE` or `$PROPS` exists. tool/build_release.sh:82 tells the user to 'Run tool/make_keystore.sh first' whenever key.properties is missing.
+
+**Fix.** After `read`, verify before writing: `KS_PASS="$PASS" keytool -list -keystore "$KEYSTORE" -alias "$ALIAS" -storepass:env KS_PASS >/dev/null` and loop on failure; use `IFS= read -rs PASS`. When the keystore exists but key.properties does not, offer to write only key.properties instead of refusing.
+
+## 136. [low] README forbids commercial use while the project is licensed GPL-3.0, which does not permit that restriction
+
+- Finder: find:release (aa6dad) · Category: conformance · `README.md:136`
+
+**Scenario.** The two statements contradict each other: under the LICENSE file anyone may use and redistribute the app commercially, so the README's prohibition is unenforceable and the project's actual terms are ambiguous to anyone reading the repository.
+
+**Evidence.** README.md:136 `无破解与商业化：本项目严禁用于任何商业牟利行为` and README.md:141 `本项目基于 GNU General Public License v3.0 (GPL-3.0) 开源`; LICENSE is the GPLv3 text (added in 0550189, one commit after the disclaimer in 4f3e4e6). GPLv3 section 7 treats a field-of-use limit as a 'further restriction' that recipients may remove, and section 10 forbids imposing further restrictions on the rights granted.
+
+**Fix.** Reword the disclaimer line as a statement about the project itself (no ads, no paid tiers, not operated commercially by the author) rather than a prohibition on users, or choose a licence that actually carries a non-commercial term.
+
+## 137. [low] _skipIfOffline marks the test skipped but lets the body run, so every NetEase-backed test fails when offline
+
+- Finder: find:tests (a41ec6) · Category: correctness · `test/zhoushen_test.dart:16`
+
+**Scenario.** Run the documented `flutter test` (CLAUDE.md lists it without --exclude-tags) on a machine with no route to music.163.com, or behind a network where the TCP probe fails. The 29 tests that call _skipIfOffline are marked skipped and then fail on their expectations (`expect(id?.artist, '周深')` against null), so the run is red for a reason unrelated to the code - the opposite of what the helper promises. Only the two cases that expect null (175-182) pass.
+
+**Evidence.** test/zhoushen_test.dart:13-15 claims 'every live-NetEase test starts with this so the suite stays green offline'. 16-33: `Future<void> _skipIfOffline() async { if (_networkChecked != null) { if (!_networkAvailable) markTestSkipped('requires music.163.com'); return; } ... catch (_) { markTestSkipped('requires music.163.com'); } }` returns void; callers do `await _skipIfOffline();` and carry on, e.g. 82-89 `final id = await LyricsEngine.identify(title, uploader: 'JLRS-LeoFM'); expect(id?.artist, '周深', reason: title);`. test_api-0.7.x lib/src/scaffolding/utils.dart:40-45: 'A skipped test may still fail if any exception is thrown ... If the entire test should be skipped `return` from the test body after marking it as skipped.' Offline, identify returns null (lib/services/lyrics_engine.dart:689 'Returns null when nothing is confirmed (or the network is down)'). The sibling file does it correctly: test/recognition_live_test.dart:35-38 `markTestSkipped(...); return;`.
+
+**Fix.** Return a bool and bail out: `Future<bool> _online() async {...}` with `if (!await _online()) { markTestSkipped('requires music.163.com'); return; }` at each call site (and inside `check`).
+
+## 138. [low] The cover sweep that deletes files from bilibeat_covers at launch is untested; only the pure rebaseCover string function is
+
+- Finder: find:tests (a41ec6) · Category: test-gap · `lib/services/database_service.dart:173`
+
+**Scenario.** A change in how picked covers are stored (a `file://` prefix that `local` does not strip the same way, a trailing-slash or symlinked documents path, covers referenced from a new store such as artist portraits that is not added to `used`) makes `used.contains(entity.path)` false for covers still in use. Nothing happens for a day; from the next launch after that, every such cover is deleted and the affected songs and playlists show the placeholder permanently - the picked image was the only copy. No test notices.
+
+**Evidence.** lib/services/database_service.dart:123-125 `_rebaseCovers(dir); if (!_setAsideAny) unawaited(_sweepCovers(dir));` and 173-192: `used` is built from `local(t.coverUrl)` over downloads, history and playlists, then `await for (final entity in folder.list()) { if (entity is! File || used.contains(entity.path)) continue; if ((await entity.lastModified()).isAfter(cutoff)) continue; await entity.delete(); }`. Keeping a cover depends on an exact string match between `entity.path` (from listing `'$docs/bilibeat_covers'`) and the stored coverUrl after _rebaseCovers. test/store_safety_test.dart:87-116 tests `DatabaseService.rebaseCover(url, now)` only; no test creates a bilibeat_covers folder, and in store_safety_test `_setAsideAny` is true so the sweep is skipped altogether. The one-day cutoff additionally hides any mismatch from a quick manual check.
+
+**Fix.** Test _load against a seeded folder: a referenced cover older than a day (kept), an unreferenced old one (deleted), an unreferenced fresh one (kept), a cover referenced through a file:// URL and one stored under a previous container path (kept after rebase).
+
+## 139. [low] The handler's recovery paths have no test and the fake cannot drive them: player errors, stop(), and play() on an empty queue
+
+- Finder: find:tests (a41ec6) · Category: test-gap · `test/fake_audio_player.dart:46`
+
+**Scenario.** Regressions that would pass the suite: play() from a media button after a cold start no longer restoring the saved session (handler 750-756) - the headset button does nothing until the app is opened; stop() no longer saving the session before releasing the player (780-781) - position lost after the 30-minute idle stop; deleting the song that is playing leaving nowPlaying pointing at a removed file; two quick taps on downloaded songs leaving `_installing` stuck above zero, after which _publish (214) returns early forever and the UI freezes on one song.
+
+**Evidence.** test/fake_audio_player.dart:45-46 `// ignore: close_sinks` / `final _errors = StreamController<ja.PlayerException>.broadcast();` is exposed as errorStream (151) but nothing ever adds to it and there is no simulateError control, so lib/services/audio_player_handler.dart:207-210 (`_messages.add('有歌曲无法播放，已跳过')`) and the real player's maxSkipsOnError behaviour (just_audio.dart:417-427: seekToNext, or pause after the limit) are unreachable from tests. `setSourceDelay` (fake 15, 189) is never set by any test, so overlapping installs - `_installing > 1` and the `on ja.PlayerInterruptedException` branch at handler 567-568 - are also unexercised; the fake would not throw that exception anyway (two overlapping calls both succeed and the slower, older one lands last, the reverse of the real player). No test in test/playback_handler_test.dart calls handler.stop(), handler.play(), togglePlayPause, onTaskRemoved, skipToQueueItem or selectQueueTrack; `removeTracks` is only tested for a non-current track (225-237), never for the playing one or for emptying the queue (handler 861-865).
+
+**Fix.** Add simulateError(index) and PlayerInterruptedException-on-overlap to the fake (interrupt the earlier pending setAudioSources when a newer one starts), then add tests for: error on the current item, two overlapping playTrack calls on downloaded songs, stop() followed by play(), play() on a fresh handler with a saved session, and removing the current / the only track.
+
+## 140. [low] Short-link resolver validates the host by substring, so a pasted look-alike link makes the app fetch (and follow redirects from) an arbitrary host, over cleartext if asked
+
+- Finder: find:sweep-security (a39422) · Category: security · `lib/services/bilibili_sdk.dart:97`
+
+**Scenario.** The listener pastes share text containing `https://b23.tv.evil.example/a` (or `http://192.168.1.1/apply.cgi?x=b23.tv`) into search. The first regex does not match (b23.tv is not followed by `/`), the fallback regex takes the whole URL, the substring check passes, and the app issues a GET to that host with redirects followed -- to an attacker server (IP disclosure, attacker-chosen BV returned from the body so a different video than the one advertised is listed as the result), to a cleartext http URL, or to a device on the home LAN (GET-triggered actions on a router/IoT admin page). A genuine `http://b23.tv/...` link is likewise fetched in cleartext and can be rewritten on path.
+
+**Evidence.** lib/services/bilibili_sdk.dart:87-91 picks the URL: `RegExp(r'(?:https?://)?(?:www\.)?(?:b23\.tv|bili2233\.cn|acg\.tv)/[^\s]+').firstMatch(input) ?? RegExp(r'https?://[^\s]+').firstMatch(input);` -- the fallback takes ANY url in the text.
+lib/services/bilibili_sdk.dart:97-101 is the only host check: `if (!urlStr.contains('b23.tv') && !urlStr.contains('bili2233.cn') && !urlStr.contains('acg.tv')) { return null; }` -- a substring of the whole URL, not the host.
+lib/services/bilibili_sdk.dart:103-109: `final uri = Uri.parse(urlStr); final req = await _httpClient.getUrl(uri)... // Let HttpClient follow redirects automatically` and 111-115 reads the whole body with no size cap; 122-123 then trusts a BV number found anywhere in that body: `final bvInBody = _bvId.firstMatch(body); if (bvInBody != null) return 'BV${bvInBody.group(1)}';`.
+Entry gate at 474-476 is the same substring test on the raw query. Scheme is not forced to https (line 94 only adds https when no scheme is present). `android:usesCleartextTraffic="false"` (AndroidManifest.xml:19) does not apply: the Dart SDK shipped with this Flutter (~/flutter/bin/cache/dart-sdk/lib/_http/http_impl.dart) has no cleartext policy check at all (no `isInsecureConnectionAllowed`), and dart:io follows up to 5 redirects to any host/scheme.
+
+**Fix.** Parse the candidate with Uri.tryParse and require `uri.scheme == 'https'` (upgrade http) and `uri.host` to be exactly b23.tv / bili2233.cn / acg.tv (or a `.`-prefixed subdomain); drop the generic `https?://\S+` fallback. Set `req.followRedirects = false`, read the Location header yourself and only extract the BV from it (optionally follow one hop if its host ends with bilibili.com). Cap the body read.
+
+## 141. [low] On iOS every downloaded song and the cover cache live in backed-up directories, contradicting the app's own 'nothing is backed up' policy
+
+- Finder: find:sweep-security (a39422) · Category: privacy · `lib/services/audio_download_service.dart:67`
+
+**Scenario.** The iOS build is installed on a phone with iCloud Backup enabled and a few GB of songs downloaded. Every `audio_*.m4a`, the 200 MB cover cache, the play history and the search history are uploaded to iCloud with the device backup: the free 5 GB quota fills and device backups start failing, and data the Android build deliberately keeps off any backup (listening and search history) leaves the device.
+
+**Evidence.** lib/services/audio_download_service.dart:67-68: `final docs = await getApplicationDocumentsDirectory(); final path = '${docs.path}/bilibeat_audio';` -- all audio goes to Documents.
+lib/widgets/cached_cover_image.dart:179-182: `// Application Support, not the temp dir ...` `final supportDir = await getApplicationSupportDirectory(); final cacheDir = Directory('${supportDir.path}/bilibeat_covers');` (up to 200 MB, line 61).
+lib/services/database_service.dart:89 puts library, history, search history and lyrics JSON in Documents too.
+Android explicitly opts out: android/app/src/main/AndroidManifest.xml:20-22 `android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules=...` and data_extraction_rules.xml: `Nothing in BiliBeat is worth restoring: downloads are re-downloaded ... Opt everything out so no cached audio or credentials ever leak`.
+Nothing in ios/, macos/ or lib/ sets the excluded-from-backup resource value (grep for `xcludedFromBackup` returns nothing), and on iOS both Documents and Library/Application Support are included in iCloud and Finder backups.
+
+**Fix.** On iOS/macOS store re-downloadable audio and the cover cache outside the backup set (e.g. `Library/Caches`-independent `Application Support/<dir>` with `URLResourceKey.isExcludedFromBackupKey = true` set on `bilibeat_audio` and `bilibeat_covers` via a small platform channel / the existing native side), or set the flag on the two directories after creating them.
+
+## 142. [low] Lock-screen artwork path decodes the full-resolution cover on the Android main thread and re-downloads the original remote cover without resizing
+
+- Finder: find:sweep-security (a39422) · Category: performance · `lib/services/audio_player_handler.dart:391`
+
+**Scenario.** The listener sets a camera photo (12-50 MP, or a 200 MP shot on recent phones) as a song's cover via 编辑信息. Each time that song becomes current (and again when the session is restored at launch) the service decodes the whole image -- 48 MB of pixels for 12 MP, ~200 MB for 50 MP, ~800 MB for 200 MP -- on the main thread, stalling the UI for hundreds of ms and, for the largest photos, throwing an uncaught OutOfMemoryError that kills the app on every start because the session restore replays the same item. Separately, every played track with a Bilibili cover downloads the original multi-megabyte image again through flutter_cache_manager although a resized copy is already in the app's own cover cache.
+
+**Evidence.** lib/services/audio_player_handler.dart:391-397: `artUri: track.coverUrl.isEmpty ? null : Uri.tryParse(track.coverUrl.startsWith('/') ? 'file://${track.coverUrl}' : track.coverUrl)` -- the raw coverUrl, not the CDN-resized one CachedCoverImage uses (cached_cover_image.dart:52 `'$url@${w}w_${h}h_1e_1c.webp'`).
+lib/main.dart:41-51 `AudioServiceConfig(...)` sets no `androidArtDownscaleSize`.
+audio_service-0.18.19/lib/audio_service.dart:1058-1059 sends a file art path straight to the platform; for http(s) it fetches the URL with `cacheManager.getSingleFile(artUri.toString())` (a second, separate cover cache, no Referer, original size).
+audio_service-0.18.19/android/.../AudioService.java:218-240: when `config.artDownscaleWidth == -1` it runs `bitmap = BitmapFactory.decodeFile(artUri.getPath());` with no sampling, inside setMetadata on the platform thread; the surrounding `catch (Exception e)` (line 244) does not catch OutOfMemoryError.
+lib/utils/cover_picker.dart:11 `ImagePicker().pickImage(source: ImageSource.gallery)` passes no maxWidth/imageQuality, and line 19 copies the original file.
+
+**Fix.** Pass `androidArtDownscaleSize: Size(512, 512)` (and `preloadArtwork: false`) in AudioServiceConfig; give `artUri` the CDN-resized URL (`CachedCoverImage.sizedUrl(coverUrl, 512, 512)`); and pick covers with `pickImage(source: ..., maxWidth: 1600, maxHeight: 1600, imageQuality: 90)`.
+
+## 143. [low] Cover picker derives the extension with split('.').last, building a nested path when the picked file has no extension
+
+- Finder: find:sweep-security (a39422) · Category: correctness · `lib/utils/cover_picker.dart:16`
+
+**Scenario.** A picked image whose name has no extension (a document-provider file with unknown MIME type on Android; `~/Pictures/cover` on macOS) gives `image.path.split('.').last == 'app/cache/<uuid>/cover'` (the last dot is in the package name) or the entire path. The destination becomes `.../bilibeat_covers/cover_1700000000000.app/cache/<uuid>/cover`, whose parent does not exist, `copy` throws, the catch returns null and the cover silently is not set -- no message to the listener (debugPrint is a no-op in release).
+
+**Evidence.** lib/utils/cover_picker.dart:16-19: `final ext = image.path.split('.').last; final saved = File('${dir.path}/${prefix}_${DateTime.now().millisecondsSinceEpoch}.$ext'); await File(image.path).copy(saved.path);` and 21-23 swallow the error: `catch (e) { debugPrint('Cover pick failed: $e'); return null; }`.
+The split is on the whole path, not the basename. On Android the picked file is copied to `{cacheDir}/{uuid}/{fileName}` (image_picker_android-0.8.13+19 FileUtils.java: `File targetDirectory = new File(context.getCacheDir(), uuid)`), i.e. under `/data/user/0/com.bilibeats.app/cache/...`, and the extension is only rewritten when the MIME type is known (`else if (extension != null) fileName = getBaseName(fileName) + extension;`). On macOS the path is the user's own file path.
+
+**Fix.** Take the extension from the basename only: `final name = image.name; final dot = name.lastIndexOf('.'); final ext = dot > 0 ? name.substring(dot + 1).replaceAll(RegExp(r'[^A-Za-z0-9]'), '') : 'img';` and show a snackbar when the copy fails.
+
+## 144. [low] Auto-naming jobs already queued still rename songs after 自动匹配歌曲信息 is switched off
+
+- Finder: find:sweep-async (a34172) · Category: correctness · `lib/services/track_naming.dart:119`
+
+**Scenario.** The listener skips through a dozen un-named downloads, sees a song renamed wrongly, opens 设置 and turns 自动匹配歌曲信息 off. The lookups still queued (and the one in flight) complete over the next seconds to minutes and rewrite the title, artist and cover of those songs anyway, with the switch showing off.
+
+**Evidence.** lib/services/track_naming.dart:100-106 `static void autoName(Track track) { if (!enabled || _settled(track) || !_attempted.add(track.id)) return; _queue = _queue.then((_) => _name(track))...` checks `enabled` only when the job is queued. `_name` (:119-197) never re-reads `enabled`: it starts `final before = await _stored(track.id); if (before == null || _settled(before)) return;` and ends in `await _save(stored.copyWith(title: found.title, uploader: found.artist, coverUrl: found.coverUrl, named: true, ...))`. setEnabled (:48-51) only flips the flag and writes the pref. The queue is serial and each job makes several network lookups with 10 s timeouts, so jobs pile up: one per track change (init listener :42-45) and one per new download (library_controller.dart:202-204).
+
+**Fix.** Re-check `enabled` at the top of `_name` and again just before each `_save` (returning after `_attempted.remove(track.id)` so the song is reconsidered if the setting is turned back on).
+
+## 145. [low] play() arriving while restoreSession is in flight is silently dropped
+
+- Finder: find:sweep-async (a34172) · Category: concurrency · `lib/services/audio_player_handler.dart:690`
+
+**Scenario.** The process is cold-started (launcher, or a headset/car media button) and a play command (second headset press, lock-screen or Bluetooth play) arrives while the restore started by main() is still loading the library. play() calls restoreSession(), which returns at once because `_restoreStarted` is true, sees an empty queue and returns. The press does nothing and has to be repeated after the restore finishes.
+
+**Evidence.** lib/services/audio_player_handler.dart:689-692 `Future<void> restoreSession() async { if (_restoreStarted) return; _restoreStarted = true; if (_player.audioSources.isNotEmpty) return;`. A second caller returns immediately instead of waiting for the first.
+
+:750-756 `Future<void> play() async { ... if (_player.audioSources.isEmpty) { // A media button can cold-start the service before the UI restores. await restoreSession(); if (_player.audioSources.isEmpty) return; }`.
+
+lib/main.dart:58 `unawaited(handler.restoreSession());` starts the restore right after AudioService.init; it then awaits the session file, the whole library load (compute isolate) and setAudioSources, typically hundreds of milliseconds. I traced audio_service 0.18.19: a click queued before init is flushed inside `configure` (AudioServicePlugin.java:501 invokePendingMethods) and, by microtask order, reaches play() before main's own call, so that single case works. Any play that arrives after main's call but before the restore lands takes the early-return path.
+
+**Fix.** Keep the restore as a future: `Future<void>? _restore; Future<void> restoreSession() => _restore ??= _doRestore();` so play() really awaits the in-flight restore.
+
+## 146. [low] stop() / swipe-away does not cancel a pending 下载并播放: playback starts later with the service stopped
+
+- Finder: find:sweep-async (a34172) · Category: concurrency · `lib/services/audio_player_handler.dart:775`
+
+**Scenario.** Nothing is playing (or playback is paused). The listener taps 下载并播放 on a search result, then swipes the app out of recents while the download is still running. onTaskRemoved calls stop() and the service ends, but the process and the download live on. When the file lands, _install replaces the queue and calls _player.play(): either music starts from an app the listener just dismissed, or on Android 12+ the foreground-service start from the background is refused and the process is killed.
+
+**Evidence.** lib/services/audio_player_handler.dart:634-657 playTrack: `final token = ++_selection; ... if (!await _ensureLocal(track, token)) return; ... await _install(tracks, start, token: token);` and _install :590 `if (autoplay) _startPlayback();`. The only thing that supersedes a pending request is another `++_selection`.
+
+stop() (:775-784) and onTaskRemoved (:787-791 `if (!_player.playing) await stop();`) do not touch `_selection` or `preparing`: `_resumeAfterInterruption = false; _idleTimer?.cancel(); _progressSaveTimer?.cancel(); _clearSleepTimer(); await saveSession(); await _player.stop(); _broadcastState(); await super.stop();`. The class comment (:38-42) explains that starting the foreground service from the background is what Android 12+ answers by killing the process, and stop() carefully clears `_resumeAfterInterruption` for that reason, but leaves this path open.
+
+**Fix.** In stop() bump `_selection` and clear `preparing.value` (as playTrack/playCollection do), so a download that finishes afterwards is kept in the library but not played.
+
+## 147. [low] With 随机播放 on, the 30-minute idle stop (and any playback error) reshuffles the queue
+
+- Finder: find:sweep-async (a34172) · Category: correctness · `lib/services/audio_player_handler.dart:336`
+
+**Scenario.** Shuffle is on and the listener is at song 12 of 40. They pause for more than 30 minutes (service stopped by the idle timer) and resume. The queue sheet now shows '1 / 40' with a new random order; 上一首 no longer goes back to the song that was played before, and songs already heard come round again. Likewise after one unplayable file is skipped.
+
+**Evidence.** lib/services/audio_player_handler.dart:334-338 `_idleTimer = Timer(_idleStopAfter, () { if (!_player.playing) unawaited(stop()); });` and stop() :781 `await _player.stop();`.
+
+just_audio 0.10.6 lib/just_audio.dart: stop() calls `_setPlatformActive(false)` (:1168-1169); `_setPlatformActive` always ends in `await _load(platform, _playlist, initialSeekValues: ...)` for the idle platform as well as the native one (~:1750-1757); `_load` does `source._shuffle(initialIndex: initialSeekValues?.index ?? 0); await _broadcastSequence();` (:1009-1010); DefaultShuffleOrder.shuffle (:3969-3981) is `indices.shuffle(_random)` followed by swapping the initial index to position 0. The same happens again when play() re-activates the platform, and whenever the native player goes idle after an error (:1594-1598).
+
+The new order reaches the UI through `_player.sequenceStateStream.listen((_) => _publish())` (handler :187) because `_order` (:178-180) reads `state.shuffleIndices`.
+
+**Fix.** Use a ShuffleOrder whose shuffle() is a no-op unless explicitly requested (pass `shuffleOrder:` to setAudioSources and call a dedicated reshuffle only from setShuffle(true) / playCollection), or capture `_player.shuffleIndices` before stop() and restore that order after re-activation.
+
+## 148. [low] Paging a direct BV/av/short-link search never reaches an end: every scroll near the bottom re-requests the same video
+
+- Finder: find:sweep-async (a34172) · Category: performance · `lib/state/online_search_controller.dart:119`
+
+**Scenario.** The listener pastes the BV number (or a b23.tv share link) of a multi-part video such as a concert or album with 20+ parts, so the result list scrolls. Whenever the list is within 320 px of the bottom, each scroll update fires another `view` request (plus the short-link resolve and a signed retry when refused); the spinner row flickers in and out and requests keep going for as long as the listener scrolls there. No new rows ever appear, and the burst of identical requests invites Bilibili's risk control (412), which then also affects downloads and matching.
+
+**Evidence.** lib/services/bilibili_sdk.dart:467-470 `final directId = extractBvOrAvId(query); if (directId != null) { final direct = await fetchVideoInfo(directId); if (direct.isNotEmpty) return direct; }` ignores `page`, so page 2, 3, ... return the same parts.
+
+lib/state/online_search_controller.dart:109-119 `final results = await BilibiliSdk.search(_query, page: page); ... _results = [..._results, for (final t in results) if (_seen.add(t.id)) t]; _page = page; _loadMoreFailed = false; // Only an empty page proves the end; a page of duplicates does not. if (results.isEmpty) _reachedEnd = true;`. All duplicates, so nothing is added and `_reachedEnd` stays false.
+
+lib/screens/search_view.dart:72-82 `_onScroll` calls `_online.loadMore()` on every ScrollNotification with `metrics.pixels >= metrics.maxScrollExtent - 320`; the only guard is `_loadingMore`, which clears when each request returns.
+
+**Fix.** Mark the end when a page adds nothing new for an id query: in loadMore, compute the added rows and set `_reachedEnd = true` when `added.isEmpty` and the query is a direct id or link (or have BilibiliSdk.search return [] for `page > 1` on the direct-id and short-link paths).
+
+## 149. [low] The song sheet favourites the caller's stale Track copy, so a named song is stored in 收藏 under its raw video title
+
+- Finder: find:sweep-async (a34172) · Category: correctness · `lib/widgets/track_sheet.dart:104`
+
+**Scenario.** A song is downloaded and already named (auto-matched or edited). The listener later finds the same video in a Bilibili search, opens its sheet (the header correctly shows the song name and artist via _latest()) and taps the heart. 收藏 now holds the raw search copy: the list row shows the long video title and the UP主 as artist, `named` is false, and it stays that way since nothing re-names a settled song. The library row and the favourites row of the same song disagree.
+
+**Evidence.** lib/widgets/track_sheet.dart:102-105 `Future<void> _toggleFavorite() async { Haptics.light(); await DatabaseService.toggleFavorite(widget.track); }` uses `widget.track`, while the same sheet knows it may be stale and renders and adds to playlists through `_latest()` (:236-243 'The library's copy carries any edits made since the sheet's caller captured its [Track]'; :121 `final track = _latest();`; :188 `PlaylistPicker.show(parent, [track])`).
+
+DatabaseService.toggleFavorite (database_service.dart:736) does `favorites.tracks.insert(0, track)` with whatever copy it is given. Bilibili search rows pass raw API results: search_view.dart:249 `_songs(_online.results)` builds `SongTile(track: track, ...)`, and song_tile.dart:57/147 opens `TrackSheet.show(context, track, queue: queue)`. A favourite copy is only corrected by a later updateTrackMetadata for that id (database_service.dart:532-537), which never comes for a song the matcher has already settled (track_naming.dart:95-96, :101).
+
+**Fix.** `await DatabaseService.toggleFavorite(_latest());`, the same copy the sheet already uses for 加入歌单 and 编辑信息.
+
+## 150. [low] A failed user-initiated download gives no feedback: DownloadManager.errors has no listener and the failure badge is hidden in search
+
+- Finder: find:sweep-resilience (afbf48) · Category: ux · `lib/services/download_manager.dart:72`
+
+**Scenario.** In search results (where every download starts) open a song's sheet and tap 下载 while Bilibili refuses the playurl request or the CDN returns 403. The button shows 0 % briefly and reverts to "下载并播放 / 下载" with no toast and no badge; it looks as if the tap was ignored. The red error icon only becomes visible after leaving search. (If the stream were wired up as is, it would show raw text such as `Exception: CDN HTTP 403` or a FileSystemException with the full path.)
+
+**Evidence.** lib/services/download_manager.dart:69-72 `/// Emits a human-readable message when a user-initiated download fails — without this a failure was indistinguishable from a success (the ring simply disappeared). Stream<String> get errors => _errorController.stream;` and :141 `_errorController.add('$e')`. `grep -rn errors lib` returns only that declaration - nothing subscribes. The only other indicator is _DownloadsButton, which lib/app/app_shell.dart:211-218 renders only when not searching: `if (_searchActive) TextButton(... '取消') else ...[ const _DownloadsButton(), ...]`. TrackSheet (track_sheet.dart:253-280) and TrackDownloadButton simply fall back to the idle 下载 state.
+
+**Fix.** Listen to DownloadManager.errors in AppShell next to handler.messages and show a fixed message like "「<title>」下载失败" (emit the track, not `'$e'`).
+
+## 151. [low] When the music-zone results run out, later pages silently switch to the unfiltered search
+
+- Finder: find:sweep-resilience (afbf48) · Category: correctness · `lib/services/bilibili_sdk.dart:500`
+
+**Scenario.** Search a song whose music-zone results span 3 pages. Scrolling to the end requests page 4: the music zone returns nothing (end reached), so page 4 of the all-zones search is appended instead - gameplay, vlogs, lectures - and scrolling continues through unfiltered pages 5, 6 ... (while unfiltered pages 1-3 were never shown). The comment at :522-523 says exactly these results are noise for a music player.
+
+**Evidence.** lib/services/bilibili_sdk.dart:494-501 `musical = await _searchOnce(query, musicOnly: true, page: page); ... if (musical != null && musical.isNotEmpty) return musical; return _searchOnce(query, musicOnly: false, page: page);` - the empty-zone fallback is applied to every page, not only page 1. OnlineSearchController.loadMore (online_search_controller.dart:109-119) appends whatever comes back and ends only on an empty page.
+
+**Fix.** Only fall back to the unfiltered search when page == 1 (and remember per query which mode page 1 used, so later pages stay in that mode).
+
+## 152. [low] A response rejected as too small (<1024 bytes) is accepted as a finished download on the next attempt via the 416 path
+
+- Finder: find:sweep-resilience (afbf48) · Category: correctness · `lib/services/audio_download_service.dart:454`
+
+**Scenario.** The CDN answers 200 with a small non-text body and a Content-Length (e.g. a 300-byte stub served as application/octet-stream for a restricted part). First attempt: fails with 音频文件异常, as designed. The listener taps 重试 (or taps the song again): the same resource answers the Range request with 416, the 300-byte file is marked downloaded, appears in the library, and can never play ("有歌曲无法播放，已跳过") until manually deleted.
+
+**Evidence.** lib/services/audio_download_service.dart:555-557 `if (received < 1024) { throw Exception('音频文件异常 ($received 字节)'); }` runs after the body has been written to `.part` and the note `{'total': total, 'validator': ...}` saved (:511-517); the catch at :354-359 keeps both. Next attempt, :424-441 sends `Range: bytes=<existing>-`; :451-456 `if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable && existing > 0) { await res.drain<void>(); if (known?.total == existing) { return (received: existing, total: existing); }` returns success without the size check, and _download (:319-353) renames it to `.m4a`, writes `.ready` and registers the track.
+
+**Fix.** Discard the part (and note) before throwing the `<1024` error, or apply the same minimum-size check in the 416 branch.
+
+## 153. [low] play() during an in-flight session restore is a silent no-op
+
+- Finder: find:sweep-resilience (afbf48) · Category: concurrency · `lib/services/audio_player_handler.dart:690`
+
+**Scenario.** Process is started by (or just before) a headset / Bluetooth / lock-screen play press - the case the comment names. main() has already called restoreSession(); play() calls it again, gets an immediate return, sees an empty source list and returns. Nothing plays and nothing is shown; a second press a moment later works.
+
+**Evidence.** lib/services/audio_player_handler.dart:689-692 `Future<void> restoreSession() async { if (_restoreStarted) return; _restoreStarted = true; ...` followed by awaits on loadPlaybackSession, _library() (full DB load + isolate parse + directory scan) and setAudioSources. :750-756 `Future<void> play() async { ... if (_player.audioSources.isEmpty) { // A media button can cold-start the service before the UI restores. await restoreSession(); if (_player.audioSources.isEmpty) return; }`. lib/main.dart:58 starts the restore unawaited immediately after AudioService.init, so by the time any play() is dispatched `_restoreStarted` is already true and the second call returns at once instead of waiting.
+
+**Fix.** Keep the restore as a future (`Future<void>? _restore; Future<void> restoreSession() => _restore ??= _doRestore();`) so play() awaits the in-flight restore.
+
+## 154. [low] Any exception while loading a store - not only a parse failure - sets the healthy file aside and starts empty
+
+- Finder: find:sweep-resilience (afbf48) · Category: data-loss · `lib/services/database_service.dart:321`
+
+**Scenario.** On a launch under memory pressure the isolate for `compute` cannot be spawned (or the read hits a transient EIO). bilibeat_playlists.json - perfectly valid - is renamed to bilibeat_playlists.json.unreadable; the app shows no playlists and no favourites, and the first favourite toggle writes a new one-entry file. For bilibeat_lyrics.json the same path hides every pinned / hand-calibrated lyric. The data is still on disk but the app offers no way back to it.
+
+**Evidence.** lib/services/database_service.dart:308-324 `try { final file = File(path); if (!await file.exists()) return; final playlists = await compute(_parsePlaylistList, await file.readAsString()); ... } catch (e) { debugPrint(...); await _setAside(path); }` (same shape in _loadTracks :198-211, _loadSearchHistory :327-340, _loadPrefs :812-823, and lib/services/lyrics_store.dart:62-79). The catch covers `readAsString` IO errors and `compute` (isolate spawn) failures as well as FormatException. _setAside (:437-451) renames the file to `.unreadable`; `grep -rn unreadable lib` shows nothing ever reads such a file back, and after the rename _loadFuture stays completed, so the next persist writes a fresh file from the empty in-memory store.
+
+**Fix.** Set aside only on FormatException / TypeError from the parse (decode on the main isolate as a fallback when compute throws); on IO or isolate errors leave the file alone and reset _loadFuture so the load is retried, refusing to persist that store meanwhile.
+
+## 155. [low] 匹配 in 编辑信息 reports "没有匹配到这首歌" when the lookup merely failed, and its spinner has no finally
+
+- Finder: find:sweep-resilience (afbf48) · Category: ux · `lib/widgets/track_info_sheet.dart:63`
+
+**Scenario.** Offline (or NetEase timing out), tap 匹配: after up to ~20 s the toast says the song was not matched, which reads as "the catalogue does not know it" - the listener types the name by hand, marking the track matcher 0 so automatic matching never revisits it. If identify throws on an unexpected NetEase field, _identifying stays true: the spinner turns forever and 匹配 is disabled until the sheet is reopened.
+
+**Evidence.** lib/widgets/track_info_sheet.dart:59-68 `setState(() => _identifying = true); final found = await TrackNaming.identify(widget.track); if (!mounted) return; setState(() => _identifying = false); if (found == null) { showAppSnackBar(..., message: '没有匹配到这首歌'); return; }`. LyricsEngine.identify returns null for "offline" as well (lyrics_engine.dart ~823 `// Offline is not an answer: ask again next time. if (who.incomplete) return null;`, ~1235 `if (incomplete && !bestExact) return null;`), and TrackNaming._name needs LyricsEngine.identitySettled to tell the two apart (track_naming.dart:148-159) - the sheet does not use it. There is no try/finally around the await, and identify contains unguarded casts on NetEase data (lyrics_engine.dart:957 `((song['name'] ?? '') as String)`, :992 `song['duration'] as num?`); `onTap: _identifying ? null : _identify` (:172).
+
+**Fix.** Wrap in try/finally; when found == null and !LyricsEngine.identitySettled(...) (or on catch) show "无法连接，请稍后再试" instead.
+
+## 156. [low] Recommendation paging has no failure back-off and treats a fully filtered page as the end
+
+- Finder: find:sweep-resilience (afbf48) · Category: resilience · `lib/state/recommendations_controller.dart:81`
+
+**Scenario.** (a) Scroll 为你推荐 to the bottom, then lose the connection: every further scroll event launches a fresh batch of up to four seed searches (each a signed request plus fallback, twice for music/unfiltered), all failing, with only a flickering spinner - no retry affordance and no pause. (b) Online: page 3 of every seed happens to contain only videos longer than 6 minutes or already in the library; recommend returns [] and the list ends for good although pages 4+ exist, until 换一批 is tapped.
+
+**Evidence.** lib/state/recommendations_controller.dart:80-86 `if (tracks.isEmpty) _reachedEnd = true; } catch (e) { debugPrint(...); if (pass != _pass) return; } _loadingMore = false; notifyListeners();` - on failure nothing is recorded (compare OnlineSearchController's `_loadMoreFailed`/`_lastFailure` 3 s window, online_search_controller.dart:98-101,123-124), and search_view.dart:77-78 calls `_recs.loadMore()` on every scroll notification near the bottom. RecommendationEngine.recommend (recommendation_engine.dart:199-214) returns only candidates that pass isSongLength / knownIds / excludeIds, so a page whose results are all long-form, owned or already shown comes back empty.
+
+**Fix.** Mirror the search controller: remember the failure time and skip loadMore for a few seconds (and show 重试); have recommend() report whether any seed returned raw results, and set _reachedEnd only when none did.
+
+## 157. [low] Each keyboard open/close orphans a just_audio position stream: one more periodic timer and player-event listener for the life of the process
+
+- Finder: find:sweep-performance (a5dadf) · Category: resource-leak · `lib/app/app_shell.dart:149`
+
+**Scenario.** With a song loaded, tap the search bar (keyboard opens, DockedPlayer unmounts, listener count drops to zero, subject orphaned), then dismiss the keyboard (DockedPlayer remounts, new subject + new timer). Every such cycle leaves behind one playerEventStream listener and, while music plays, one Timer.periodic firing every 16-200 ms (200 ms for normal-length songs) that pushes positions into a subject nobody listens to. The process is long-lived (foreground media service), so after e.g. 100 searches there are ~100 dead timers = ~500 callbacks per second during playback, also with the screen off, growing without bound until the process dies. Individually cheap, but it is unbounded and runs in the background.
+
+**Evidence.** lib/app/app_shell.dart:120 `final keyboardOpen = MediaQuery.viewInsetsOf(context).bottom > 0;` and :149 `if (!keyboardOpen) const DockedPlayer(),` - the mini player is removed from the tree whenever the keyboard is up.
+lib/widgets/mini_player.dart:274-276 `return StreamBuilder<Duration>(stream: handler.positionStream, initialData: handler.position,` is, on the home screen, the only subscriber of the position stream (the other two are now_playing_page.dart:103 and the end-of-track sleep timer, audio_player_handler.dart:964).
+just_audio-0.10.6 lib/just_audio.dart:693-704: `_positionSubject = BehaviorSubject<Duration>(onCancel: () => _positionSubject = null); ... _positionSubject!.addStream(createPositionStream(...))`. When the last listener cancels, the subject is dropped but never closed, and the stream it was fed from is never cancelled: createPositionStream (:716-763) only tears down inside yieldPosition `if (controller.isClosed || _durationSubject.isClosed)`, which never becomes true for an orphan. Its `playerEventSubscription = playerEventStream.listen((event) { controller.add(position); currentTimer?.cancel(); if (playing) { currentTimer = Timer.periodic(step(), yieldPosition); } })` therefore stays subscribed and keeps re-arming its timer. The next `handler.positionStream` read builds a fresh subject and a fresh createPositionStream.
+
+**Fix.** Hold one subscription for the app's lifetime in the handler: subscribe to `_player.positionStream` once in `_listenToPlayer` and republish it through a ValueNotifier<Duration> (or a handler-owned broadcast stream) that the mini player, player page and sleep timer listen to, so the plugin's subject never drops to zero listeners.
+
+## 158. [low] Library filtering re-normalises three strings of every track on each keystroke, on the UI isolate
+
+- Finder: find:sweep-performance (a5dadf) · Category: performance · `lib/services/local_search.dart:44`
+
+**Scenario.** With a library of ~2,000 songs, typing in the search bar runs ~6,000 normalize() calls over roughly 150-300 k characters (rune loop + StringBuffer + lowercase copy + regex replace, three allocations per string) per keystroke, synchronously inside the build of SearchView. That is on the order of 10-30 ms per key on a mid-range phone, i.e. dropped frames in the keyboard/typing animation that grow linearly with the library; the first keystroke after a naming event additionally re-parses every un-named title (TrackCredit.reset, library_controller.dart:226). Estimated from the code, not measured.
+
+**Evidence.** lib/services/local_search.dart:44-47 `static int _score(Track track, List<String> terms) { final title = normalize(track.title); final artist = normalize(TrackCredit.artistOf(track)); final raw = normalize(track.rawTitle);` and :77-88 normalize(): a per-rune `buffer.writeCharCode(code)` loop followed by `toLowerCase().replaceAll(_separators, '')` (a 40-alternative character class). Called for every track at :30-34.
+lib/screens/search_view.dart:62-68 `_localMatches` recomputes whenever the query string differs, i.e. on every text change delivered through `_query` (app_shell.dart:88-91), which for a Chinese IME is every pinyin letter of the composing text. Nothing normalised is kept between keystrokes; the comment at local_search.dart:6 says 'Instant (runs on every keystroke)'.
+
+**Fix.** Cache the normalised (title, artist, rawTitle) triple per track - e.g. an Expando<_Norm> or a map keyed by Track identity built once per `library.downloaded` list - and only normalise the query per keystroke.
+
+## 159. [low] Every library event (e.g. tapping the heart) reloads and re-derives the whole library: new list identities invalidate the sort, artist and search caches
+
+- Finder: find:sweep-performance (a5dadf) · Category: performance · `lib/state/library_controller.dart:197`
+
+**Scenario.** Library of 2,000 songs sorted by 歌名 or 歌手. Tap the heart on the player or a row: toggleFavorite persists playlists and emits a library update; reload copies three lists, rebuilds the id set, regex-splits every named track's artist, and because `_downloaded` is a new object the home list re-sorts ~2,000 items (about 22 k comparisons, each allocating two to four lower-cased strings) on the UI isolate before the heart animation's next frame. The same happens once per completed download during a batch and once per automatically named song. Roughly 10-40 ms of UI-isolate work per event at that size (estimate), on top of the JSON rewrite the event came from.
+
+**Evidence.** lib/state/library_controller.dart:36 `DatabaseService.libraryUpdateStream.listen((_) => reload())`; :190-212 reload() always does `_downloaded = List.unmodifiable(results[0] as List<Track>); _downloadedIds = {for (final t in _downloaded) t.id}; _teachArtists();` - a fresh list object even when nothing about the downloads changed. _teachArtists (:218-223) runs `artistNamesOf` (a RegExp split, :129-133) for every named track.
+The derived caches key on list identity: :96-98 `identical(_sortedSource, _downloaded)`, :142 `identical(_artistsSource, _downloaded)`, search_view.dart:64 `!identical(_localCacheSource, source)`. So each event re-sorts (:101-112, with `a.title.toLowerCase()` / `artistOf(a).toLowerCase()` allocated inside the comparator), re-groups artists (:144-161) and re-runs LocalSearch over the library.
+The event fires for changes that do not touch downloads at all: database_service.dart:486 (end of _persistPlaylists: toggleFavorite, playlist add/remove/reorder/rename, and unconditionally from updateTrackMetadata :538) and :573.
+
+**Fix.** In reload(), keep the previous `_downloaded` instance when the new list has the same Track instances in the same order (the stores hand back the same objects), so identity-keyed caches survive events that only changed playlists/favourites; and precompute lower-cased sort keys once per sort instead of inside the comparator.
+
+## 160. [low] Recommendation token cache (256 entries, cleared wholesale) is smaller than the data it is built from, so every page re-parses all favourites
+
+- Finder: find:sweep-performance (a5dadf) · Category: performance · `lib/services/recommendation_engine.dart:70`
+
+**Scenario.** A listener with 300+ favourites opens search and scrolls 为你推荐. Each loadMore calls recommend(): building the profile walks all favourites, the cache hits 256 entries part-way and is cleared, so most titles are parsed again; scoring the new candidates clears it again. With F favourites that is about F + 80 full cleanTitle runs per page on the UI isolate in two synchronous bursts (profile build, then ranking) - on the order of 50-150 ms for 500-1,000 favourites (estimate) - landing exactly while the list is being scrolled.
+
+**Evidence.** lib/services/recommendation_engine.dart:51-52 `static final Map<String, Set<String>> _tokenCache = {}; static const int _tokenCacheCap = 256;` and :70 `if (_tokenCache.length >= _tokenCacheCap) _tokenCache.clear();`. TasteProfile.build (:94-105) tokenises every favourite, 30 history entries and every search; recommend() (:165-173) rebuilds the profile from scratch on each call, then :210-212 scores every candidate (4 seeds x one Bilibili page each) through the same cache. tokenize (:58) runs `LyricsEngine.cleanTitle`, which the comment at :48 itself calls 'the expensive part' (it builds dozens of RegExp objects per call - lyrics_engine.dart:162-231, 250-432 - and scans knownArtists).
+loadMore is driven by scrolling: search_view.dart:72-78 and recommendations_controller.dart:61-70.
+
+**Fix.** Size the cache to the data (e.g. cap at favourites + a few hundred, evicting oldest instead of clearing), or cache the built TasteProfile and rebuild it only when favourites/history/search history change rather than on every page.
+
+## 161. [low] Cold start reads and parses every song's metadata file and awaits ~7 file operations per song before any library data is available
+
+- Finder: find:sweep-performance (a5dadf) · Category: performance · `lib/services/database_service.dart:228`
+
+**Scenario.** With 1,000 downloads every launch performs ~7,000 sequential awaited file round-trips plus 1,000 small JSON parses and ~1,000,000 id comparisons before `_ensureLoaded` completes. Until then the home page shows its empty 120 px placeholder (home_page.dart:112-113), restoreSession cannot build the queue, and a headset/notification play button that cold-starts the service waits on the same future (audio_player_handler.dart:752-755 -> restoreSession -> _library). At roughly 0.1-0.3 ms per awaited file call on a phone that is about 1-2 s added to every cold start, growing linearly with the library (estimate from the code). Already noted by the persistence reviewer; listed here for the cost model.
+
+**Evidence.** lib/services/database_service.dart:118-119 `await _loadTracks('$dir/bilibeat_downloaded.json', _downloadedTracks); await _discoverAudioFiles(dir);` inside _load, which every getter awaits via _ensureLoaded.
+:220-235 for every `.ready` file: `await audioFile.exists() && (await audioFile.length()) > 0 && await metaFile.exists()` then `await metaFile.readAsString()`, `jsonDecode`, `Track.fromMap` - on the UI isolate, although :13-17 moved the main file's parse to an isolate for exactly this reason - and only afterwards :251 `if (!_downloadedTracks.any((t) => t.id == track.id))`, a linear scan per file (quadratic overall). The id is already in the file name (:241-245).
+:265-281 the prune loop then awaits three more per track: `await ready.exists() && await audio.exists() && await audio.length() > 0`.
+
+**Fix.** List the audio directory once, build a Set of ids from the `.ready`/`.m4a` names, read a meta JSON only for ids missing from `_downloadedTracks` (use a Set for the membership test), and prune by set lookup instead of three stats per track; run it after the library is published rather than inside _load.
+
+## 162. [low] A lyric lookup that finds nothing still rewrites the entire lyrics store
+
+- Finder: find:sweep-performance (a5dadf) · Category: performance · `lib/services/lyrics_store.dart:137`
+
+**Scenario.** Store at its cap (300 automatic entries plus pins, each ~60 lines of {time,text,translation}: 1.5-3 MB of JSON). Listening offline, or to instrumentals/covers the providers do not know: every first play of such a track in a session ends with an empty result and still builds ~20 k maps, encodes, fsyncs and re-reads the multi-megabyte file on the UI isolate although the store's contents did not change - tens of ms of main-isolate work and megabytes of flash writes per track for nothing, with session/playlist saves queued behind it on the shared write lock. (The cost of the non-empty case is already in the persistence review; this is the no-op variant.)
+
+**Evidence.** lib/services/lyrics_store.dart:131-140 `_entries.remove(trackId); if (lyrics.isNotEmpty) { _entries[trackId] = lyrics.copyWith(pinned: false); _evict(); } try { await _persist(); }` - the persist is unconditional, although the doc comment at :119 says 'An empty result is not stored'. _persist (:155-158) maps every entry to JSON maps and goes through DatabaseService._writeJsonAtomically, which encodes on the calling isolate, writes with flush, then reads the whole file back and compares (database_service.dart:355, :359, :378).
+Caller: lyrics_controller.dart:184-196 calls putAutomatic with whatever autoFetchLyrics returned, including Lyrics.none (network down, instrumental, unknown cover).
+
+**Fix.** Persist only when the map changed: `final removed = _entries.remove(trackId) != null; if (lyrics.isEmpty && !removed) return stands();`.
+
+## 163. [low] Pausing keeps the CPU wake lock for the whole 30-minute idle window
+
+- Finder: find:sweep-performance (a5dadf) · Category: performance · `lib/main.dart:50`
+
+**Scenario.** Pause (button, headphones unplugged, sleep timer firing, a call that does not resume) and put the phone down. The foreground service keeps its partial wake lock, so the device cannot enter deep sleep for the next 30 minutes each time; the sleep-timer case is the common one - the timer exists to let the phone rest, and it stays awake half an hour longer. Order of magnitude: a few tens of mA instead of single digits for 30 minutes per pause. The playback reviewer separately reports that the lock may not be released even after the idle stop; this is the cost that remains even if that is fixed.
+
+**Evidence.** lib/main.dart:50 `androidStopForegroundOnPause: false,`. audio_service-0.18.19 AudioService.java:705-712 enterPlayingState() calls `acquireWakeLock()` (a PARTIAL_WAKE_LOCK, :326); :715-719 `private void exitPlayingState() { if (config.androidStopForegroundOnPause) { exitForegroundState(); } }` and releaseWakeLock is reached only from exitForegroundState (:721-724) and onDestroy (:381). So with this config a pause releases nothing.
+lib/services/audio_player_handler.dart:163 `static const Duration _idleStopAfter = Duration(minutes: 30);` and :333-338 arm the only thing that ends it: `_idleTimer = Timer(_idleStopAfter, () { if (!_player.playing) unawaited(stop()); });`.
+
+**Fix.** Shorten the idle window for pauses that cannot auto-resume (sleep timer, becoming-noisy, user pause while backgrounded), or release the lock on pause through a small native call while keeping the service in the foreground, re-acquiring it in play().
+
+## 164. [low] No Chinese localisation delegates: Flutter's built-in UI strings (Paste / Select all / Copy, Back, Dismiss) are English in a Simplified-Chinese app
+
+- Finder: find:sweep-conformance (ab0254) · Category: conformance · `lib/main.dart:77`
+
+**Scenario.** On Android the listener long-presses the search field to paste a BV number or link, or long-presses the lyric editor to paste lyrics: the selection toolbar reads 'Paste' / 'Select all' (and 'Cut' / 'Copy' with a selection). With TalkBack, the back button on a playlist or artist page is announced as 'Back' and sheet scrims as 'Dismiss'. CLAUDE.md: 'UI copy is Simplified Chinese'; the icon-button convention explicitly relies on tooltips for screen readers. The resolved app locale is also en_US, so Han text is shaped without a zh-Hans locale hint.
+
+**Evidence.** lib/main.dart:77-82 `return MaterialApp(title: 'BiliBeats', debugShowCheckedModeBanner: false, theme: AppTheme.darkTheme, home: const AppShell());` - no `locale`, `supportedLocales` or `localizationsDelegates`; pubspec.yaml:10-17 has no `flutter_localizations` dependency (grep 'localizations|Locale(' over lib and pubspec returns nothing). Flutter source: packages/flutter/lib/src/material/app.dart:254 `this.supportedLocales = const <Locale>[Locale('en', 'US')]`; material_localizations.dart:1209 `String get pasteButtonLabel => 'Paste';`, :1212 `selectAllButtonLabel => 'Select all'`, :1077 `backButtonTooltip => 'Back'`, :1239 `modalBarrierDismissLabel => 'Dismiss'`. Sites that surface them: the search field (lib/app/app_shell.dart:175), the lyric editor whose own hint says '粘贴歌词' (lib/widgets/lyrics_sheet.dart:427-442), 编辑信息 fields (lib/widgets/track_info_sheet.dart:215), promptForText (lib/widgets/sheet.dart:238), and the automatic back buttons of the SliverAppBars in lib/screens/playlist_page.dart:146 and lib/screens/artist_page.dart:57.
+
+**Fix.** Add `flutter_localizations: {sdk: flutter}` to pubspec.yaml and in MaterialApp set `locale: const Locale('zh', 'CN')`, `supportedLocales: const [Locale('zh', 'CN')]`, `localizationsDelegates: GlobalMaterialLocalizations.delegates`. Optionally add zh-Hans to the iOS project's knownRegions / CFBundleLocalizations so system-provided pickers follow.
+
+## 165. [low] Recommendation taste profile keys 'UP主' weights on Track.uploader, which is the song's artist once a track is named
+
+- Finder: find:sweep-conformance (ab0254) · Category: correctness · `lib/services/recommendation_engine.dart:86`
+
+**Scenario.** The listener's favourites are mostly auto-named 周深 songs uploaded by three clip channels. The profile's `uploaders` map now holds '周深' and collaboration strings like '周深 & 五月天' rather than the channels. When candidates are ranked, `uploaders[candidate.uploader]` is looked up with the candidate's UP主 name, so the strongest (x2) term is 0 for every candidate except videos uploaded by an account literally named like the artist; the channels the listener actually returns to are never favoured, and a multi-artist credit string is sent verbatim to Bilibili as a seed query. Ranking silently degrades to title-bigram overlap. Invariant in CLAUDE.md: never use track.uploader directly once naming exists.
+
+**Evidence.** lib/services/recommendation_engine.dart:14-15 `/// UP主 name -> weight. final Map<String, double> uploaders;`; :86-88 `if (t.uploader.isNotEmpty) { uploaders[t.uploader] = (uploaders[t.uploader] ?? 0) + weight; }`; :111-112 `double score(Track track) { var score = (uploaders[track.uploader] ?? 0) * 2.0;`; :119-131 seedQueries doc 'the UP主s the user returns to' takes the top two keys. lib/models/track.dart:35-43: once named, `uploader` is the artist and the real UP主 moves to `rawUploader`. Automatic matching is on by default (lib/services/track_naming.dart:23 `static bool enabled = true;`) and names favourites/history copies too (database_service.dart:532-544). Candidates come straight from BilibiliSdk.search (bilibili_sdk.dart:616-621 `uploader: author`), i.e. they carry UP主 names.
+
+**Fix.** Build two maps: UP主 weights from `t.rawUploader ?? (t.isNamed ? null : t.uploader)` and artist weights from LibraryController.artistNamesOf(t)/TrackCredit.artistOf(t). Score a candidate with the UP主 map on `candidate.uploader` plus the artist map on TrackCredit.artistOf(candidate); seed with individual artist names and UP主 names.
+
+## 166. [low] Player keeps its own copy of track metadata (_latest) that outlives a delete, and auto-naming is not retried for a song re-downloaded in the same session
+
+- Finder: find:sweep-conformance (ab0254) · Category: conformance · `lib/services/audio_player_handler.dart:624`
+
+**Scenario.** A song is downloaded and auto-named this session ('大鱼' / 周深; `_latest[id]` holds that copy, `_attempted` holds the id). The listener deletes the download and later the same session downloads it again from a Bilibili search row. The library now stores the raw search copy, and LibraryController.reload's `TrackNaming.autoName(track)` returns immediately because the id is still in `_attempted`. The home list, search and the song's sheet show the video title and UP主, while tapping it plays a queue built through `_resolve`, so the mini player, the full player and the system notification show '大鱼 - 周深' for the same row; the nowPlaying listener then calls autoName with that named copy, which is 'settled', so nothing reconciles the two until the app is restarted. CLAUDE.md states playback has one source of truth and nothing in Dart keeps a second copy.
+
+**Evidence.** lib/services/audio_player_handler.dart:145 `final Map<String, Track> _latest = {};` (never cleared; removeTracks :853-866 does not touch it), :170 `Track _resolve(Track tag) => _latest[tag.id] ?? tag;`, :622-625 `final library = await DatabaseService.getDownloadedTracks(); return {for (final track in library) track.id: _resolve(track)};` - the handler's cached copy wins over what the library stores now. lib/services/track_naming.dart:34 `static final Set<String> _attempted = {};` and :101 `if (!enabled || _settled(track) || !_attempted.add(track.id)) return;` - ids are only removed again on an offline lookup (:135, :157), not when the download is deleted. Re-registration stores the caller's copy untouched: database_service.dart:767-771 `if (_downloadedTracks.any((t) => t.id == track.id)) return; _downloadedTracks.insert(0, track);`.
+
+**Fix.** On DatabaseService.downloadRemovedStream drop the ids from `_latest` (in removeTracks) and from TrackNaming._attempted; or make `_library()` trust the stored copy and use `_latest` only for tags already inside the native queue.
+
+## 167. [low] README states Android 6.0+ but the build's minSdk is 24 (Android 7.0)
+
+- Finder: find:sweep-conformance (ab0254) · Category: docs · `README.md:14`
+
+**Scenario.** Someone following the README sideloads the release APK on an Android 6.0 (API 23) device: the package installer rejects it ('解析软件包时出现问题' / app not compatible) although the README says that version is supported.
+
+**Evidence.** README.md:14 `2. 在 Android 设备上打开下载的 .apk 文件（需 Android 6.0 及以上版本）。` android/app/build.gradle(.kts):37 `minSdk = flutter.minSdkVersion`. ~/flutter/packages/flutter_tools/gradle/src/main/kotlin/FlutterExtension.kt:26 `val minSdkVersion: Int = 24` (Flutter 3.44.8, the version pinned in CI and CLAUDE.md).
+
+**Fix.** Change README.md line 14 to 'Android 7.0 及以上版本' (or pin minSdk explicitly in android/app/build.gradle so the documented floor does not move with the Flutter SDK).
+
+## 168. [low] assets/logo.png (381 KB) is bundled into every build but nothing loads it
+
+- Finder: find:sweep-conformance (ab0254) · Category: build-release · `pubspec.yaml:27`
+
+**Scenario.** Every Android APK, iOS .ipa and macOS bundle carries ~0.37 MB of uncompressed PNG that no code path can display; the brand script keeps regenerating an 'in-app header mark' that does not exist, so a future icon refresh will appear to update an in-app logo and change nothing.
+
+**Evidence.** pubspec.yaml:26-27 `assets:\n    - assets/`; `ls -la assets` -> only logo.png, 380950 bytes. `grep -rn "logo\|AssetImage\|Image.asset\|rootBundle" lib` returns nothing. git log shows it was added for a header logo (16dd9fe 'feat: vertical playlist bars, header logo, recropped app icon'); the 5.0.0 shell (lib/app/app_shell.dart) has no header mark. tool/make_brand_assets.py:84 still regenerates it with the comment '# in-app header mark'.
+
+**Fix.** Remove the `assets:` entry from pubspec.yaml and delete assets/logo.png (and the logo.png step in tool/make_brand_assets.py), or reference it where a mark is actually wanted.
+
+## 169. [low] Several tap targets are below the documented 48 pt minimum, including the adjacent 重试 / 忽略 pair
+
+- Finder: find:sweep-conformance (ab0254) · Category: accessibility · `lib/widgets/download_management_sheet.dart:185`
+
+**Scenario.** In 下载 with a failed download, the retry and dismiss buttons are two 44 pt-wide targets touching each other at the right edge; a slightly-off tap on 重试 hits 忽略, which removes the failed entry (DownloadManager.dismissFailed) and with it the only place the failure was shown, so the song silently is neither downloaded nor listed. The other sites are simply harder to hit than the convention promises.
+
+**Evidence.** lib/widgets/download_management_sheet.dart:184-186 `return SizedBox(width: 44, height: 48, child: IconButton(tooltip: tooltip, padding: EdgeInsets.zero, ...` used side by side for 重试 and 忽略 at :141-156 (21 pt glyphs, no gap). lib/app/app_shell.dart:196-198 `IconButton(tooltip: '清除', visualDensity: VisualDensity.compact, ...` inside a 44 pt high field (:163); lib/screens/home_page.dart:619-621 `IconButton(tooltip: '不再提示', visualDensity: VisualDensity.compact, ...`; lib/screens/search_view.dart:317-321 history `_Chip`: InkWell with `EdgeInsets.symmetric(horizontal: 14, vertical: 8)` around 14 pt text (about 35 pt tall, no minimum-size wrapper); lib/screens/home_page.dart:213 lens switch `_height = 44` with a bare GestureDetector. CLAUDE.md UI conventions: 'Touch targets are at least 48 pt'.
+
+**Fix.** Make `_icon` 48 wide (the list's right padding is already 8), drop `visualDensity: VisualDensity.compact` on the two IconButtons (or wrap in a 48x48 SizedBox), give `_Chip` a `ConstrainedBox(minHeight: 48)` hit area around its 35 pt visual, and set the lens bar height to 48.
+
+## 170. [low] A 下载并播放 request that is superseded keeps downloading with no visible trace and no way to stop it, and lands in the library
+
+- Finder: find:journey-first-play (ad56e0) · Category: ux · `lib/services/audio_player_handler.dart:636`
+
+**Scenario.** On mobile data, tap a search result that turns out to be a 2-hour concert video (100+ MB) -> 下载并播放. The mini player shows 正在准备「…」. Realising the mistake, tap the result you actually wanted (or any downloaded song): the 正在准备 line now names the new song or disappears. The concert keeps downloading in full with no ring, no entry in 下载管理 and no cancel; minutes later it silently appears in the library (and is then auto-matched), or it fails silently leaving a large .part file. The same happens for every additional result tapped while an earlier one is still preparing: all of them download to completion, only the last one plays.
+
+**Evidence.** lib/services/audio_player_handler.dart:635-636 `final token = ++_selection; preparing.value = null;` - a new selection only clears the indicator. The older request is still inside :608 `await AudioDownloadService.ensureDownloaded(track);` and afterwards merely returns :609 `return token == _selection;`; on failure :612 `if (token == _selection) { _messages.add(...) }` says nothing. AudioDownloadService.ensureDownloaded/_transfer (audio_download_service.dart:259-294, 418-559) take no cancellation signal, and on success always run :352 `await DatabaseService.saveDownloadedTrack(track);`.
+
+The download is also invisible everywhere else: download_manager.dart:44-45 `/// Playback-path downloads (started inside the audio handler) are intentionally NOT tracked here`, so app_shell.dart:243-245 (`library.activeDownloads.length` ... `if (active == 0 && failed == 0) return const SizedBox(width: 4);`) shows no ring, the 下载 sheet lists nothing, and track_sheet.dart:253 `DownloadManager.instance.taskFor(track.id)` is null so the song's own sheet offers 下载并播放 / 下载 again as if nothing were happening. The existing test 'a newer request wins over a slower older one' (test/playback_handler_test.dart:120-139) only asserts what is displayed, not that the older transfer continues.
+
+**Fix.** When a newer selection supersedes a preparing download, either cancel it (thread a cancel token from _ensureLocal into ensureDownloaded/_transfer: cancel the response subscription and keep or discard the .part), or hand it to DownloadManager (create the task entry so it shows in the top-bar ring and 下载管理, with failures recorded there). At minimum, register play-path downloads with DownloadManager so TrackSheet and the downloads button reflect them.
+
+## 171. [low] Library writes swallow disk errors, so 编辑信息's 保存失败 path is unreachable and every library change reports success while nothing is saved
+
+- Finder: find:journey-library (aab062) · Category: data-loss · `lib/services/database_service.dart:453`
+
+**Scenario.** The phone's storage is full (the usual state in which a download has just failed in a music downloader). The listener renames a song, favourites two others and builds a playlist. Each temp-file write fails with ENOSPC; the in-memory lists are already mutated, the UI shows the new state and the success toasts, and the edit sheet closes normally. After the next launch all of it is gone: the files on disk are the old snapshots. Lyrics, by contrast, do surface the same failure (now_playing_page.dart `校准未能保存`).
+
+**Evidence.** lib/services/database_service.dart:453-461 `_persistDownloaded` wraps `_writeJsonAtomically` in `try { ... } catch (e) { debugPrint('DatabaseService _persistDownloaded error: $e'); }`; same in `_persistPlaylists` (473-487, which then still emits the library update) and `_persistRecentlyPlayed` (463-471). `_writeJsonAtomically` itself says (375-376) `One retry, then propagate the failure to the caller` and rethrows (389-391), but no library caller lets it through. AudioDownloadService.saveTrackMetadata (audio_download_service.dart:141-143) swallows as well.
+lib/widgets/track_info_sheet.dart:99-108 expects a throw: `try { await DatabaseService.updateTrackMetadata(updated); ... if (mounted) Navigator.pop(context); } catch (error, stack) { ... showAppSnackBar(..., message: '保存失败，请重试'); }` -- updateTrackMetadata (521-548) can no longer throw for a write failure. Likewise track_sheet.dart:304-305 shows `已加入「…」` and artist_page.dart:37 `已存为歌单` unconditionally.
+
+**Fix.** Let the persist helpers rethrow (or return a bool) for the deliberate, user-initiated mutations (updateTrackMetadata, playlist create/rename/add/remove/reorder, toggleFavorite) and have the callers show a failure snack instead of the success one; keep swallowing only for background writes (history, loudness, discovery).
+
+## 172. [low] Per-id session state survives 删除下载: a song re-downloaded in the same session shows the old name in the player and the raw video title in the library, and is not auto-matched again
+
+- Finder: find:journey-library (aab062) · Category: correctness · `lib/services/audio_player_handler.dart:624`
+
+**Scenario.** Download a song from search; it is auto-matched to "大鱼 / 周深" (so `_attempted` and `_latest` both hold its id). Delete the download (wrong take, glitchy file) and download it again from the search result in the same session. The library row, artist grouping and local search now show the raw video title and UP主 for the rest of the session (autoName is skipped), while tapping it plays under the previous name/cover in the player, queue sheet, notification and 最近播放 (queue built through `_resolve`). If the earlier copy had been edited by hand, that stale hand edit is what the player shows while the library shows the video.
+
+**Evidence.** lib/services/audio_player_handler.dart:145 `final Map<String, Track> _latest = {};` is written by updateTrackMetadata (932-935) and _backfillLoudness (463) and never cleared; removeTracks (853-866) only removes native sources. :170 `Track _resolve(Track tag) => _latest[tag.id] ?? tag;` and :622-625 `_library()` returns `{for (final track in library) track.id: _resolve(track)}` -- so an old `_latest` entry overrides the library's current copy when a queue is built.
+lib/services/track_naming.dart:36 `static final Set<String> _attempted = {};` and :103-106 `if (!enabled || _settled(track) || !_attempted.add(track.id)) return;` -- the id stays in the set after the song is deleted (database_service.dart:779-786 removeDownloadedTrack touches neither).
+The re-download registers the caller's raw copy: audio_download_service.dart:352 `await DatabaseService.saveDownloadedTrack(track)`; library_controller.dart:202-204 then calls `TrackNaming.autoName(track)` for the arrival, which returns at the `_attempted` check.
+
+**Fix.** On DatabaseService.downloadRemovedStream, drop the ids from the handler's `_latest` (and `_loudnessRequested`) and from TrackNaming._attempted; or make `_library()` prefer the stored copy and use `_latest` only for tags already in the native queue.
+
+## 173. [low] 存为歌单 on the artist page has no in-flight guard: a double tap creates two identical playlists and pushes two pages
+
+- Finder: find:journey-library (aab062) · Category: ux · `lib/screens/artist_page.dart:31`
+
+**Scenario.** On an artist page the listener double-taps the 存为歌单 icon (or taps again because nothing visibly happens while the two file writes run, e.g. with a large playlists file or while a lyrics/library write holds the lock). Both taps run _saveAsPlaylist: two playlists named after the artist with the same songs appear under 歌单, and two PlaylistPages are pushed on top of each other.
+
+**Evidence.** lib/screens/artist_page.dart:63-65 `IconButton(tooltip: '存为歌单', onPressed: () => _saveAsPlaylist(context, group), ...)` on a StatelessWidget with no busy flag; :31-39 `final playlist = await DatabaseService.createPlaylist(group.name); await DatabaseService.addTracksToPlaylist(playlist.id, group.tracks.reversed.toList()); ... if (context.mounted) unawaited(PlaylistPage.open(context, playlist.id));`. Nothing covers the button until PlaylistPage is pushed, and that only happens after two whole-file persists (database_service.dart:603 and :704), each of which is write + flush + rename + read-back verification behind the global write lock (346-401). Every other create path opens a modal dialog first (promptForText), which blocks a second tap; this one does not.
+
+**Fix.** Make the action re-entrancy safe (a static/State `_saving` flag cleared in finally, disabling the button while set), or push the playlist page first and fill it afterwards.
+
+## 174. [low] Picked covers are stored at full camera resolution and the Android media session decodes them unscaled every time the song's metadata is published
+
+- Finder: find:journey-library (aab062) · Category: performance · `lib/utils/cover_picker.dart:11`
+
+**Scenario.** The listener sets a photo from the gallery (12 MP = about 48 MB as ARGB_8888; 50 MP modes = about 200 MB) as a song's cover. Each time that song becomes current, the background media service decodes the full image and holds it for as long as the song is current; with a 256 MB heap class the LRU budget is 32 MB, so the bitmap is larger than the cache, is evicted immediately and decoded again on every mediaItem update (twice per track start: announce, then duration). A paused or background player carrying tens to hundreds of MB of artwork is exactly what the low-memory killer removes first, which the handler otherwise goes to lengths to avoid (main.dart image-cache budget, foreground-while-paused).
+
+**Evidence.** lib/utils/cover_picker.dart:11 `final image = await ImagePicker().pickImage(source: ImageSource.gallery);` (no maxWidth/maxHeight/imageQuality) and :19 `await File(image.path).copy(saved.path);` -- the original file is kept as the track cover (track_info_sheet.dart:52-55, 93).
+lib/services/audio_player_handler.dart:391-397 publishes it as `artUri: Uri.tryParse(track.coverUrl.startsWith('/') ? 'file://${track.coverUrl}' : track.coverUrl)`; lib/main.dart:40-53 builds AudioServiceConfig without artDownscaleWidth/Height.
+audio_service-0.18.19 lib/audio_service.dart:1058-1059 sends a file:// art path straight to the platform; android/.../AudioService.java:218-238: `if (config.artDownscaleWidth != -1) { ...inSampleSize... } else { ... bitmap = BitmapFactory.decodeFile(artUri.getPath()); }`, :242 `artBitmapCache.put(artUriString, bitmap)` where the cache is `maxMemory / 8` (331-336, sizeOf = byteCount), and :790 `artBitmap = loadArtBitmap(artCacheFilePath, null)` keeps the bitmap in a field while the item is current. The Flutter side is fine (cached_cover_image.dart:283 ResizeImage); only the service path is unscaled. The handler re-publishes the media item on announce, on duration change (_onDuration, 286-297) and on every metadata edit.
+
+**Fix.** Bound the picked image at the source (`pickImage(source: ImageSource.gallery, maxWidth: 1200, maxHeight: 1200, imageQuality: 90)`) and/or pass `artDownscaleWidth: 512, artDownscaleHeight: 512` in AudioServiceConfig.
+
+## 175. [low] Changing only the cover (or only the artist) in 编辑信息 marks the raw video title as the listener's own song name: the song is never auto-matched again and lyric lookups switch to the whole video title
+
+- Finder: find:journey-lyrics (aecb45) · Category: correctness · `lib/widgets/track_info_sheet.dart:94`
+
+**Scenario.** A freshly downloaded song still carries its video title (auto-naming is switched off, has not reached it yet in the queue, or found no match). The listener opens 编辑信息 only to pick a nicer cover and taps 保存. The track is now stored as named=true, matcher=0 with title "【周深】大鱼 现场版 4K". From then on automatic matching skips it for good (it reads as the listener's answer), the row keeps the video title forever, the lyric sheet opens with the search "周深 【周深】大鱼 现场版 4K", and any later automatic lyric lookup (after 重新匹配 or a cache eviction) asks the providers for the whole video title; for a multi-part track it asks for "<concert> - P3: 大鱼" where it used to ask for 大鱼.
+
+**Evidence.** lib/widgets/track_info_sheet.dart:81-87 the only no-op case is `title == track.title && artist == TrackCredit.artistOf(track) && _cover == track.coverUrl`; any other save, including a cover-only change with the title field untouched, goes to 90-97: `final updated = track.copyWith(title: title, uploader: artist.isEmpty ? TrackCredit.artistOf(track) : artist, coverUrl: _cover, named: true, // The listener's own answer: the matcher never revisits it. matcher: 0, rawUploader: ...)`.
+The title field is prefilled with the video title for an unnamed song (track_info_sheet.dart:36-37 `TextEditingController(text: widget.track.title)`).
+Consequences downstream: lib/services/track_naming.dart:101-102 `_settled(track) => track.isNamed && (track.matcher == 0 || track.matcher == matcher)` and 105-106 `if (!enabled || _settled(track) || ...) return;` - never named automatically again, also not when the matcher constant is raised.
+lib/state/lyrics_controller.dart:61-64 `track.isNamed ? (song: track.title, artist: track.uploader) : (song: track.partTitle, artist: null)` and lib/services/lyrics_engine.dart:2145-2146 `final cleaned = cleanTitle(rawTitle); final title = song ?? cleaned['songTitle']!;` - once `named` is true the uncleaned video title (for a part: the whole "<video> - P3: <part>" string, since models/track.dart:83 isNamed now wins over partTitle) is sent as the song name instead of the parsed song / the part name.
+lib/state/lyrics_controller.dart:67-70 `if (track.isNamed) { return '${track.uploader} ${track.title}'.trim(); }` - the lyric sheet's prefilled search becomes artist + full video title.
+
+**Fix.** In `_save`, only claim the name when the listener changed it: compute `renamed = title != track.title || artist != TrackCredit.artistOf(track)`; when `!renamed` save `track.copyWith(coverUrl: _cover)` and leave title, uploader, named, matcher and rawUploader as they were.
+
+## 176. [low] Tapping a lyric line whose time lies beyond the end of the audio seeks past the end and skips to the next song
+
+- Finder: find:journey-lyrics (aecb45) · Category: ux · `lib/widgets/lyrics_view.dart:172`
+
+**Scenario.** A 1:30 clip of a live performance is matched to the full 4:30 song's lyrics. The listener scrolls down in the lyric view and taps a line timed at 3:10 (or simply the last line after calibrating by +5 s on a full-length track). Instead of nothing happening or jumping to the end, the clip ends at once and the next song in the queue starts playing; the lyric view switches to that song.
+
+**Evidence.** lib/widgets/lyrics_view.dart:172-173 `final seconds = (line.time + widget.lyrics.offset).clamp(0.0, 86400.0);` / `widget.onSeek?.call(Duration(milliseconds: (seconds * 1000).round()));` - clamped to a day, not to the track.
+lib/screens/now_playing_page.dart:392 `onSeek: _handler.seek,` and lib/services/audio_player_handler.dart:794 `Future<void> seek(Duration position) => _player.seek(position);` - no clamp against `_player.duration`.
+just_audio-0.10.6 lib/just_audio.dart:1328-1329 forwards the position unchanged (`.seek(SeekRequest(position: position, index: index))`) and android/.../AudioPlayer.java:1040-1041 calls `player.seekTo(windowIndex, position)`; a position at or past the item's duration ends the item, and with the queue in 列表循环/随机 the player moves to the next one (with 单曲循环 it restarts). The seek bar cannot produce such a position; the lyric view is the only caller that can. Deduced from source, not run.
+Lyrics longer than the audio are normal here: automatic matching attaches the full studio song's LRC to short clips and live cuts, and a positive calibration offset pushes the last lines further out.
+
+**Fix.** Clamp the target in `_tap` (or in the page's onSeek wrapper) to just before the end: `final total = handler.durationNotifier.value; if (total > Duration.zero && target >= total) return;` (or clamp to `total - 500 ms`), so a line outside the audio is not seekable.
+
+## 177. [low] Re-check by a newer matcher corrects name/artist but keeps the earlier answer's album artwork
+
+- Finder: find:journey-matching (a38eca) · Category: correctness · `lib/services/track_naming.dart:192`
+
+**Scenario.** Matcher N judged a clip exact and stored "大鱼 / 周深" with NetEase's album art in place of the video thumbnail. TrackNaming.matcher is raised; on next play the song is re-checked and found to be a cover (exact false, coverUrl null). Title and artist become the cover singer's, but the row, player and notification keep 周深's release artwork for good; nothing can restore the thumbnail short of deleting and re-downloading.
+
+**Evidence.** track_naming.dart:188-196 `await _save(stored.copyWith(title: found.title, uploader: found.artist, coverUrl: found.coverUrl, named: true, ...))`.
+track.dart:191 `coverUrl: coverUrl ?? this.coverUrl` -- a null `found.coverUrl` keeps whatever is stored.
+lyrics_engine.dart:14-15 "The original release's artwork; only offered when [exact]"; 1231-1232 `String? cover; if (bestExact) cover = await _netEaseCover(best!['id']);`.
+The video thumbnail is not kept anywhere once replaced (no rawCoverUrl on Track; VideoHints carries no picture).
+
+**Fix.** Keep the video's picture (store it once as a raw cover, or return `pic` in VideoHints) and, when a re-check yields a non-exact identity for a song an earlier matcher gave release artwork, restore it.
+
+## 178. [low] A song deleted and downloaded again in the same session is not named, and the player shows stale metadata
+
+- Finder: find:journey-matching (a38eca) · Category: correctness · `lib/services/track_naming.dart:101`
+
+**Scenario.** Song X is downloaded and auto-named (id in `_attempted`, named copy in `handler._latest`). The listener deletes the download and downloads it again from search in the same session (for example hoping for a fresh match). LibraryController.reload calls autoName (library_controller.dart:203) but `_attempted` rejects it, so the library row keeps the raw video title until the app is restarted. Meanwhile playing it resolves through `_latest`, so the player, notification and lyrics show the old song name/artist while the list shows the video title.
+
+**Evidence.** track_naming.dart:34 `static final Set<String> _attempted = {};` is cleared only on inconclusive lookups (135, 157); 101 `!_attempted.add(track.id)` returns for any id tried earlier.
+database_service.dart:779-785 `removeDownloadedTrack` drops the library row (and audio_download_service.dart:229-235 the meta file); the re-download stores the search copy with the video title (database_service.dart:767-771).
+audio_player_handler.dart:145 `_latest` is written at 463 and 933 and never cleared; 170 `Track _resolve(Track tag) => _latest[tag.id] ?? tag;` and 623-626 `_library()` resolves every library track through it.
+
+**Fix.** Subscribe to DatabaseService.downloadRemovedStream in TrackNaming (remove ids from `_attempted`) and in the handler (remove ids from `_latest`).
+
+## 179. [low] 收藏 from the track sheet stores the caller's stale Track copy instead of the library's named one
+
+- Finder: find:journey-matching (a38eca) · Category: correctness · `lib/widgets/track_sheet.dart:104`
+
+**Scenario.** From a search result the listener opens the sheet for a song that is not downloaded, taps 下载, waits while it downloads and is auto-named (the sheet title updates through `_latest()`), then taps 收藏 in the same sheet. Favorites receives `widget.track` -- the search copy with the raw video title, UP主 and no loudness. 收藏 then lists the video title while 本地 lists the song name, permanently. The same happens when favoriting an already named song from any online search or recommendation row.
+
+**Evidence.** track_sheet.dart:102-104 `Future<void> _toggleFavorite() async { Haptics.light(); await DatabaseService.toggleFavorite(widget.track); }` while the sheet itself knows better: 234-241 "The library's copy carries any edits made since the sheet's caller captured its [Track]" / `_latest()`, used for display at 121 and for 加入歌单 at 188.
+database_service.dart:736 `favorites.tracks.insert(0, track);` stores it verbatim; database_service.dart:532-537 only rewrites playlist copies when updateTrackMetadata runs, which TrackNaming never does again for a settled song (track_naming.dart:122).
+
+**Fix.** Use `_latest()` in `_toggleFavorite` (and have DatabaseService.toggleFavorite/addTracksToPlaylist prefer the downloaded copy for an id it knows).
+
+## 180. [low] Videos that can never be one song still cost a full Bilibili hints fetch on first play of every launch
+
+- Finder: find:journey-matching (a38eca) · Category: performance · `lib/services/track_naming.dart:125`
+
+**Scenario.** The library holds 20-minute live sets, 【合集】 uploads and other titles the catalogues do not know. Each launch, the first time each of them becomes the playing track, the app sends 3-4 requests to Bilibili (and for unknown-but-short titles up to ~8 NetEase searches as well) to re-derive a negative answer already known, on an account/IP that is already subject to Bilibili risk control. Shuffling a library of such tracks produces a steady stream of signed player requests in the background.
+
+**Evidence.** track_naming.dart:124-125 fetches hints first; bilibili_sdk.dart:255-258 (view + tags), 322-335 (signed player/wbi/v2 + bgm/detail) -- up to four Bilibili requests, more when the plain view is refused and retried signed (143-156).
+Only afterwards lyrics_engine.dart:711-716 rejects offline: `if (category || _severalSongs.hasMatch(rawTitle) || durationSeconds > _longestSong) { _remember(memoKey, null); return null; }`.
+track_naming.dart:176-186: for an unnamed track with `found == null` nothing is saved, and `_attempted` / `_identityMemo` / `_hintsMemo` are in-memory only, so the verdict is forgotten at exit.
+
+**Fix.** Run the offline exclusions (duration > 15 min, category brackets, _severalSongs) in TrackNaming before fetchVideoHints, and persist a negative verdict per matcher generation (e.g. `matcher` on an un-named track) so it is not re-asked until the constant is raised.
+
+## 181. [low] Audio is never fsynced before it is marked ready: a power loss shortly after a download leaves a permanently 'downloaded' file that is truncated or zero-filled
+
+- Finder: find:journey-hostile (aa1f92) · Category: data-loss · `lib/services/audio_download_service.dart:543`
+
+**Scenario.** The phone's battery dies (or it hard-reboots) within the file system's writeback window after a song finishes downloading, e.g. while a batch of downloads is running. After reboot `audio_<id>.m4a` exists with a non-zero length but is short or contains unwritten blocks; `.ready` and the sidecar exist. The start-up prune keeps it, the library shows it as downloaded, and playing it ends early or produces '有歌曲无法播放，已跳过' every time. Nothing re-downloads it (isDownloaded is true); the listener has to guess that deleting and downloading again fixes it. The expected size that could have detected this was thrown away with the part note.
+
+**Evidence.** lib/services/audio_download_service.dart:543-547 `await sink.flush(); } finally { try { await sink.close(); } catch (_) {} }` - IOSink.flush only hands the bytes to the OS; nothing calls RandomAccessFile.flush (fsync) on the .part. Then :328 `await part.rename(path);`, :338 the note recording the expected total is deleted (`if (await note.exists()) await note.delete();`), :341-344 the `.ready` marker is created. From then on the only integrity test is :181-183 `if (!await ready.exists()) return false; if (!await audio.exists()) return false; return await audio.length() > 0;` and the same test in the start-up prune, lib/services/database_service.dart:276-278. By contrast the small JSON files are written with `flush: true` (audio_download_service.dart:105, database_service.dart:359), so after a power cut the sidecar and the ready marker can be durable while the audio's data blocks are not.
+
+**Fix.** Before the rename, open the .part and fsync it (`final raf = await part.open(mode: FileMode.append); await raf.flush(); await raf.close();`). Optionally write the expected byte count into the `.ready` marker and have _statDownloaded / the start-up prune compare it with the file length.
+
+## 182. [low] A failed `.ready` marker write is swallowed: the song is reported downloaded for this session, vanishes at next launch, and leaves an undeletable orphan file
+
+- Finder: find:journey-hostile (aa1f92) · Category: resilience · `lib/services/audio_download_service.dart:345`
+
+**Scenario.** The last megabytes of a download exhaust free space (or the process is killed between the rename at :328 and the marker at :343). The audio file is complete and renamed, but creating the marker fails; the sidecar write and the downloaded.json write fail too (both swallowed). The session continues normally: the row shows downloaded, the song plays. At the next launch the song is gone from the library without explanation, while its full-size m4a stays in bilibeat_audio, counted nowhere in 下载管理 and removable only by clearing app data - on a device that is already out of space. Downloading it again needs the same space a second time before the orphan is replaced.
+
+**Evidence.** lib/services/audio_download_service.dart:340-349 `try { final readyFile = File(_readyPath(dir, _key(track))); if (!await readyFile.exists()) { await readyFile.create(recursive: true); } } catch (e) { debugPrint('ready create failed: $e'); } await saveTrackMetadata(track, force: track.loudness != null); _downloadedMemo[_key(track)] = true;` then :351-352 emits done and calls `DatabaseService.saveDownloadedTrack(track)`. The memo now contradicts the disk. Next launch, lib/services/database_service.dart:221 only discovers files that have a `.ready` (`entity.path.endsWith('.ready')`) and :276-287 prunes any listed track without one (`exists = await ready.exists() && ...` -> `prunedIds.add(t.id)`), persisting the pruned list at :296. audio_download_service.dart:204-205 `storageBreakdown` skips an m4a without a ready marker, and delete() is only reachable for tracks in the downloaded list.
+
+**Fix.** Treat a failed marker as a failed download (rethrow instead of logging) so the memo is not set and the user sees the failure; and make start-up discovery adopt a non-empty `audio_<id>.m4a` that has a sidecar but no `.part`/note and no marker (re-create the marker) or delete it, instead of leaving it orphaned.
+
+## 183. [low] System clock moved backwards pins WBI signing to stale or hard-coded keys for the length of the jump; downloads fail until restart
+
+- Finder: find:journey-hostile (aa1f92) · Category: resilience · `lib/services/wbi_signer.dart:139`
+
+**Scenario.** The device clock is ahead (set by hand, or wrong after a flat battery) when the app makes one signed request with no connectivity: `_retryAfter` is stamped two minutes into that wrong future. The clock is then corrected by network time, i.e. jumps back several hours or days. For that whole span every signed request uses the hard-coded fallback keys (or, in the other branch, a cached pair that Bilibili has since rotated): playurl is refused, so every download and every 下载并播放 ends in '下载失败' although search (which has a plain fallback) works. Only force-stopping the app clears it. A timestamp from the wrong clock is also sent as `wts`.
+
+**Evidence.** lib/services/wbi_signer.dart:131-136 `if (_cacheTime != null && DateTime.now().difference(_cacheTime!).inHours < 12) { ... return {'imgKey': _cachedImgKey, 'subKey': _cachedSubKey}; }` - a negative difference (cache stamped in the 'future') is always < 12, so the cached pair never expires until the clock passes the stamp plus 12 h. :138-141 `if (retryAfter != null && DateTime.now().isBefore(retryAfter)) { return _fallbackKeys; }` with :180 `_retryAfter = DateTime.now().add(_retryEvery);` - after a backwards jump of N hours the hard-coded 2-year-old pair is used for N hours + 2 min with no attempt to fetch live keys. The stream URL has no unsigned fallback: lib/services/bilibili_sdk.dart:389-395 signs and requests only `x/player/wbi/playurl`, and a refusal returns null (:446) -> audio_download_service.dart:304-306 `throw Exception('无法获取音源下载链接')`. The media service keeps the process (and these statics) alive for days (main.dart:50 `androidStopForegroundOnPause: false`).
+
+**Fix.** Use a monotonic source for both windows (a `Stopwatch` started at fetch / at failure) instead of DateTime, or treat a negative `difference` and a `_retryAfter` more than `_retryEvery` ahead of now as expired.
+
+## 184. [low] Start-up prune is skipped entirely when the audio folder itself is missing, so a library with no files is shown as fully downloaded for one launch
+
+- Finder: find:journey-hostile (aa1f92) · Category: correctness · `lib/services/database_service.dart:217`
+
+**Scenario.** The bilibeat_audio folder is removed while the JSON files remain (macOS: the user or a cleaner deletes it from the app container; any platform: a restore that brings back the small JSON files but not the audio). On the next launch the whole library is listed as downloaded. 播放全部 / 随机播放 builds a queue of non-existent files and fails with '无法播放「…」'; tapping a single song silently re-downloads it over whatever network is active, contrary to the row-tap contract (playback_actions.dart:13-14 `nothing downloads silently from a tap`). Because that launch re-creates the empty folder, the launch after it prunes everything.
+
+**Evidence.** lib/services/database_service.dart:214-217 `static Future<void> _discoverAudioFiles(String dir) async { try { final audioDir = Directory('$dir/bilibeat_audio'); if (!await audioDir.exists()) return;` - the early return also skips the prune loop at :261-296 that exists precisely for `entries whose files vanished externally`. Nothing has created the folder at that point: it is only created by AudioDownloadService._dir() (audio_download_service.dart:69-72), which first runs after the library has loaded (handler._install / isDownloaded). So the downloaded list is published as-is; LibraryController.isDownloaded (library_controller.dart:58) says yes for every song. playCollection (audio_player_handler.dart:669-685) filters only against that list and installs sources for files that do not exist; a row tap goes to playTrack -> _ensureLocal (:603-608), where `AudioDownloadService.isDownloaded` stats the disk, says no, and starts a download.
+
+**Fix.** Do not return early: when the folder is missing, skip only the discovery listing and still run the prune (or create the folder first), so the library reflects the disk on the first launch.
+
+## 185. [low] Temp files from an interrupted atomic write are never removed
+
+- Finder: find:journey-hostile (aa1f92) · Category: resource-leak · `lib/services/database_service.dart:358`
+
+**Scenario.** The process is killed (OEM task killer, low-memory kill, crash, power loss) while one of these writes is between creating the temp file and renaming it, or a sidecar write fails with ENOSPC. A `bilibeat_lyrics.json.<micros>.tmp` (as large as the lyrics store), `bilibeat_playlists.json.<micros>.tmp`, or `audio_<id>.json.<micros>.tmp` is left in the documents directory. Because each name is unique, no later write replaces it; the files accumulate over the life of the install and are invisible in 下载管理.
+
+**Evidence.** lib/services/database_service.dart:357-359 `final unique = DateTime.now().microsecondsSinceEpoch; tmp = File('$path.$unique.tmp'); await tmp.writeAsString(payload, flush: true);` - a uniquely named temp file per write; the only cleanup is the `finally` at :392-398, which runs only if the process survives. lib/services/audio_download_service.dart:103-117 `_atomicWriteString` does the same for sidecars and has no cleanup at all, not even when `writeAsString` or `rename` throws. `grep -rn '\.tmp' lib` finds no sweep: _load (:111-129) and _discoverAudioFiles never look for `*.tmp`. Writes are frequent and not small: the session file every 20 s while playing (audio_player_handler.dart:326-329), and the whole lyrics store on every newly matched song (lyrics_store.dart:155-158).
+
+**Fix.** At the start of DatabaseService._load, delete `bilibeat_*.json.*.tmp` in the documents directory and `*.tmp` in bilibeat_audio; wrap _atomicWriteString in try/finally that deletes its temp file on failure.
+
+# Finder notes
+
+## find:downloads (aa27dc)
+
+Method: read-only; nothing was built, run or sent to the network. SDK behaviour (IOSink/file consumer, HttpClient pooling) was checked by reading the Dart 3.12.2 sources under ~/flutter/bin/cache/dart-sdk/lib (io/io_sink.dart, io/file_impl.dart, _http/http_impl.dart), not by executing them — findings 2 and 3 rest on that reading.
+
+Checked and found sound:
+- Resume logic in _transfer: a .part is only continued when the note agrees (If-Range with a strong ETag or Last-Modified, Content-Range start == existing, total match, 'neither to go by' rejected); 200-instead-of-206 and If-Range mismatch restart from zero; an unrequested 206 is refused; 416 is accepted only when the recorded total equals the bytes on disk; truncated bodies fail via Content-Length (Dart raises on early close) plus the received<total check; expired links answering text/JSON are rejected before anything is written; Accept-Encoding: identity keeps Content-Length meaningful; redirects carry Referer/UA/Range.
+- Per-chunk 30 s stall timeout cancels the response subscription (connection destroyed) and closes the sink before the error propagates.
+- Same-track concurrency: _inFlight is claimed synchronously; DownloadManager._tasks/_pendingIsDownloadedCheck guard double taps; a user download joining a playback-path download shares one future and one .part.
+- File naming: ids are validated by isSafeKey before any write/delete path; multi-part keys are bvid_p<page>, cid 0 from search resolves to the first page; Track.audioUrl is never set in app code so every attempt asks for a fresh link (no stale signed URL is persisted).
+- Index vs disk: saveDownloadedTrack runs only after rename + .ready; startup prune/discovery (_discoverAudioFiles) repairs both directions from the per-track meta JSON; a failed _persistDownloaded self-heals on next launch; removeDownloadedTrack deletes ready first, clears the memo and tells the player (removeTracks) so a playing track is dropped from the queue.
+- Delete-while-downloading is not reachable from the UI (删除下载 is offered only for tracks in the downloaded index).
+- Subscriptions in TrackDownloadButton, DownloadManagementSheet and TrackSheet are cancelled in dispose; row recycling is guarded by id; progress events are per-id.
+- macOS Release entitlements include network.client; Android manifest has allowBackup=false and usesCleartextTraffic=false.
+
+Could not determine offline (depend on Bilibili's live behaviour, so not reported as findings):
+- fetchAudioStream returns only DASH baseUrl; backupUrl is read only when baseUrl is absent (bilibili_sdk.dart:424-431) and _download never tries a second URL. If Bilibili hands out an unreachable PCDN/mcdn baseUrl (and http->https rewriting breaks an http-only node), the download fails although a working mirror was in the same answer.
+- The `durl` branch is preferred when present (bilibili_sdk.dart:404-414); for videos without DASH that is a muxed video stream, and only durl.first is taken (multi-segment FLV would be truncated). With fnval=16 this should be rare.
+- playurl is requested without the buvid cookies and has no fallback when refused (412/-352), unlike view/search; WBI keys are cached 12 h with no refresh on a signature refusal.
+- A body with no Content-Length that is cut cleanly is accepted if >= 1024 bytes (no way to detect); CDNs normally send Content-Length.
+
+Minor, not reported: download_management_sheet.dart:184-186 icon buttons are 44x48, under the 48 pt convention in CLAUDE.md; IOSink.add has no back-pressure (bytes buffer in memory if storage is slower than the network); no fsync before the rename, so a power loss seconds after completion could leave a short .m4a behind a .ready marker; _refreshLibrary in the sheet can apply an older snapshot if two refreshes complete out of order.
+
+## find:network (a127be)
+
+Read-only audit; nothing was run and no network requests were made. Plugin/SDK behaviour was checked from source (dart:io http_impl.dart, sky_engine hooks.dart, engine switches.cc / FlutterDartProject.mm).
+
+Checked and found sound:
+- WBI signing: the mixin table matches the published 64-entry table; keys are sorted, values have !'()* removed before both signing and sending, Uri.encodeComponent matches encodeURIComponent for what remains (space as %20, upper-case hex), wts is added before signing, w_rid is MD5 of query + mixin key. The test in test/bilibili_requests_test.dart covers the sent-equals-signed property.
+- TLS: no badCertificateCallback, no HttpOverrides, no http:// literal in the request code; cover and stream URLs are upgraded to https.
+- Identifiers: buvid3/buvid4 come from Bilibili's SPI endpoint, live in memory only (1 h), are never persisted and are sent only as a Cookie to api.bilibili.com; dart:io drops Cookie on cross-origin redirects. No account, no login.
+- Stale-result tokens in OnlineSearchController (_token, _historyToken) and RecommendationsController (_pass): an older request cannot write into a newer query's results or loading flags; clear()/search() reset the flags a returning stale call skips.
+- Response parsing: _httpGet turns non-200, non-UTF-8 and timeouts into null; view/playurl/hints/music/WBI/fingerprint parsing is inside try/catch or type-checked; the untyped casts in the _searchOnce result loop can throw a TypeError, but both callers catch everything. An HTML 200 body ends as BiliApiException, not as an empty list.
+- extractBvOrAvId boundaries and case handling; query encoding on every URL built from user text.
+- LocalSearch: normalisation, all-terms-must-match and ranking behave as documented; the SearchView cache is invalidated correctly because LibraryController replaces the downloaded list (List.unmodifiable) on every reload.
+- HttpClient lifecycle: static clients for the process lifetime with connection and idle timeouts; error bodies are drained.
+
+Smaller observations not raised as findings:
+- `await res.drain<void>()` on non-200 answers has no timeout (bilibili_sdk.dart:49, wbi_signer.dart:151, fingerprint_service.dart:40); a stalled error body would hang that call. Error bodies are tiny, so the window is small.
+- No overall deadline on a search: on a connection that hangs rather than fails, the first search waits roughly 60 s (SPI 10 s + nav 10 s + primary and fallback 10 s each, then the unfiltered retry 20 s) before 无法连接哔哩哔哩 appears; a retry about 40 s.
+- No single-flight for WBI keys or buvid: the four parallel recommendation seeds at cold start each fetch nav and SPI (8 requests instead of 2, four different buvids at once).
+- `getUrl(...).timeout(10 s)` with a 15 s connectionTimeout on the SDK client can orphan a request whose handshake completes between 10 and 15 s, holding one of the 10 per-host connections for the life of the process.
+- A random fallback buvid3 is cached for a full hour after one failed SPI call (the WBI equivalent is 2 minutes); I could not establish that Bilibili treats it differently from an SPI-issued one.
+- RecommendationsController loads once per app session; a first run that loaded with an empty profile keeps showing 听几首歌之后，这里会有推荐 until 换一批 is tapped or the app restarts.
+
+Could not determine offline:
+- Whether Bilibili ever returns `{"code":-412}` with HTTP 200 (with HTTP 412 the body is discarded by _httpGet and handled as a failure), and which code the search endpoint uses for a refused signature (-403 vs -352); the confidence on the error-code finding reflects this.
+- Whether the hard-coded WBI pair is currently valid; the WBI finding rests on the file's own comment that such a pair is rejected.
+- Whether `view/detail/tag` returns a `tag_type: "bgm"` entry named 发现《…》. bilibili_sdk.dart:276 filters only `topic`, and none of the 126 videos in test/fixtures/zhoushen_videos.json carries such a tag although most have recognised music. If the live API does return it, production tags differ from the surveyed fixture and that tag would enter the matcher's tag-as-song candidates (lyrics_engine.dart:891-895). Worth one live check by whoever owns matching.
+
+## find:persistence (a475ad)
+
+Read-only audit; nothing was run, built or modified, and no network requests were made. Performance figures in the findings are estimates from the code, not measurements; the noatime and iOS-backup claims are platform knowledge not verified on a device.
+
+Checked and found sound:
+- Atomic write (_writeJsonAtomically): one FIFO lock, unique temp name, fsync before rename, POSIX rename-over-existing, temp cleanup on failure, lock released in finally. Snapshots are taken in call order, so queued persists of one file cannot lose an update. Dart's JSON encoder escapes lone surrogates, so the read-back comparison cannot spuriously fail on odd titles.
+- Unreadable files: downloaded, recently played, playlists, search history, prefs and lyrics are all set aside on a parse error or a newer schema_version; a set-aside downloaded.json is rebuilt from the per-track metadata files, which updateTrackMetadata and setTrackLoudness keep current. The session file is overwritten rather than set aside, which is acceptable for ephemeral state.
+- Read-modify-write: every mutator awaits _ensureLoaded and then mutates synchronously; a double-tap on favourite resolves sequentially; the concurrent prefs load / set-aside race is handled.
+- Track.fromMap / Playlist.fromMap / PlaybackSession.fromMap tolerate missing, extra and wrongly typed fields; named, matcher and rawUploader round-trip; equality and hashCode are by id; TrackNotifier notifies on identity.
+- LyricsStore: pins made before the file loads survive the merge, clears before load are honoured, pinned entries are never evicted or replaced by putAutomatic, revision checks hold.
+- LibraryController: the sorted and artists caches are keyed on list identity and cannot go stale; reload ordering and the first-load guard against a naming sweep are correct.
+- Picked covers: paths are rebased for all three stores and for rediscovered tracks before use; the network cover cache and the picked-cover folder are different directories on Android, iOS and macOS; cover URLs are normalised to https.
+- Playlist reorder, swipe-remove and batch add/remove use consistent indices against the store.
+
+Smaller observations not raised as findings:
+- Nothing sweeps `*.tmp` files left if the process is killed between the temp write and the rename (unique names, so each such kill leaves one file; the window is a few milliseconds).
+- Nothing in the app ever reads a `.unreadable` file back. Today schemaVersion is 1, so only damaged files are affected.
+- Any read or isolate failure in a loader is treated as corruption and sets the file aside; I could not construct a realistic transient failure on these platforms.
+- main.dart silences debugPrint in release only on the root isolate; the parse helpers run under compute, where a skipped malformed entry would still be logged with its contents. This only fires on malformed entries.
+- pickCoverImage takes the extension as `image.path.split('.').last`; a picked file with no extension (possible on macOS) yields a path with slashes, the copy fails and the pick is silently dropped.
+- Persist failures (for example disk full) are swallowed for the library files; in-memory state diverges from disk until the next successful write of that file.
+- LyricsStore.putAutomatic removes an existing automatic entry when the new lookup is empty, and an offline lookup is indistinguishable from "not found"; this only bites when the stored lyrics no longer match the track's name. Left for the lyrics reviewer.
+- When downloaded.json is rebuilt by discovery, the "most recently downloaded first" order is replaced by directory order.
+
+Not determined: actual startup and encode timings on a device; behaviour of the cover trim on a device mounted relatime.
+
+## find:lyrics (a0a674)
+
+Method: read-only. Nothing in the repo was modified and no flutter/dart/network command was run. Two claims were checked numerically with small Python scripts in the scratchpad (a line-for-line port of dart-sdk/lib/internal/sort.dart for the sort-stability claim; the seek/active-line float arithmetic). The connection-leak finding is derived from reading dart:io source (http_impl.dart, http_parser.dart), not from a run, hence its lower confidence. Provider data shapes (NetEase unsynced lyric bodies, "(Live)" naming) are from knowledge of the APIs, not from requests.
+
+Also read in part (not listed in filesRead): lib/services/database_service.dart (write lock, envelope, set-aside, store-file helpers), lib/services/audio_player_handler.dart (nowPlaying/_publish/_announce, holdAutoAdvance, updateTrackMetadata), test/widget_test.dart and test/library_features_test.dart (LRC tests).
+
+Checked and found sound:
+- Pin semantics, every write path in LyricsStore: pin and clear bump the revision synchronously; putAutomatic re-checks revision and `pinned` both before and after its await; the file merge in _load keeps session entries over file entries and honours clears made before load; _evict skips pinned entries; calibration (setOffset -> choose -> pin) pins. I found no path by which an automatic result overwrites a pinned entry.
+- Stale results: _load's owns() (generation + current track id + store revision) is re-checked after every await and in the catch; A->B->A, dispose, choose and rematch all invalidate in-flight work. The sheet's search token and mounted checks are correct; choose/paste/rematch act on the track the sheet was opened for.
+- Calibration maths: offset is absolute, sign and the 0.20 s reaction correction are right, lines are not rewritten, the offset round-trips through toMap/fromMap and is baked into toLrc.
+- parseLrc: mm:ss, mm:ss.x/.xx/.xxx, mm:ss:xx, several tags per line, CRLF and BOM (String.trim strips U+FEFF), metadata tags ([ar:], [length:03:45]) and blank timed lines behave as intended; fraction digits are read by position.
+- LyricsView: listeners and the resume timer are removed in dispose and on lyric change; drag-initiated browsing, the 4 s grace and tap-to-resume work for touch; binary search handles equal times and offsets; _follow guards unmounted/empty states.
+- JSON handling in the provider code: all decoding and casts sit inside try/catch or .catchError; a malformed response degrades to "no result" rather than throwing into the controller.
+
+Smaller observations not raised as findings:
+- The LRC `[offset:±ms]` tag is ignored (the line is skipped as metadata), so a pasted file that relies on it is off by that amount until calibrated.
+- LyricsStore._persist rewrites the whole file (up to 300 cached songs, roughly 1 MB, jsonEncode and a read-back compare on the UI isolate) on every automatic result, including misses where nothing changed, and on every calibration tap. Not measured.
+- fetchFromLRCLIB returns the first title-matching record even when it only has plainLyrics and a later record is synced; could not confirm result ordering without the network.
+- `res.drain()` at lyrics_engine.dart:49 has no timeout; a stalled non-200 body would hold the lyrics pane in the loading state and block TrackNaming's serial queue.
+- rematch() and _load() use the sheet's captured Track instance; if auto-naming renames the song while the sheet is open, a rematch searches with the old name.
+- In calibration mode the list still snaps back to the (mis-timed) active line 4 s after a manual scroll, which works against hunting for the line being heard.
+
+## find:screens (abef45)
+
+Read-only audit; nothing was built, run or modified, and no network requests were made. Plugin/SDK behaviour was checked from source (just_audio 0.10.6 positionStream/createPositionStream, rxdart 0.28.0 subject stream equality, Flutter scaffold.dart body constraints, routes.dart pointer-ignoring during pop, reorderable_list.dart onReorderItem semantics). Only parts of lib/services/lyrics_engine.dart, lib/services/bilibili_sdk.dart, CHANGELOG.md and ios/Runner/Info.plist were read (grep/excerpts), so they are not in filesRead.
+
+Checked and found sound:
+- BuildContext/setState after await: every async path in the scoped screens either captures navigator/messenger first or checks mounted/context.mounted (home protection hint, playlist remove/reorder/rename/delete/add, artist save-as-playlist, settings, lyrics sheet hand-off, calibration error path).
+- Disposal: AppShell (observer, messages sub, focus node, text controller, query notifier), NowPlayingPage (nowPlaying listener, position sub/notifier, auto-advance hold released on every path incl. dispose), SettingsSheet observer, LyricsView/MarqueeText timers and controllers. No listener is added twice.
+- Index safety: all list builders index immutable snapshots (LibraryController hands out unmodifiable lists; PlaylistPage copies the live playlist list each build), so in-place DB mutation of Playlist.tracks cannot produce a RangeError. Reorder indices match DatabaseService._moveWithin under onReorderItem semantics; rapid consecutive reorders stay consistent because the DB list is mutated in place before the persist.
+- Search bar state machine: focus -> active, 取消/Back -> exit, onDrag keyboard dismissal keeps search open, PopScope(canPop: !_searchActive) is correct, whitespace-only queries are treated as empty, request tokens prevent stale results after clear/exit.
+- New playlist / save-as-playlist open the page only after the library reload has landed (stream delivery and reload are all microtasks after the write), so the 'deleted elsewhere' blank scaffold is not shown on open.
+- Artist grouping and sort caches are invalidated correctly (identity of the downloaded list, TrackCredit.reset when the taught set changes).
+- _Spacing in portrait: no negative sizes; the Expanded artwork absorbs any shortfall. Verified by hand for 320x568 and 360x640 at text scale 2.0 and for tablets; the text-scale term matches the real growth of the title/artist/time rows.
+- Safe areas: search bar (top), DockedPlayer/MiniPlayer (bottom inset, also when hidden), edit bar, sheets (useSafeArea + viewInsets), player page.
+- handler.playTrack/playCollection resolve every queued item to the library copy by id, so stale Track copies passed from lists do not reach the queue or now-playing display.
+
+Observed but deliberately not reported as findings:
+- 歌名/歌手 sort uses String.compareTo on lower-cased UTF-16 (CJK ordered by code point, not pinyin) and List.sort is not stable for equal keys; a limitation rather than a regression.
+- SongTile's fixed 64 pt extent overflows only at text scale of roughly 1.7 and above; playlist/artist grid cells overflow by a few px into their spacing at 1.3 on 360 dp.
+- 删除下载 in the song sheet has no confirmation (the same action in 下载管理 does); it has been that way since v4, so treated as intent, but a mis-tap permanently loses audio for videos since removed from Bilibili.
+- promptForText disposes its TextEditingController while the dialog is still animating out (debug-only assertion risk, nothing in release).
+- TrackInfoSheet._save does Navigator.pop(context) after the awaits guarded only by mounted; if the sheet is dismissed during the short save window it would pop the page beneath. Window is tens of ms.
+- just_audio leaks one position pipeline each time the last positionStream listener goes away and comes back (AppShell removes DockedPlayer while the keyboard is open); cost is negligible.
+- ArtistPage 存为歌单 has no re-entrancy guard (a fast double tap creates two playlists).
+- A non-downloaded playlist song started via 下载并播放 is inserted at queue index 0 rather than at its playlist position (the queue captured for the sheet predates the download).
+- There are no widget tests for AppShell, HomePage, SearchView, PlaylistPage or ArtistPage; NowPlayingPage is exercised only through the lyrics tests' harness, and render_screens.dart renders at 390 pt without a sleep timer, which is why the top-bar overflow is not visible in the goldens.
+
+## find:playback (ac30e4)
+
+Method: read all nine scope files in full plus the manifest, then traced the handler's calls into just_audio 0.10.6 (Dart + Android AudioPlayer.java), audio_service 0.18.19 (Dart + AudioService.java / AudioServicePlugin.java) and audio_session 0.2.4 from the pub cache. Nothing was run; the first two findings are deductions from plugin source and should be confirmed on a device (dumpsys power / media_session) before fixing. The test files were only grepped, not read in full.
+
+Checked and found sound:
+- Install/selection races: _selection token + _installing hold + PlayerInterruptedException handling; rapid taps, a superseded download (_ensureLocal/preparing), restore overtaken by a tap. just_audio's _load reshuffles around the initial index, so shuffle starts and restores put the current track first.
+- Rapid Next (_navTarget), previous-restarts-after-3s, manual skip under repeat-one, end of a non-looping queue (parks paused at first), skipToQueueItem/selectQueueTrack index mapping under shuffle.
+- Concurrent removeTracks calls: queue ids are de-duplicated and each event carries one id, and removeAt is serialized by just_audio's lock, so stale snapshots cannot remove a wrong item. SequenceState.currentIndex clamps, so removing the last/current item cannot throw in _publish.
+- Loudness: gain clamp (-14..+8 dB), -11 LUFS assumption for unmeasured tracks, measured_i only accepted when < 0, Track.copyWith never clears loudness, enhancer units (just_audio converts dB to millibel), enhancer state re-sent on platform re-activation, volume re-applied on activation.
+- Audio focus: handleInterruptions:false still activates the session in play(); audio_session's begin/end types (transient -> pause/pause, permanent -> unknown, duck) match the handler's resume logic; becoming-noisy clears the resume flag; user pause/stop/sleep timer clear it.
+- Session persistence: saved on pause, every 20 s while playing and 2 s after queue changes; empty state never overwrites; corrupt/missing file -> null; ids missing from the library are dropped; missing current id falls back to index 0 at position zero. After _player.stop() just_audio's idle player keeps index and position, so resuming after the idle stop continues where it was.
+- Sleep timer: both modes, cancel/replace, stop clears, 300 ms end-of-track window vs just_audio's <=200 ms position tick; native seek events arrive before the seek result so manual skips are not misread as auto-advance.
+- Metadata edits: updateTrackMetadata -> _latest -> _publish updates nowPlaying (TrackNotifier), mediaItem and queue; TrackNaming re-reads the stored track before saving.
+- Manifest: mediaPlayback FGS type and permission, WAKE_LOCK, POST_NOTIFICATIONS, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, MediaButtonReceiver all present; MainActivity channel methods match BackgroundProtection.
+
+Minor things seen but not reported as findings: (1) just_audio re-randomises the shuffle order on every platform activation, so the shuffled queue order changes after the 30-minute idle stop; (2) after that idle stop, deleting the current song leaves the next song current at the deleted song's old position (the idle player keeps _position); (3) a failed install can emit two snackbar messages (the install failure and the errorStream one); (4) a first media-button press on a fully cold process is dropped by audio_service itself (listener null in onMediaButtonEvent) before Dart is up, independent of the restore race reported above; (5) seek() is a no-op in just_audio while processingState is loading, so a Next/queue tap in the few hundred ms of a queue install is ignored.
+
+## find:downloads (a6d0e7)
+
+Nothing was run and no network request was made; SDK behaviour was checked from the Dart sources in ~/flutter/bin/cache/dart-sdk/lib (io/io_sink.dart, io/file_impl.dart, _http/http_impl.dart). The two test files named as context were not read. Excerpts only of audio_player_handler.dart, track_sheet.dart, track_naming.dart and library_controller.dart.
+
+Checked and found sound:
+- Resume logic in _transfer: If-Range with a strong ETag or Last-Modified; 206 accepted only when Content-Range start, total and validator agree; 200 after a Range request replaces the part; 416 accepted only when the recorded total equals the bytes on disk; a part with no note is discarded; truncated bodies are caught by the total check and the part is kept for resume.
+- Chunk stall timeout (30 s) cancels the response subscription, which destroys the socket; non-200/206 and text/JSON bodies are drained.
+- Two downloads of one track: _inFlight is claimed synchronously before any await; DownloadManager's _tasks and _pendingIsDownloadedCheck guard double taps; a tracked download joining a playback-path one still gets progress by id.
+- File naming: ids are restricted to [A-Za-z0-9_-]{1,80} before becoming a path; multi-part ids (bvid_p<page>) give distinct files.
+- Index vs disk: startup discovery re-adds .ready files from their metadata and prunes index entries whose files are gone; delete removes the .ready marker first and resets the memo.
+- Track.audioUrl is persisted but never set anywhere in lib, so an expired stored link cannot be reused; every attempt asks for a fresh link.
+- No batch-download caller exists, so there is no unbounded download concurrency.
+- TrackDownloadButton state transitions (mounted mid-download, completion with no intermediate event, row recycling) and the management sheet's membership comparison.
+
+Smaller observations not reported as findings:
+- The 416 "already complete" path skips the `received < 1024` sanity check; it would need a server that repeatedly serves the same sub-1 KB non-text body, which I could not ground.
+- If creating the .ready marker fails (error swallowed at audio_download_service.dart:345), the track is still memoised and indexed as downloaded for the session, then pruned on next launch with the .m4a left behind; I could not establish a realistic trigger.
+- There is no backpressure between the socket and the file sink (chunks are buffered in memory if the network outpaces storage); not a practical problem at audio sizes.
+- Could not determine without the network: whether playurl with fnval=16 actually returns durl, how AVPlayer handles a DASH audio segment saved as .m4a, and whether Android freezes a download started with nothing playing when the app is backgrounded.
+
+## find:persistence (a99d2d)
+
+Read-only audit; nothing was run or modified, no network requests made. Of the context tests I read store_safety_test.dart and cover_cache_test.dart in full; serialization_test.dart, library_features_test.dart and track_test.dart were NOT read. Partially read for tracing: audio_player_handler.dart (history, loudness, session, _library/_resolve), track_info_sheet.dart (1-130), playlist_page.dart, song_tile.dart, lyrics_controller.dart (_load), download_manager.dart, track_credit.dart, playback_actions.dart.
+
+Checked and found sound:
+- Atomic write protocol (_writeJsonAtomically): single FIFO async lock that is always released in finally; unique temp name per attempt; flush before rename; target only deleted first on Windows; every DatabaseService persist plus LyricsStore go through it; payload snapshots for the track/playlist/lyrics stores are materialised at call time so writes land in call order. The only bypass is AudioDownloadService._atomicWriteString (per-track meta JSON), which uses its own unique temp + rename and is safe.
+- Set-aside on unreadable/newer-schema files covers downloaded, recently_played, playlists, search_history, prefs and lyrics. Downloaded.json being set aside is recovered by discovery from the per-track meta files.
+- Track.fromMap / Playlist.fromMap / PlaybackSession.fromMap tolerate missing, extra and wrongly typed fields; bare legacy payloads and the versioned envelope are both accepted; per-item failures are skipped rather than failing the file.
+- Track equality/hashCode by id; TrackNotifier notifies on non-identical assignment; copyWith preserves named/matcher/rawUploader (it cannot clear them to null, but no caller needs to).
+- TrackNaming re-reads the stored copy before and after its lookup, so it does not write from a stale Track; concurrent updateTrackMetadata calls resolve in call order.
+- LyricsStore revision/pin logic, load-merge with entries registered before load, eviction of automatic entries only.
+- LibraryController caches are keyed on list identity and invalidate on every reload; playlist reorder indices stay consistent with the in-memory list because mutations are applied synchronously.
+- rebaseCover / _rebaseCovers for iOS container moves, and _sweepCovers path comparison (both sides use the current documents path); the cover cache (Application Support) and picked covers (Documents) are different directories on Android, iOS and macOS.
+- Cover download de-duplication and .part + rename.
+
+Minor things noticed but not reported as findings (could not build a strong enough scenario): (1) a temp file `<name>.<micros>.tmp` left by a process kill between write and rename is never cleaned up; (2) bilibeat_session.json is not set aside when unreadable or written by a newer schema - it is simply ignored and overwritten (transient data); a prefs file whose payload is valid JSON but not a map is likewise overwritten; (3) pickCoverImage derives the extension with `image.path.split('.').last`, which yields a path fragment containing '/' for an extensionless picked file, making the copy fail and the pick silently do nothing; picked temp files from image_picker are not deleted; (4) TrackInfoSheet saves from the Track captured when the sheet opened, so a loudness backfill that lands while the sheet is open is overwritten until the next launch; (5) all persist helpers swallow write errors (e.g. disk full), so a change can exist only in memory with no message; (6) iOS: if the app were ever launched before first unlock, an unreadable-but-present playlists file would be set aside rather than retried - I could not establish that such a launch can happen for this app.
+
+## find:network (aee1ec)
+
+Read-only audit; nothing was run or modified and no network requests were made. Behaviour of Bilibili's endpoints (exact error codes for a bad w_rid, HTML-escaped search titles) is from knowledge of the API, not verified live; confidence values reflect that.
+
+Checked and found sound:
+- WBI: mixin table matches the published 64-entry table; parameters are sorted, the filtered characters !'()* are removed from both the signed and the sent values (covered by test), Uri.encodeComponent gives %20 and upper-case hex as required; wts is added before signing; callers re-encode with the same function.
+- TLS: no badCertificateCallback anywhere; all Bilibili endpoints are https constants; cover/stream URLs are upgraded http:->https:; Android manifest has usesCleartextTraffic=false (the only cleartext path found is an explicitly pasted http:// short link, reported).
+- Every request has connect/header/body timeouts (their not aborting the socket is reported separately); non-200 responses are drained; non-UTF-8 or HTML bodies end as null / parse failure rather than a crash.
+- Response parsing: _tracksOfView casts are wrapped and converted to BiliApiException; fetchVideoHints/_dataOf/_recognisedMusic type-check before use; fetchAudioStream is fully inside try/catch; search item loop type-checks bvid.
+- BV/av extraction boundaries (tests cover the false-positive words); ids are query-encoded in the view URLs.
+- Stale-result tokens in OnlineSearchController (search/loadMore/clear/history) and the pass counter in RecommendationsController are consistent; I found no path where an older response overwrites a newer query or leaves loading flags stuck.
+- Identifiers: only buvid3/buvid4 (in memory, never persisted) and a fixed desktop UA are sent; no account cookies exist. Search history (max 12, includes pasted links) is stored locally only.
+- LocalSearch: normalisation, AND-of-terms scoring and stable ordering behave as documented; the SearchView cache is keyed on the identity of LibraryController.downloaded, which is replaced (List.unmodifiable) on reload.
+
+Not determined: whether the static fallback WBI keys are still the live pair (if they are, the -403 scenario in finding 1 needs a real key rotation or rate-limit code instead); whether dart:io on current Flutter enforces Android's cleartext policy for the http:// short-link case.
+
+## find:matching (ad4624)
+
+Read in full: lyrics_engine.dart (all 2168 lines), track_naming.dart, track_credit.dart, video_hints.dart, track.dart, title_parser_test.dart, recognition_live_test.dart. Read in part: recognised_music_test.dart, track_test.dart, bilibili_sdk.dart (track construction, fetchVideoHints), database_service.updateTrackMetadata, library_controller (_teachArtists, reload), track_info_sheet (_identify/_save), audio_player_handler (nowPlaying assignment). Fixtures were sampled with scripts (structure, titles hitting specific rules), not read in full. No build/test/network commands were run.
+
+Checked and found sound:
+- Compilation / duration guards (lines 707-716) run before the recognised-music path, so 【合集】/歌单 brackets, 串烧/盘点/reaction and >15 min are never named, including via recognition. (The category words are only looked for inside 【】/[]; an un-bracketed 合集 under 15 min relies on the other evidence rules - I could not build a certain wrong answer from fixture titles, so not reported.)
+- Listener-named tracks: the edit sheet always saves matcher 0, _settled() short-circuits on it in both autoName and _name, and the post-lookup re-read (161-169) compares title/uploader/matcher/named, so a normal-path result is not applied over an edit made meanwhile (the legacy early-return is the exception, reported).
+- Same track named twice: _attempted plus the single serial _queue prevent concurrent naming of one id; _save -> handler.updateTrackMetadata -> nowPlaying listener does not loop because the saved track is settled.
+- Matcher re-check does not storm: one track per play, serialised; hints, artist and singer lookups are memoised per session. The only repeat-forever cases are the unsettled-null ones reported as low.
+- Regexes: no catastrophic backtracking found. listeningPhrase, _describedSinger and the _preprocess patterns use bounded or negated-class quantifiers; the unbounded `在.*大声听` and `.*打卡.*` only run on title-length strings/tags.
+- Recognised music the video does not name is ignored (_recognisedSong requires a bracket match, a substring of the normalised title, or an equal tag), and line 1102 refuses un-set-apart title words when Bilibili heard something else. Note that a 2-character CJK recognised title only needs to be a substring of the title; that is the documented design, not reported.
+- Cover handling in _performers/covered() was traced against the fixture titles containing 翻唱/cover/原唱/演绎/挑战 (e.g. \"《Cheap Thrills》原唱一句，周深一句\", \"【AI Cover】INVU-周深（原唱：金泰妍）\"); the branches agree with the hand-checked expectations.
+- partTitle: correct for the normal \"<video> - P3: <part>\" shape. An empty/whitespace-only part name makes the regex fail, so such a track reads as isNamed (legacy) - I could not confirm Bilibili ever returns an empty part name, so not reported.
+
+Could not determine without network (not reported as findings):
+- credited() (line 797-806) has no minimum length for the catalogue artist's normalised name, unlike isOwn/specific; a one-letter NetEase artist name would be \"credited\" by almost any title. Whether such recordings surface in real result pages is unverified.
+- _netEaseArtistExists (no mvSize filter, unlike _netEaseSinger) is still what decides tagArtist, titleNamesSinger, the A-B settle and _singerInTitle; the comment at 1500-1502 says nearly any word is some account's artist name. The live fixture test reportedly passes, so impact is unknown.
+- _originalArtists returns null when cloudsearch answers with code != 200; if that endpoint is persistently refused, every non-exact cover returns an unsettled null and is retried on each play.
+- The description cover test (`翻唱|cover` without word boundary, lines 749/755) also matches words like \"Discover\" and sentences such as \"无数优秀的歌手翻唱过这首歌曲\" (present in the fixture); in the cases traced _performers still produced the expected artist.
+
+## find:widgets (a91c90)
+
+Nothing was executed (read-only); all findings are derived from source. An earlier unverified pass exists in docs/audit-2026-10-06/findings.md with no widgets finder among its sources; two of my findings overlap it (snackbar behind the edit sheet; landscape sheet overflow) and are reported here with the widget-level root cause and additional sites.
+
+Checked and found sound:
+- ExpandFromCard: CurvedAnimation is rebuilt/disposed correctly on animation change; the `t >= 1.0` branch changes tree depth but the page survives because ModalRoute wraps it in a GlobalKey'd RepaintBoundary (state is reparented, not rebuilt). Reversal mid-open can jump because of forward/reverse curves, but only inside a 420 ms window; not reported.
+- CachedCoverImage: token guard against stale settles, in-flight dedupe, .part + rename, timeouts, decode sizing via ResizeImage(policy: fit), errorBuilder fallback, cache key includes the sized URL so sizes do not collide; custom-cover paths are rebased and swept in DatabaseService (rebaseCover/_sweepCovers). Cover URLs are upgraded to https in BilibiliSdk. Not reported: a cover first loaded at one size is not refetched when only width/height change (rotation only).
+- PlayerSeekBar: zero/unknown duration falls back to track.duration then max=1.0 with value clamped; dragging past the ends is clamped; position updates during a drag are masked by `_drag`. Slider horizontal drag vs the page's vertical pull-down are different axes; lyrics scroll wins the arena over the page's vertical drag.
+- MiniPlayer: horizontal swipe (velocity threshold 300) vs InkWell tap do not conflict; buttons are 52x56 with tooltips; progress line guards total <= 0; card grows with text scale.
+- MarqueeText: size is stable from the first layout, ticker and dwell timer are disposed, unbounded width and reduced-motion paths are handled, the duplicate copy is excluded from semantics.
+- LyricsView: listener moved on position change, keys regenerated with lines, timers cancelled, binary search correct for index -1. LyricsSheet: search token guards stale results; sheet pops before async saves.
+- TrackDownloadButton: stale-row guard in _refresh, subscriptions cancelled; a tap on a disabled (downloading) button falls through to the row, which only opens the song sheet.
+- TrackSheet/PlaylistPicker: `_dismiss()` returns the navigator context and checks `mounted` before use; promptForText disposes its controller right after the dialog future completes (debug-only risk during the exit animation, harmless in release; not reported).
+- Shimmer respects reduced motion and disposes its controller; Haptics are plain platform-channel calls that are no-ops on platforms without them; formatDuration/formatBytes handle zero; theme colours: only mask gradients (Colors.white/transparent), ArtworkBackdrop's alpha variants of the background colour and ProgressRing's default track colour are hard-coded, none visible as a wrong colour.
+
+Could not determine without running: exact pixel overflow thresholds (SongTile at large font scale, sheet heights in landscape) are computed from style metrics, not measured.
+
+## find:native (aa4a5a)
+
+Read-only; no builds or network requests were run.
+
+Not read in full (so not listed in filesRead): macos/Runner.xcodeproj/project.pbxproj (target, build-phase, build-configuration and SPM sections read; file-reference/group header and warning-flag lines skipped), tool/make_keystore.sh, lib/main.dart, home_page.dart, settings_sheet.dart, now_playing_page.dart, and the audio_service plugin sources (relevant sections only).
+
+Checked and found sound:
+- audio_service manifest requirements: service with foregroundServiceType=mediaPlayback, MediaBrowserService filter, MEDIA_BUTTON receiver, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, WAKE_LOCK and POST_NOTIFICATIONS are all present; every component has an explicit android:exported; MainActivity extends AudioServiceActivity, so the shared engine is used. The plugin's PendingIntents are FLAG_IMMUTABLE.
+- usesCleartextTraffic=false, and no ATS exception is needed on iOS: all endpoints are https, and Bilibili/NetEase cover and stream URLs are rewritten from http to https (bilibili_sdk.dart:199/409/434/595, lyrics_engine.dart:1618).
+- Backup: allowBackup=false, fullBackupContent=false, and data_extraction_rules excludes every domain for both cloud-backup and device-transfer.
+- SDK levels: compileSdk 36, targetSdk 36, minSdk 24 (Flutter 3.44 defaults) satisfy image_picker_android (minSdk 24), jni (compileSdk 35) and sqflite_android. MainActivity's API guards are correct (TIRAMISU check for POST_NOTIFICATIONS; the battery APIs are API 23+).
+- Battery-exemption intent: package: URI for the app's own package, guarded by try/catch with a fallback to the settings list; REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is declared; settings_sheet re-reads the state on resume.
+- Predictive back: the app uses PopScope throughout, no WillPopScope.
+- R8 rules keep the Flutter embedding, media3 and com.ryanheise.audioservice (over-broad, but not harmful).
+- Signing: key.properties (storeFile=bilibeats-release.jks, keyAlias=bilibeats) matches the renamed keystore; both are gitignored and untracked; make_keystore.sh refuses to overwrite an existing keystore.
+- The release-only ABI excludes are consistent with build_release.sh.
+- iOS: UIBackgroundModes audio and NSPhotoLibraryUsageDescription are present (the picker is gallery-only, so no camera string is needed); deployment target 13.0 meets every plugin's Package.swift minimum (image_picker_ios 13.0, others 12.0); SPM local package reference is present and there is no Podfile; Runner.app naming matches build_release.sh.
+- macOS: Release.entitlements has network.client and files.user-selected.read-write (file_selector_macos backs image_picker); Debug only adds JIT and network.server; deployment target 10.15 meets file_selector_macos 10.15.
+
+Minor, not reported as findings:
+- The macOS project still references the product as "bilibeat.app" (pbxproj lines 68/227, TEST_HOST at 401/415/429, Runner.xcscheme BuildableName) while PRODUCT_NAME is BiliBeats. The app build is unaffected, but the macOS RunnerTests target's TEST_HOST points at a non-existent bundle.
+- home_page hides the protection hint as soon as request() returns, even if the user declines in the system dialog; it reappears on the next launch.
+- AudioService is exported with an onGetRoot that accepts any client (plugin default), so any installed app can bind and send transport commands; this is inherent to audio_service.
+
+Could not determine without running:
+- How the Kotlin plugin gets applied: app/build.gradle does not apply kotlin-android and gradle.properties sets android.builtInKotlin=false. Presumed to be handled by the Flutter Gradle plugin, since a release APK dated after the last Gradle change exists in build/.
+- Whether a headless engine really builds HomePage before an activity attaches (the premise of the first finding).
+
+## find:release (aa6dad)
+
+Nothing in this area is worse than medium; the release pipeline as actually used (patch bumps, key present) is sound.
+
+Checked and found sound:
+- Secrets: no keystore, key.properties or literal password was ever committed (`git log --all --diff-filter=A --name-only`, and `-S storePassword/keyPassword` only hits build.gradle's property lookups in 3e6c2b9). Both files are ignored by .gitignore and android/.gitignore. key.properties is mode 600 and its storeFile/keyAlias match the renamed keystore and alias. Passwords never reach argv. The .jks itself is mode 644 locally (the script's chmod 600 was lost in the rename); negligible on a single-user Mac.
+- Published 0.1.3: the local bilibeats-0.1.3-arm64-v8a.apk has the same sha256 as the GitHub release asset, v0.1.3 is marked Latest (so README's releases/latest link is right despite v6.0.0 existing), and a symbols zip is attached to 0.1.0, 0.1.2 and 0.1.3. symbols/ holds all four platform files per 0.1.x version.
+- CI: the last 8 runs are green, Flutter is pinned to 3.44.8 (matches the local SDK and README), permissions are contents: read, and both live test files carry @Tags(['live']). Actions are pinned by tag (actions/checkout@v4, subosito/flutter-action@v2), not SHA; with read-only permissions and no secrets I did not rate that a finding.
+- Dependencies: OSV batch query for all 84 locked hosted packages returned no advisories. No discontinued packages and no outdated majors among direct dependencies (only image_picker 1.2.3 -> 1.2.4). Licences of the linked packages are MIT/BSD/Apache-2.0, all GPL-3.0 compatible. Only public package names and versions were sent to osv.dev.
+- sdk constraint '>=3.0.0 <4.0.0': the lockfile already enforces dart >=3.12.0 / flutter >=3.44.0 through dependencies and analyze is clean at language version 3.0, so the loose bound is cosmetic.
+- Android config: the Flutter Gradle plugin applies kotlin-android itself; jni and jni_flutter ship consumer R8 rules; no Android Studio JDK shadows the script's JAVA_HOME check on this machine.
+- Apple config: SwiftPM is enabled by default on stable 3.44.8, every darwin plugin has a Package.swift at or below iOS 13.0 / macOS 10.15, and macOS Release.entitlements includes network.client. Product names match the paths build_release.sh expects (Runner.app, BiliBeats.app).
+- release.sh: sed branches for BSD/GNU, the tag-exists check runs before any file is modified, changelog insertion handles a missing heading, and notes with $, backticks or backslashes are preserved.
+- README/CLAUDE.md counts match (540 titles, 126 surveyed videos).
+
+Minor, not reported as findings: build_release.sh's header and README omit the macos target that `all` builds; its closing `ls *-release.apk` does not list the renamed artifact; README says CI runs `flutter test` where it runs `--exclude-tags live`; make_brand_assets.py prints a hard-coded icon count.
+
+Not determined: LICENSE was only spot-checked (head, tail, 674 lines) rather than read in full; the provenance and licence of tool/brand/app_icon_source.jpg cannot be established from the repository; whether an iOS or release build would pass on a GitHub runner today was not tested (no builds were run).
+
+## find:tests (a41ec6)
+
+Read-only; nothing was run and no network request was made. An untracked docs/audit-2026-10-06/findings.md from the earlier (interrupted) run exists; I looked at its headings only to avoid repeating other finders (their #20, #48/#77, #72, #73 touch tests I also looked at; not re-reported).
+
+Checked and found sound:
+- Hermetic HTTP. Every HttpClient in lib/ comes from biliHttpClient (bili_http.dart:19) and only getUrl is used (no postUrl/openUrl). useHermeticHttp's client (audio_test_harness.dart:38-43) lets 127.0.0.1/localhost through and throws SocketException otherwise. The three non-live files on useRealHttp (playback_handler_test, download_management_test, download_resume_test) cannot reach a third party: the handler is built with an injected player so loudnessLookup is null (audio_player_handler.dart:56-58), tracks carry a localhost audioUrl, and neither AppServices nor TrackNaming is initialised there. Files with no override and a Flutter binding get flutter_test's 400 mock; files with neither (track_test, title_parser_test, lyrics_matching_test, serialization_test) call only synchronous functions. testWidgetsWithHttp's `HttpOverrides.runZoned(() => body(tester))` passes no override and so just delegates to the global one - the comment above it is misleading but the behaviour is right.
+- runAsync usage in lyric_fav/lyric_meta/lyric_paste: real IO is started or drained inside tester.runAsync (startPlaying, pumpUntil, settle); the library is loaded in real time before any fake-clock code depends on it.
+- Fake vs real just_audio beyond the finding above: play() is never awaited by the handler (real play() completes only on pause/stop), shuffle-with-current-first matches DefaultShuffleOrder via _shuffle(initialIndex), completed -> pause -> seek(first) matches, playingStream distinctness matches. Divergences I judged immaterial to current tests: real seek() is a no-op while processingState is loading; real sequenceStateStream replays on listen; real currentIndex changes arrive by playback event after seek()/removeAudioSourceAt() return (the earlier playback finder already reported the removal case).
+- Download resume tests (Range/If-Range/416/orphan .part/too-long .part) assert on bytes and on the Range headers seen by the server; they are meaningful. Unsafe-id test checks both the lookup and that no request was made.
+- lyric_ownership_test and store_safety_test assert real outcomes (set-aside byte equality, revision rejection, pin-before-load visibility). The deliberately destructive last test in lyric_ownership_test is order-dependent by design and is last.
+- contrast_test, marquee tests, LyricsView/MiniPlayer/LocalSearch/TasteProfile groups: assertions are real; no tautologies found. title_parser_test is only a does-not-throw / non-empty smoke test over the corpus (noted in the live-tag finding).
+- No time-zone or wall-clock dependence found; waitFor/waitForTrue poll with generous deadlines; the one real timer (200 ms sleep timer) has a 10 s wait.
+
+Minor, not reported as findings:
+- stubDocs temp directories (and lyric_ownership's) are never deleted; each run leaves about seven bilibeat_* folders in the system temp directory.
+- playback_handler_test 'each track plays at the volume...' writes normalizeVolume=false to the shared prefs and only restores it on the last line; a failure before that line cascades into the next test.
+- AudioDownloadService/DatabaseService/LyricsStore/DownloadManager statics are shared by all tests in a file; the suite copes by using unique ids per test (documented in the files), so tests are order-tolerant but cannot be made to reload state - which is the root of the 'no valid store is ever loaded' gap.
+- render_screens.dart: returns from main() with no tests when the macOS font path is missing (the tool then reports no tests rather than a skip); the boxed lens labels are because _LensLabel's AnimatedDefaultTextStyle replaces the themed style (no fontFamily), so they fall to the test font - a harness limitation as CLAUDE.md says, not an app bug. Recommendations in the render are whatever the 400-mock yields.
+
+Could not determine: the exact native event sequence after a failed load on Android/iOS (which index is current, whether maxSkipsOnError then starts the next item). The Dart-side facts in the first finding (playlist replaced and broadcast before load, no rollback, handler publishes after failure) are from source; the on-device symptom should be confirmed with a deliberately corrupt audio file.
+
+## find:sweep-security (a39422)
+
+Method: grep over lib/ for http://, Uri.parse, HttpClient, Cookie, File(/Directory(, delete/rename/copy, debugPrint/print, MethodChannel, Random(, md5, image_picker, artUri, audioUrl, badCertificateCallback/HttpOverrides; then read each site. Partial reads (not in filesRead): database_service.dart (1-460, 800-901), lyrics_engine.dart (HTTP helper, NetEase cover), lyrics_store.dart (1-80), audio_player_handler.dart (media item + queue install), online_search_controller.dart, recommendations_controller.dart, playlist_page/track_info_sheet cover call sites. Plugin/SDK source checked: dart-sdk _http/http_impl.dart, audio_service 0.18.19 (Dart + AudioService.java), image_picker_android 0.8.13+19 FileUtils.java.
+
+Found sound:
+- Remote strings to file paths: Track ids are gated by AudioDownloadService.isSafeKey (^[A-Za-z0-9_-]{1,80}$) before any download/delete path; only downloaded tracks reach audioPathForId. Cover cache names are md5 of the URL. Playlist ids used in cover file names are generated locally. Lyrics are keyed inside one JSON file, never a path. Titles, uploader names, tags, lyrics never reach a path.
+- Track.audioUrl is persisted but nothing in lib/ ever sets it, so no stale/foreign URL is replayed from disk.
+- Cookies: buvid3/buvid4 are in memory only, refreshed hourly, sent only to api.bilibili.com; dart:io strips Cookie/Authorization on cross-origin redirects (shouldCopyHeaderOnRedirect). No cookie or identifier is written to disk or sent to NetEase/LRCLIB. Random() is used only for anti-bot filler and a fallback device id, not for anything needing unpredictability.
+- TLS: no badCertificateCallback, HttpOverrides or proxy overrides; all hard-coded endpoints are https; Bilibili/NetEase image and stream URLs are upgraded from http to https before use. No iOS ATS exceptions.
+- Logging: debugPrint is replaced by a no-op in release (main.dart:20); no bare print() in lib/. (audio_service itself prints artwork load errors; not app code.)
+- Android manifest: allowBackup=false plus full data-extraction exclusions, no storage/media permissions, only INTERNET/WAKE_LOCK/FOREGROUND_SERVICE(_MEDIA_PLAYBACK)/POST_NOTIFICATIONS/VIBRATE/REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, all used. Exported AudioService/MediaButtonReceiver are the standard audio_service declarations; the handler exposes no browsable library. MethodChannel handler takes no arguments. All data is in app-private internal storage.
+- Secrets: keystore and key.properties are gitignored, never present in git history (git log --all --diff-filter=A), and make_keystore.sh does not put passwords on the command line.
+- macOS release entitlements: sandbox + network.client + user-selected files only.
+- Stored data: search history is capped at 12 with a clear action; nothing beyond library, history, lyrics, prefs and session is stored.
+
+Not determined: regex backtracking cost of the title-parsing patterns in lyrics_engine.dart on adversarial titles (not analysed); whether the iOS build is actually in use (affects the weight of the backup finding); the OOM threshold in the artwork finding depends on the device (the main-thread full-size decode and the unresized re-download are certain from source, the crash is only for very large photos).
+
+## find:sweep-async (a34172)
+
+Method: grep over lib/ for unawaited, .then(, Future.wait, Timer, StreamSubscription, .listen(, addListener, Completer, compute(, .timeout(, mounted and WidgetsBindingObserver, then read each site. Read in part only: now_playing_page (1-330, 425-445), playlist_page (60-410), lyrics_sheet (1-180), lyrics_view (40-190), marquee_text (75-298), search_view (1-300), home_page (40-100), song_tile (40-110), playback_queue_sheet (20-109), sheet.dart (227-286), wbi_signer (90-183), bilibili_sdk (1-300, 460-510), recommendation_engine (150-216), lyrics_engine (20-75, 1831-1845, 1896-1936, 2140-2168). Plugin behaviour was checked in just_audio 0.10.6, audio_service 0.18.19 and dart:io io_sink.dart. Nothing was run and no file was modified. An earlier pass left docs/audit-2026-10-06/findings.md; I only read its first two entries, and its #2 is the same flush hang as my first finding, which I re-verified independently against the SDK source.
+
+Found sound:
+- Write lock (DatabaseService._writeJsonAtomically): FIFO chain whose completer is always completed in `finally`, no await that depends on another lock holder, unique tmp per call. Every JSON store goes through it (LyricsStore via writeStoreFile); sidecar metadata and part notes are separate files with their own tmp+rename. No lock cycles between DatabaseService._ensureLoaded, LyricsStore._ensureLoaded and AudioDownloadService.
+- _loadPrefs concurrent first calls (`_prefs ??=` plus the set-aside guard), LyricsStore pin/clear before load (_clearedBeforeLoad, revisions), and putAutomatic vs pin.
+- Handler queue installation: the _selection token is checked after every await; overlapping installs are resolved by just_audio's PlayerInterruptedException plus the _installing counter; the try/finally keeps _installing balanced; restore vs playTrack is guarded by the token in both orders.
+- removeTracks: each event carries one id and the just_audio playlist mutation runs synchronously when its lock is free, so overlapping calls do not remove the wrong index. The only stale-index window is a delete landing during the few ms of a queue install, which I judged not realistic.
+- _skip/_navTarget under rapid presses; holdAutoAdvance release on every path of _openLyricsSheet and in dispose; sleep-timer timers and subscription are cleared on fire, stop and re-set; interruption resume is cancelled by pause(), stop() and becomingNoisy.
+- Position survives stop(): the idle platform is loaded with the current index and position.
+- LyricsController generation/revision guards (A→B→A, choose during lookup, rematch); the OnlineSearchController and RecommendationsController token guards; TrackNaming re-reads the stored track after the lookup and aborts on listener edits.
+- Widget lifecycles: every StreamSubscription, listener and Timer I enumerated (AppShell, NowPlayingPage, LyricsView, MarqueeText, TrackSheet, TrackDownloadButton, DownloadManagementSheet, SettingsSheet) is cancelled or removed in dispose, and async continuations check `mounted` or a token. LibraryController, DownloadManager and the handler's player subscriptions are process-lifetime singletons.
+- CachedCoverImage in-flight dedupe and its addStream-based write, which reports errors (unlike the audio download path).
+- MainActivity channel handlers always reply.
+
+Seen but not reported (too narrow, or harmless in release builds):
+- promptForText disposes its TextEditingController as soon as showDialog completes, while the dialog is still animating out. This is a debug-only assertion.
+- TrackInfoSheet saves from the Track snapshot taken when it opened, so a loudness backfill that lands while the sheet is open is overwritten until the next launch.
+- Rapid double-tap on the play-mode button within one platform round trip can leave native loop-one under shuffle.
+- A playCollection(shuffle) superseded mid-install leaves shuffle enabled for the request that superseded it.
+- After a single-track playback error the player is idle, so no idle timer is armed and the paused foreground notification lingers.
+
+Could not determine from source alone: iOS AVQueuePlayer behaviour when the current item is removed, and how long a cached Android process keeps downloading after task removal (this bears on the stop()/pending-play finding, hence its 0.5 confidence).
+
+## find:sweep-resilience (afbf48)
+
+Method: grep-enumerated IO / network / parse / indexing sites across lib/, then read each service, controller and async UI flow. lib/services/lyrics_engine.dart was read only in its network, identity-result, LRC and provider sections (lines ~10-60, 560-665, 815-1010, 1095-1115, 1225-1245, 1500-1670, 1760-2168), not the title parser; now_playing_page, home_page, playlist_page, lyrics_view and mini_player were read only around their async/index sites. Nothing was run, no network requests were made, no files changed.
+
+Confidence caveats: finding 3 depends on Bilibili answering HTTP 200 with a non-zero code for bad signatures / rate limits (consistent with the code's own comments, not verified live). Finding 2's "self-sustaining at rest" part is inferred from Flutter scroll behaviour; the per-scroll-event refetch and the never-reached end are certain from the code. Finding 9's cold-start ordering inside audio_service was not fully traced; the in-flight no-op itself is certain. Finding 8 and 10 need rare server / OS conditions.
+
+Checked and found sound:
+- Download transfer: connect/response/chunk timeouts, non-200, text/JSON bodies, truncated bodies, unsolicited 206, If-Range/validator resume, disk-full (surfaces at flush, fails the download, user sees only the fixed 下载失败 text - raw exception text is stored in FailedDownload.error but never displayed), concurrent dedupe via _inFlight, unsafe ids rejected before becoming paths.
+- preparing is always cleared (finally + token check); a superseded request cannot clear a newer one's state. _install handles PlayerInterruptedException and failures; empty library / empty collection / no downloaded items are guarded; Random().nextInt is guarded; removeTracks on the last item stops cleanly; saveSession never overwrites with an empty queue; PlaybackSession.fromMap tolerates malformed data.
+- _writeJsonAtomically: single lock, unique temp, cleanup in finally, lock always released; newer-schema and corrupt files are set aside rather than overwritten; per-item try/catch when parsing tracks/playlists/lyrics; Track.fromMap tolerates wrong types.
+- Search controller: tokens prevent stale writes, generic catch covers TypeErrors from the unguarded `as String?` casts in _searchOnce, loading flags are always reset. Duration parsing uses tryParse. fetchAudioStream / fetchVideoHints / _recognisedMusic / WbiSigner / FingerprintService catch everything and degrade.
+- parseLrc int.parse calls are regex-guarded; LyricsView index math is guarded for empty/unsynced lyrics; PlayerSeekBar handles zero duration; formatBytes/formatDuration handle 0; gainFor is clamped and NaN cannot enter via JSON.
+- CachedCoverImage: timeouts, .part + rename, in-flight dedupe, zero-length guard, errorBuilder fallback. (A cover that failed while offline is not retried until the widget is recreated - cosmetic, not reported.)
+- TrackNaming distinguishes offline from unknown and re-checks the stored track before writing; found.coverUrl null keeps the existing cover.
+- Not reported as speculative: performance with ~5000 tracks (whole-library queue reinstall on each tap, TrackCredit cache of 2000 thrashing under LocalSearch), and unbounded IOSink buffering during very large downloads.
+
+## find:sweep-performance (a5dadf)
+
+Method: grep sweep of lib/ for *Sync IO, jsonDecode/jsonEncode/compute, Timer/Ticker/AnimationController/repeat, BackdropFilter/ImageFilter, image decode sizing, HttpClient, static maps/sets, non-lazy lists, RegExp construction; then read each site. Plugin behaviour checked from source in ~/.pub-cache (audio_service 0.18.19, just_audio 0.10.6, rxdart 0.28.0). Nothing was run; all costs are estimates from code, not measurements. docs/audit-2026-10-06/findings.md (output of earlier finders) already contains the lyrics-store rewrite (#49), startup discovery (#50/#78), TrackCredit cache (#51), unconditional playlists rewrite (#79) and the post-idle wake lock (#19); I repeated only the ones where the performance lens adds something, and did not re-report #51/#79.
+
+Checked and found sound:
+- No synchronous file IO (*Sync) anywhere in lib/. Main library/playlist/lyrics files are parsed with compute().
+- Session saves: 2 s debounce after queue changes plus one every 20 s while playing, cancelled on pause; small file. Not high-frequency. No per-progress-tick or per-keystroke JSON writes (search history is written on submit only).
+- Download progress: throttled to 64 KiB; rows filter by id; LibraryController._onDownloads only notifies on membership change.
+- Lists are lazy (SliverFixedExtentList.builder / ListView.builder / SliverGrid.builder). DownloadManagementSheet uses ListView(children:) but element inflation is still lazy; lyrics use a non-lazy Column, bounded by one song's lines.
+- Images: every cover goes through CachedCoverImage with ResizeImage at display size and CDN-sized URLs; Flutter image cache capped at 40 MB / 150. (The exception is the notification artwork, finding 1.)
+- HttpClients are static singletons per service with connection timeouts; non-200 bodies are drained. In-memory memos are bounded (_downloadedMemo 1024, _hintsMemo/_identityMemo 300, TrackCredit 2000, LyricsStore 300 automatic).
+- Tickers: Shimmer only while loading; MarqueeText only on the player page and only when text overflows; LyricsView rebuilds only when the active line changes; PlayerSeekBar/mini progress rebuild small subtrees at <=5 Hz. just_audio 0.10.6 runs its position timer only while playing. Sleep-timer 1 s ticker and position subscription are cleared on fire/stop.
+- RegExp: the hot static patterns in lyrics_engine are static finals and parseLrc's tag regex is hoisted; cleanTitle/_noisyClean do construct many RegExp literals per call (inside token loops), but callers are cached (TrackCredit) or once-per-track (identify), so I only counted it where a cache is defeated (findings 3 and 5).
+
+Not reported, could not quantify:
+- ArtworkBackdrop applies ImageFilter.blur(sigma 48) outside the FittedBox, so the filter runs over the full-screen output rather than the 64 dp thumbnail; under Impeller there is no raster cache, so it is recomputed on every frame the player page draws (continuous when a title marquees), contrary to the comment 'only repainted while cross-fading'. Moving the blur inside the FittedBox (small sigma on the thumbnail) would cut the work by orders of magnitude, but I cannot put a number on the current GPU cost without a device.
+- Tapping any row re-installs the whole queue (default queue = entire library): N AudioSources over the just_audio channel plus N MediaItems over the audio_service channel per tap. Linear in library size; cost per tap not determinable from source.
+- CachedCoverImage calls getApplicationSupportDirectory() (platform round trip) and three file stats per row load instead of caching the directory as DatabaseService does; adds latency before a thumbnail appears, not jank.
+- AppShell reads MediaQuery.viewInsetsOf, so the shell and the visible rows rebuild on each frame of the keyboard animation; small.
+- lib/screens/search_view.dart, playlist_page.dart, lyrics_engine.dart, bilibili_sdk.dart, track_sheet.dart, lyrics_sheet.dart were read only in the parts relevant to this lens (not listed in filesRead).
+
+## find:sweep-conformance (ab0254)
+
+Method: grep-enumerated every site for each invariant across lib/, then read the surrounding files (most of app/, screens/, state/, widgets/ in full; lyrics_engine.dart, bilibili_sdk.dart, audio_download_service.dart, lyrics_sheet.dart, sheet.dart only in the relevant sections). Nothing was run, no network requests were made. docs/audit-2026-10-06/findings.md (an earlier, unverified pass by the subsystem finders) was skimmed by title only to avoid repeating it; the missing DownloadManager.errors listener, re-download storing the raw copy, snack bars under sheets, the NowPlayingPage._open latch and the knownIds gap are already there and are not repeated here.
+
+Invariants found to hold:
+(a) Current song: only handler.nowPlaying / queueNotifier / playingNotifier are read; LyricsController._trackId and NowPlayingPage._calibrating are derived guards, not a second 'current song'. The one second copy of metadata is the handler's _latest map (finding 5).
+(c) All library JSON goes through _writeJsonAtomically (downloaded, recently played, playlists, search history, prefs, session, lyrics via writeStoreFile). Writes outside it are by design and tolerant: per-track meta (AudioDownloadService._atomicWriteString, tmp+rename), the .part.json resume note, the cover cache, picked-cover copy.
+(d) Artist display: every UI site and the media-session MediaItem (audio_player_handler.dart:388) use TrackCredit.artistOf / LibraryController.artistOf. Remaining raw .uploader reads are correct for named tracks (lyrics_controller, track_naming) or have no visible effect (lyrics_sheet.dart:122 stores the UP主 as the artist of user-written lyrics, never shown), except recommendation_engine (finding 4).
+(e) nowPlaying is a TrackNotifier; the only ValueNotifier<Track?> is handler.preparing, which never carries an edited copy.
+(f) All song lists use SongTile; taps go through openTrack except deliberate cases (queue sheet jumps, edit/pick selection). The recent rail on Home draws cover cards rather than SongTile but taps through openTrack.
+(g) Hard-coded colours outside the theme are few and currently equal theme values or are shader masks: artwork_backdrop.dart:59-61 (background 0x08080A at three alphas), shimmer.dart:66-68, progress_ring.dart:19, marquee_text.dart:242-245, lyrics_view.dart:194-197, settings_sheet.dart:142 Colors.white. No visible defect; they would drift if AppColors.background changed.
+(h) Every IconButton has a tooltip (script-checked) and custom tappables carry Tooltip or Semantics labels. Size exceptions are in finding 8.
+(i) Pinned lyrics: LyricsStore.putAutomatic checks revision and pinned before and after the write, _evict skips pinned, the load merge keeps session pins, and the controller does not start a lookup over a pinned state on a metadata edit. Only the listener's own 重新匹配 clears a pin.
+(j) All on-disk names still start with bilibeat_ (downloaded, recently_played, playlists, search_history, prefs, session, lyrics, bilibeat_audio/, bilibeat_covers/).
+(k) No English or Traditional strings in the app's own copy; exception texts in English are only logged. The English comes from Flutter's default localisations (finding 3).
+(l) playTrack / playCollection / restoreSession build the queue only from DatabaseService.getDownloadedTracks(), after _ensureLocal for the tapped track; load-time discovery prunes entries whose files are gone.
+(m) rawTitle: copyWith cannot change it and the three constructors in bilibili_sdk.dart set it to the video title.
+(b) 'Screens do not read DatabaseService directly' holds for reads of library data in screens/ (only a pref read in home_page.dart:58). Two widgets do bypass LibraryController: download_management_sheet.dart:53/84 (own libraryUpdateStream subscription and getDownloadedTracks) and track_download_button.dart:70/100 (own subscription plus a file-stat 'downloaded' flag next to library.isDownloaded). I could not construct a lasting wrong state from either, so they are not reported as findings.
+
+Dead code the analyzer cannot see (public, so not flagged), no user-visible effect on its own: TrackDownloadButton.onPlay is never passed, so its 'play' state and '播放' tooltip are unreachable; DatabaseService.addTrackToPlaylist (single-track) has no caller; DownloadManager.isFailed has no caller; AppTypography.display/overline and the bottomNavigationBarTheme are unused. Untracked tool/song_model/ (43 MB incl. .pt weights and crawl dumps) and docs/audit-2026-10-06/ are not gitignored; CLAUDE.md and README do not mention tool/song_model.
+
+Documentation checked and accurate: fixture counts (540 titles, 126 surveyed videos), iOS 13.0 deployment target, CI Flutter 3.44.8 with --exclude-tags live, analyzer error promotions, debug-key fallback warning in build.gradle, 15-minute rule (lyrics_engine.dart:1577), TrackNaming.matcher semantics, release-mode debugPrint silencing (no stray print()). Stale comments only: database_service.dart:742 calls the id 'bvid_cid' (it is bvid_p<page>); recommendation_engine.dart:142 says 为您推荐 while the UI says 为你推荐.
+
+Not determined: whether the missing zh locale changes Han glyph variants on a given device (depends on platform font fallback, not verifiable from source); finding 5 was traced by reading only and has no existing test covering delete-then-re-download in one session.
+
+## find:journey-first-play (ad56e0)
+
+Method: walked the journey through the code (AppShell -> SearchView -> OnlineSearchController -> BilibiliSdk.search -> openTrack/TrackSheet -> handler.playTrack/_ensureLocal -> AudioDownloadService -> DatabaseService -> LibraryController/TrackNaming -> _install -> skip -> saveSession/restoreSession), plus audio_service 0.18.19 (AudioService.java, AudioServicePlugin.java, audio_service.dart) and just_audio 0.10.6 play() from the pub cache. Nothing was run and no network request was made. Finding 1 is a deduction from plugin source plus Android's documented background-FGS rule; it should be confirmed on an Android 12+ device (logcat for ForegroundServiceStartNotAllowedException) before fixing. Partially read only: lib/models/playback_state.dart, lib/screens/now_playing_page.dart, lib/widgets/sheet.dart, lib/screens/home_page.dart, test/playback_handler_test.dart.
+
+docs/audit-2026-10-06/findings.md already exists in the checkout (untracked, 90 numbered findings from the earlier part of this run). I did not repeat what it already holds. Journey issues I independently re-derived and that are already listed there: BV/av/short-link queries ignore `page`, so loadMore re-fetches the same video on every scroll (#7/#29); paging past the last music-zone page continues with unfiltered results at that page number (#28/#42); a multi-part video found by keyword is stored as P1 under the whole video's title and total duration (#43); scrolling library matches pages a hidden stale Bilibili query (#45/#66); short-link resolution reads the whole video page inside a 6 s budget (#40); a play-path success does not clear a DownloadManager failure (#36/#74); backupUrl is never tried when baseUrl fails (notes); play() during an in-flight restore is dropped (#73).
+
+Checked and found sound on this journey:
+- Search controller tokens: a slow older search/loadMore cannot write into a newer query; clear() during a request; retry; history token vs clearHistory; chip submit sets the field and the trimmed query matches `_online.query` so results show.
+- Id extraction for BV (case of the prefix, boundaries), av digits -> aid, full URLs (www/m, ?p=, bvid= params), b23.tv links carrying a BV directly; "AV1 编码"-style text falls through to keyword search when no such video exists; single-line field strips pasted newlines so share text still resolves.
+- Row-tap contract: downloaded -> playTrack, otherwise sheet; double tap on a row hits the modal barrier, double tap on 下载并播放 is ignored by the popping route; reopened sheet + second 下载并播放 or 下载 joins the in-flight future (AudioDownloadService._inFlight) and DownloadManager's double-tap guard holds.
+- preparing: set only for the current token, cleared by every newer selection and in finally for the current one; it cannot stick except through a hung download (already reported as the disk-full hang). Leaving search (取消/Back) does not touch the handler; the mini player and the AppShell snackbar still report the outcome.
+- Download -> play hand-off: saveDownloadedTrack is awaited before ensureDownloaded returns, so _library() contains the new track; a track on disk but missing from the store is still inserted at index 0 and is rediscovered from its meta JSON on next launch; play() is a no-op when already playing so the old song hands over without a gap in state; TrackNaming renames reach the queue through _latest/_publish; SongIdentity.coverUrl is nullable so a match without artwork does not blank the cover.
+- Skips at the ends: next past the end wraps (列表循环) or parks paused at the first item (off); previous at the start wraps or stays; single-item queue restarts; _navTarget keeps rapid presses one step each; shuffle order used throughout.
+- Relaunch: saveSession never overwrites with an empty sequence (launch before restore, lifecycle paused before restore), saved on pause/20 s/2 s after queue change and on lifecycle paused/detached; restore drops ids no longer in the library, falls back to index 0/position 0 when the current id is gone, does not record history, does not autoplay; a tap during restore wins via the token and PlayerInterruptedException handling.
+- audio_service forwards state in a loop that survives a failed setState (errors go to _asyncError), so one refused foreground start does not stop later state updates.
+
+Could not determine from source: how long Android lets the Dart isolate keep downloading after the app is backgrounded with no foreground service (the cached-app freezer would stall the transfer and surface later as a chunk timeout), and whether swiping the task away while a download is preparing destroys the Flutter engine before the download can complete and autoplay.
+
+## find:journey-library (aab062)
+
+Walked the library-management journey end to end (home lenses, playlist page, artist page, song sheet, info sheet -> LibraryController -> DatabaseService / handler / TrackNaming / LyricsController / download services). docs/audit-2026-10-06/findings.md from the earlier pass already lists related items (re-download re-registers the raw copy #11/#23/#24/#34, batch-add order #60, favourite stores the caller's stale copy #62/#76, snack bars under the info sheet #65, queue-row 播放 #64, delete-before-current announces the next song #72, lyrics not refreshed on rename #55, artist splitter 'feat' #71); I did not repeat those.
+
+Checked and found sound:
+- Edit of the playing / a queued song: DatabaseService.updateTrackMetadata replaces the library, every playlist copy and the history copy; handler._latest + _publish refresh nowPlaying (TrackNotifier), queueNotifier, mediaItem and the audio_service queue; the session file stores ids only; artist grouping, sorted list and SearchView's local cache are invalidated by list identity on every reload; TrackCredit cache is reset when known artists change. TrackNaming re-reads the stored copy and backs off when title/uploader/matcher/named changed, so a hand edit during a lookup wins.
+- Delete of a playing / queued / multi-playlist song: files go first, removeTracks walks the native sequence from the end (indices stay valid), playlists/favourites/history keep their copies by design, saveSession refuses to overwrite with an empty queue and restore filters by library. No UI offers delete for an in-flight download (delete appears only once the library lists the song), and DownloadManager has no cancel by design.
+- Playlists: create/rename/delete/reorder/cover all go through one write lock in call order with snapshots taken per call; rapid reorders stay consistent because _pendingOrder and the in-place playlist.tracks mutation agree; onReorderItem's adjusted index matches _moveWithin; swipe-remove hides the row via _removing until reload; addTracksToPlaylist de-duplicates inside the batch and against the playlist; delete pops the page before removing. Double taps on sheet actions are absorbed because a popping ModalRoute ignores pointers and dialogs/sheets push a barrier synchronously (the artist page's 存为歌单 is the one action with awaits before any route change - reported).
+- Artist page: reads the group live by name; renaming the artist on a song moves it out of the group immediately and playlist copies made by 存为歌单 are updated by updateTrackMetadata. (If the last song leaves, the page stays open showing 0 首 - cosmetic, not reported.)
+- Sort: setSort notifies before persisting, sortedDownloaded is cached per (list identity, sort); a sheet opened with an older sorted list still plays correctly because the handler re-resolves every queue item against the library by id.
+
+Considered and not reported (window too narrow to be a realistic scenario): TrackInfoSheet saves a copy built from the Track captured when it opened, so a loudness backfill landing while the sheet is open is dropped for the session; updateTrackMetadata is not atomic across its three files, so a process death between the downloaded-file and playlist-file writes leaves playlist rows with the old name; removeTracks versus a concurrent _install.
+
+Could not determine without running: whether AppShell's Scaffold resizes for the keyboard (would decide whether createAndOpenPlaylist's context.mounted check can fail when the 新建 tile scrolls out of the cache extent). There is no UI that calls setPlaylistCover(id, null), so a custom playlist cover can be replaced but not removed - a missing feature rather than a defect.
+
+## find:journey-lyrics (aecb45)
+
+Read-only: nothing in the repo was modified, no flutter/dart/build command was run and no network request was made. Also read in part (not in filesRead): lib/services/lyrics_engine.dart (lines 28-56, 240-262, 1670-2168: HTTP helper, title matching, LRC parse/serialise, both providers, candidate search, autoFetchLyrics), lib/services/audio_player_handler.dart (_publish/_announce, seek/skip, loop mode, holdAutoAdvance, updateTrackMetadata, sleep timer), lib/services/track_naming.dart, lib/services/track_credit.dart, lib/widgets/track_info_sheet.dart (save path), lib/widgets/sheet.dart (showAppSheet), database_service.dart store-file helpers, test/lyric_paste_test.dart, just_audio 0.10.6 (seek, positionStream), and the untracked docs/audit-2026-10-06/findings.md from the earlier run of this audit.
+
+The earlier run already recorded these on this journey, which I re-traced and agree with but do not repeat: failed lookup == miss for the whole session (#12), cached automatic lyrics rejected/deleted when the provider title has a subtitle (#13), translation lines split by the editor round trip (#15), kana/hangul titles never matching (#16), 重新匹配 deleting pinned lyrics before the new lookup (#54), rename re-publishing the cache made under the old name (#55), float round trip on tap-to-seek with an offset (#57), default sheet query ignoring the part name (#58), wheel scrolling on macOS (#59), player popping the top route when the queue empties (#63). The first finding above is a different root cause from #12 (stale memo after a rename, not failure-vs-absence), though a fix for both would touch the same set.
+
+Walked step by step and found sound:
+- Song starts -> automatic fetch: every await in LyricsController._load is followed by owns() (generation + current id + store revision); A->B->A, null track, rename and dispose all invalidate in-flight work; _load always ends in publish or in a state already set by choose/rematch, so the pane cannot stick on the shimmer. Loudness backfill and cover-only updates produce a new Track instance with the same name key and do not trigger a reload.
+- Choosing a result / pasting: the sheet acts on the Track it was opened for; choose() pins synchronously (revision bump before any await), shows it only if that song is current, and putAutomatic re-checks revision and pinned before and after its write. I found no path where an automatic result replaces a pinned entry on screen or on disk. A superseded pin's persist is skipped in favour of the newer one; write failure reaches the snackbar.
+- Calibration: offset is absolute and stored apart from the lines; each tap pins; the calibrating Track is captured, so a tap that lands after a manual skip is saved for the right song and not shown on the next; skip, back, 完成, toggling lyrics and dispose all release the auto-advance hold exactly once (the release closure is idempotent, holds are counted). The position read for calibration is the last positionStream tick (up to 200 ms old for songs over 160 s), but the highlight is evaluated on the same ticks, so the bias cancels on average; not raised.
+- Track changes during fetch or calibration: results of a lookup that lost ownership are dropped and not stored; the page ends calibration from its own nowPlaying listener.
+- Offline: pinned lyrics are published synchronously from LyricsStore.peek; matching automatic entries are served from the store without a request.
+- Info edited: lyrics are keyed by Track.id (bvid_p<page>), which copyWith never changes; a pinned entry is left alone on rename (line 133) and automatic ones are re-evaluated.
+- Deleted and downloaded again: nothing in the delete path touches LyricsStore (only LyricsController and LyricsSheet reference it), so pins and calibration survive; the id is the same on re-download.
+- LyricsView: listeners/timer cleaned up, keys rebuilt when the lines object changes, offset-only changes keep scroll state, children are disposed before the page's position notifier.
+
+Smaller observations, not raised as findings:
+- LyricsSheet reads the store (LyricsStore.peek) while the pane reads controller state. They can differ only when an unpinned stored entry fails _matches and the track is in _misses (a lookup that lost ownership returned empty): the pane shows 暂无歌词 while the sheet offers 编辑 prefilled with, and 校准 for, lyrics that are not on screen. Needs a rename plus an interrupted lookup; rare.
+- Saving an emptied editor returns null and nothing happens (lyrics cannot be removed by clearing the text; the sheet stays open without feedback).
+- plainLines drops blank lines, so pasted untimed lyrics lose their verse breaks.
+- Offline, the sheet's search shows 没有找到歌词 (no distinction from an empty answer), and searchCandidates waits for both providers, so one slow provider delays the other's results by up to its timeouts.
+
+Could not determine without a device/network: the exact player behaviour on a seek past the end on iOS/macOS (the Android path is read from plugin source; hence the 0.55 confidence), and what NetEase returns for a whole video title as the search term (second finding's lyric consequence; the auto-matching consequence is certain from code).
+
+## find:journey-matching (a38eca)
+
+Read in part (not full): lib/services/lyrics_engine.dart (1-56, 128-160, 515-1633, 1734-1766, 2136-2168), lib/services/bilibili_sdk.dart (1-400, search Track construction), lib/services/audio_player_handler.dart (95-394, 425-475, 520-760, 900-1028), lib/services/database_service.dart (380-901), parts of audio_download_service.dart, track_sheet.dart, search_view.dart. Nothing was run; all findings are from reading. Finding 2 (part tags) and finding 4 (lyrics) depend on parser/NetEase behaviour I could not execute, hence the lower confidence.
+
+Checked and found sound:
+- Listener edit vs in-flight match: _name re-reads the stored track and compares title/uploader/matcher/named (track_naming.dart:162-169); TrackInfoSheet always writes matcher 0, so any edit (including cover-only) is detected. The remaining window is a couple of microtasks.
+- matcher 0 is never revisited (_settled), and the save path of a re-check goes through stored.copyWith so loudness and other fields are preserved.
+- Network failing halfway through identify: NetEase failures set `incomplete` / `who.incomplete` and return without _remember, so track_naming removes the id from _attempted and retries on next play; no partial answer is written (the gap is only on the Bilibili-hints side, finding 1).
+- Result propagation: DatabaseService.updateTrackMetadata rewrites downloaded, on-disk meta, every playlist copy and history; handler.updateTrackMetadata -> _publish updates nowPlaying, mediaItem (notification) and the queue; LibraryController reloads and re-teaches known artists, invalidating artist and sort caches; ArtistPage tolerates its group disappearing. Session file stores ids only.
+- No feedback loop: the save re-notifies nowPlaying, autoName sees a settled track and returns.
+- Requests per play when inconclusive: nowPlaying only announces on id change (loop-one does not retrigger), and hints/identity/singer memos bound repeat cost within a session.
+- Startup: `enabled` is loaded before the nowPlaying listener is attached; LibraryController does not auto-name on its first load.
+- Compilation / >15 min: identify returns null and remembers it; nothing is written for an unnamed track, an older automatic name is kept and stamped (by design).
+
+Not reported but worth knowing: libraries saved before rawTitle existed (pre 3.10.2) load with rawTitle = title, so a title edited back then is indistinguishable from an unnamed video title and is eligible for auto-naming; I could not determine whether such data still exists. TrackNaming has no behavioural tests beyond `settled()` (test/track_test.dart).
+
+## find:journey-hostile (aa1f92)
+
+Method: walked start-up (main -> AudioService.init -> AppServices/TrackNaming/restoreSession -> DatabaseService._load -> LibraryController) and each service under the listed hostile conditions. Nothing was run; no network requests were made. docs/audit-2026-10-06/findings.md (untracked, from the earlier interrupted run) already lists 90 unverified findings; I did not repeat those. Ones on this journey that I re-derived independently and agree with: #2/#21 (IOSink.flush never completes after a write error - confirmed against dart-sdk/lib/io/io_sink.dart:184-196 and 257-267, so a disk-full download hangs rather than fails), #35/#75 (abandoned .part files), #73 (play() during an in-flight restoreSession returns without playing, because _restoreStarted is set before the first await and main.dart:58 always starts the restore first), #52/#80 (set-aside stores and the cover sweep), #9 (a code -352 body from the signed view fallback is read as 'no such video').
+
+Checked and found sound:
+- Cold start offline: nothing on the start-up path awaits the network; restoreSession, the library load and prefs are local only. Loudness backfill and auto-naming fail quietly and are retried later.
+- Each persisted JSON truncated / empty / wrong shape: downloaded, recently_played, playlists and search_history go through _readPayload + a typed cast inside try, and any failure sets the file aside as .unreadable instead of overwriting it; a truncated or missing downloaded.json is rebuilt from the per-track sidecars (which updateTrackMetadata keeps current with force: true). session.json of the wrong shape returns null and is simply rewritten. A corrupt lyrics file is set aside. The app starts in every case.
+- Kill in the middle of a JSON write: temp file + rename under one write lock; the previous snapshot survives (only the stray temp file remains - reported). Snapshot/lock ordering is FIFO, so two queued persists cannot land out of order.
+- Kill in the middle of a download: .part + note remain; resume is guarded by If-Range, Content-Range start, total length and validator, and a 416 is accepted only when the recorded total matches. Kill between rename and marker leaves an orphan that a re-download replaces.
+- CDN link expiring / different file on resume: a fresh link is fetched per attempt (Track.audioUrl is never set anywhere in lib/, so the cached-URL branch at audio_download_service.dart:297 is dead), and a mismatching partial is discarded and restarted.
+- 412 / -352 on search and video info: search falls back plain -> unfiltered and throws BiliApiException (UI shows retry); the stream URL has no fallback but fails with a message on the playback path.
+- Documents directory moving (iOS reinstall): audio paths are derived from the current directory at every queue install, the session stores ids only, and picked covers are rebased in _rebaseCovers before the sweep runs.
+- Session persistence: saveSession refuses to overwrite with an empty queue, so a launch that has not restored yet cannot wipe the saved session; restore filters ids against the pruned library.
+- Android backup is fully disabled (allowBackup=false plus data_extraction_rules), so no partial-restore state arises there.
+
+Could not determine without running: how ExoPlayer/just_audio 0.10.6 behaves when the restored current file is unreadable (whether a later play() re-prepares); the exact post-power-loss file state on f2fs vs ext4 (the fsync finding rests on general file-system semantics, hence the low confidence); whether Bilibili ever answers the signed view endpoint with HTTP 200 + code -352.
+
