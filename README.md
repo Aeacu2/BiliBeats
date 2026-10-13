@@ -21,7 +21,7 @@
 
 ### iOS 安装
 
-BiliBeats 未上架 Apple App Store，发布构建以未签名归档包（`bilibeats-x.x.x-unsigned.ipa`）形式提供。iOS 安装前需使用个人开发者证书进行签名（需 iOS 13.0 及以上版本）。
+BiliBeats 未上架 Apple App Store，发布构建以未签名归档包（`bilibeats-x.x.x-unsigned.ipa`）形式提供。iOS 安装前需使用个人开发者证书进行签名（需 iOS 15.0 及以上版本）。
 
 #### 方式一：通过 AltStore 安装（推荐）
 
@@ -81,7 +81,7 @@ tool/build_release.sh all
 
 **Android** — 单一混淆构建的 **arm64-v8a** APK。项目已永久放弃 32 位架构；ARM 笔记本（Apple Silicon、Windows on ARM）同样使用 arm64-v8a，因此该构建可覆盖上述全部设备。**需要 JDK 21 及以上版本**——AGP 内置 lint 在 JDK 17 下会因 `NoSuchMethodError` 失败，报错信息与 Java 版本无关，难以排查。
 
-**iOS** — 混淆构建的**未签名 .ipa**（位于 `build/ios/ipa/`）。本应用未注册 Apple Developer 账号，因此无法上架 App Store；请通过 AltStore / Sideloadly / 自有描述文件签名安装，即以您自己的身份为其签名。构建需 macOS 及 Xcode，支持 iOS 13 及以上版本。
+**iOS** — 混淆构建的**未签名 .ipa**（位于 `build/ios/ipa/`）。本应用未注册 Apple Developer 账号，因此无法上架 App Store；请通过 AltStore / Sideloadly / 自有描述文件签名安装，即以您自己的身份为其签名。构建需 macOS 及 Xcode，支持 iOS 15 及以上版本。
 
 iOS 工程**不依赖 CocoaPods**。本项目使用的全部插件均自带 `Package.swift`，已通过 Swift Package Manager 完成集成，并有意删除了 `ios/Podfile`——残留的 Podfile 会导致构建在未安装 CocoaPods 时报错。若未来某个插件仅支持 Pods 集成，请使用 `flutter create .` 重新生成 Podfile，并在本文件中说明。
 
