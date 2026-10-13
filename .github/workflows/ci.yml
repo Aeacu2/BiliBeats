@@ -71,6 +71,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # AGP's lint crashes on the runner's JDK 17 (NoSuchMethodError in its
+      # Javadoc parser); release builds run it. Same floor as the README's.
+      - uses: actions/setup-java@v4
+        if: startsWith(matrix.platform, 'android')
+        with:
+          distribution: temurin
+          java-version: 21
+
       - uses: subosito/flutter-action@v2
         with:
           # Keep in sync with the local dev SDK (`flutter --version`).
