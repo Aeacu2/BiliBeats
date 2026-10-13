@@ -88,6 +88,10 @@ void main() {
             );
             answers[k] = {
               'bvid': v['bvid'],
+              // Who an unnamed video is credited to (TrackCredit).
+              'credit': LyricsEngine.cleanTitle(v['title'] as String,
+                      defaultArtist: v['up'] as String)['artist'] ??
+                  v['up'],
               if (found != null) ...{
                 't': found.title,
                 'a': found.artist,

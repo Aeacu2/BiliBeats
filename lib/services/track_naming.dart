@@ -28,7 +28,7 @@ class TrackNaming {
   /// The matcher's generation, recorded on every song it names
   /// ([Track.matcher]). Raise it when matching gets better: songs named by
   /// an older generation are then looked at again the next time they play.
-  static const int matcher = 5;
+  static const int matcher = 6;
   static BiliBeatsAudioHandler? _handler;
 
   /// Where the evidence comes from; replaced in tests.
@@ -145,7 +145,8 @@ class TrackNaming {
       musicArtists: hints.musicArtists,
       durationSeconds: track.duration,
     );
-    return SongJudge.decide(catalogue: found, reading: reading);
+    return SongJudge.decide(
+        catalogue: found, reading: reading, uploader: uploader);
   }
 
   /// One part of a multi-part video (an album, a concert) is asked about by

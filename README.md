@@ -114,7 +114,7 @@ flutter test test/render_screens.dart --update-goldens
 不随仓库发布；依赖它们的测试在缺少相应文件时自动跳过。
 
 每次 push / PR 由 GitHub Actions（`.github/workflows/ci.yml`）自动执行
-`flutter analyze` 与 `flutter test`，Flutter 版本固定为 3.44.8，升级 SDK 时请同步更新。
+`flutter analyze` 与 `flutter test`，Flutter 版本固定为 3.47.7，升级 SDK 时请同步更新。
 
 ## 发布流程
 

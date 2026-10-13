@@ -67,6 +67,15 @@ tuned on, so the rules score 100% there and anything else looks worse.
 A wrong name in the library is worse than no name: read `wrong` before
 `right`.
 
+One kind of `wrong_perf` is deliberate. Where the rules and the model read
+the same song but not the same singer, the judge names the song and leaves
+the uploader as the artist, exactly as an unnamed video is credited. Scored
+strictly that is a wrong performer whenever the uploader is not the singer
+(43 of 60 such videos on `hold`); what the listener sees is a right song name
+where there was a video title (55 of 60), under the credit it already had.
+`judge.py` prints `song named` for that reason: the song alone, whoever is
+credited.
+
 Encoders compared on `hold` (wholly right, of 800), same data, 12 epochs:
 character model from scratch 546 · MiniRBT-h288 587 · ELECTRA-small 587 ·
 bge-small-zh-v1.5 597 · LERT-small 600 · granite-97m-multilingual-r2 612 ·

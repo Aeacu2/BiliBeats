@@ -9,7 +9,10 @@ import 'song_reader.dart';
 /// they are, and takes any word that is also a song's name for one; the
 /// model reads a title the way a person does, and knows nothing it was not
 /// shown. A name is written into the library when they agree, or when the
-/// model is sure on its own; otherwise the video keeps its title.
+/// model is sure on its own. Where they agree on the song and not on who
+/// sings it, the song is named and the singer is left as it was — the
+/// uploader, as for any video nobody has named. Otherwise the video keeps
+/// its title.
 class SongJudge {
   SongJudge._();
 
@@ -20,6 +23,7 @@ class SongJudge {
   static SongIdentity? decide({
     required SongIdentity? catalogue,
     required SongReading? reading,
+    String uploader = '',
   }) {
     // No model (not installed, or the question is one it was not taught):
     // the catalogue's answer is all there is.
@@ -37,6 +41,16 @@ class SongJudge {
     if (reading.confidence < sure ||
         reading.performers.isEmpty ||
         reading.performers.any((name) => name.trim().isEmpty)) {
+      // Two readings of one title that come to the same song are rarely
+      // both wrong about it (57 of 62 on the hold-out), while neither's
+      // singer is worth believing there (about one in three).
+      if (sameSong && uploader.trim().isNotEmpty) {
+        return SongIdentity(
+          title: catalogue.title,
+          artist: uploader.trim(),
+          exact: false,
+        );
+      }
       return null;
     }
     return SongIdentity(

@@ -87,8 +87,10 @@ docs/archive/               old review notes and a superseded feature list — h
   weights are in `assets/song_model/`, not in git — see its README). It reads
   the same video and says song / performers / not a song, each a span of its
   input. `SongJudge` settles the two: the catalogue's answer where the model
-  reads the same, the model's where it is sure alone (`SongJudge.sure`),
-  otherwise no name. Without the asset, naming is the rules alone. Training,
+  reads the same, the model's where it is sure alone (`SongJudge.sure`);
+  where they agree on the song but not on who sings it, the song alone is
+  named and the artist stays the UP主 (the song is right 57 times in 62 there,
+  neither singer one time in three); otherwise no name. Without the asset, naming is the rules alone. Training,
   measuring and exporting are in `tool/song_model/` (README there): measure a
   matching change on its 800-video hold-out, not only on the 周深 fixture —
   the rules were tuned on the fixture and score 100% on it whatever they do

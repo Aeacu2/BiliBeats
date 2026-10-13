@@ -79,13 +79,41 @@ void main() {
     expect(found.coverUrl, isNull);
   });
 
-  test('a model unsure of what it reads names nothing against the catalogue',
-      () {
-    const renjian = SongIdentity(title: '人间', artist: '王菲', exact: true);
+  test(
+      'where both read the same song and the model is unsure who sings it, '
+      'the song is named and the uploader stays', () {
+    const renjian = SongIdentity(
+      title: '人间',
+      artist: '王菲',
+      exact: true,
+      coverUrl: 'https://example.com/renjian.jpg',
+    );
+    final found = SongJudge.decide(
+      catalogue: renjian,
+      reading: _reading('人间', ['周深'], confidence: 0.6),
+      uploader: '某个音乐站',
+    );
+    expect(told(found), '人间 / 某个音乐站');
+    // Whose recording it is has not been settled: not the release's artwork.
+    expect(found!.exact, isFalse);
+    expect(found.coverUrl, isNull);
+    // With nobody to leave it with (a deleted account), nothing is named.
     expect(
       SongJudge.decide(
         catalogue: renjian,
         reading: _reading('人间', ['周深'], confidence: 0.6),
+      ),
+      isNull,
+    );
+  });
+
+  test('an unsure model that reads a different song names nothing', () {
+    const renjian = SongIdentity(title: '人间', artist: '王菲', exact: true);
+    expect(
+      SongJudge.decide(
+        catalogue: renjian,
+        reading: _reading('大鱼', ['周深'], confidence: 0.6),
+        uploader: '某个音乐站',
       ),
       isNull,
     );

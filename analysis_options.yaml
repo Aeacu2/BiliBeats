@@ -41,6 +41,13 @@ analyzer:
   exclude:
     # The retired character model's Dart port, kept for reference.
     - tool/song_model/legacy/**
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
   errors:
     # Dead code is a bug waiting to happen, not a style preference.
     unused_element: error
