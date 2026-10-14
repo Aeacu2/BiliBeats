@@ -70,7 +70,7 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
     bool same<T>(List<T> a, List<T> b, String Function(T) id) =>
         a.length == b.length &&
         Iterable<int>.generate(a.length).every((i) => id(a[i]) == id(b[i]));
-    if (same(active, _active, (t) => t.track.id) &&
+    if (same(active, _active, (t) => '${t.track.id}${t.retrying}') &&
         same(failed, _failed, (f) => f.track.id)) {
       return;
     }
@@ -127,6 +127,7 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
                       SongTile(
                         key: ValueKey('active-${task.track.id}'),
                         track: task.track,
+                        detail: task.retrying ? '连接中断，稍后自动重试' : null,
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -144,7 +145,11 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
                       SongTile(
                         key: ValueKey('failed-${failed.track.id}'),
                         track: failed.track,
-                        detail: '下载失败',
+                        // Bilibili's own reason, where it refused the
+                        // video outright; otherwise the plain fact.
+                        detail: failed.error.startsWith('无法下载')
+                            ? failed.error
+                            : '下载失败',
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [

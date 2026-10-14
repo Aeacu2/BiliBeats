@@ -126,7 +126,8 @@ class _SearchViewState extends State<SearchView> {
       if (history.isNotEmpty)
         SliverToBoxAdapter(
           child: SizedBox(
-            height: 44,
+            // The chips are 48 pt touch targets; a shorter row clipped them.
+            height: 48,
             child: ListView.separated(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               scrollDirection: Axis.horizontal,
@@ -293,9 +294,10 @@ class _Label extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 10, 6, 2),
+      padding: const EdgeInsets.fromLTRB(20, 6, 6, 0),
       child: SizedBox(
-        height: 40,
+        // Room for a 48 pt button on the right.
+        height: 48,
         child: Row(
           children: [
             Text(text, style: AppTypography.section),

@@ -757,6 +757,18 @@ class DatabaseService {
     await _persistPlaylists();
   }
 
+  /// Puts [track] back into a playlist at [index] (an undone removal).
+  static Future<void> insertTrackInPlaylist(
+      String playlistId, Track track, int index) async {
+    await _ensureLoaded();
+    final idx = _playlists.indexWhere((p) => p.id == playlistId);
+    if (idx == -1) return;
+    final tracks = _playlists[idx].tracks;
+    if (tracks.any((t) => t.id == track.id)) return;
+    tracks.insert(index.clamp(0, tracks.length), track);
+    await _persistPlaylists();
+  }
+
   /// Batch variant of [addTrackToPlaylist]: one persist for the whole batch
   /// instead of a full-file rewrite per track. The batch goes to the front
   /// in the order given.

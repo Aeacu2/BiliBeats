@@ -75,9 +75,10 @@ class SheetTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 6, 8, 6),
+      padding: const EdgeInsets.fromLTRB(20, 4, 8, 4),
       child: SizedBox(
-        height: 44,
+        // Room for a 48 pt control on the right.
+        height: 48,
         child: Row(
           children: [
             Text(title, style: AppTypography.title),

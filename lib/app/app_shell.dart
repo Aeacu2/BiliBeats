@@ -185,12 +185,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   Widget _searchBar() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 6, 6, 8),
+      padding: const EdgeInsets.fromLTRB(16, 4, 6, 6),
       child: Row(
         children: [
           Expanded(
             child: Container(
-              height: 44,
+              // As tall as the clear button it holds.
+              height: 48,
               decoration: BoxDecoration(
                 color: AppColors.fieldFill,
                 borderRadius: BorderRadius.circular(AppRadius.pill),

@@ -219,6 +219,49 @@ void main() {
       home: const NowPlayingPage(),
     ));
     await shot(tester, 'player');
+    await tester.tap(find.byTooltip('更多'));
+    await shot(tester, 'player_more');
+    await tester.tapAt(const Offset(195, 60));
+    await settle(tester);
+    await tester.tap(find.byTooltip('播放队列'));
+    await shot(tester, 'player_queue');
+    await tester.tapAt(const Offset(195, 60));
+    await settle(tester);
+    await tester.tap(find.byTooltip('歌词'));
+    await shot(tester, 'player_lyrics');
+    await finish(tester, handler);
+  });
+
+  testWidgets('collections and sheets', (tester) async {
+    final handler = await boot(tester);
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.darkTheme.copyWith(
+          textTheme: AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
+      debugShowCheckedModeBanner: false,
+      home: const AppShell(),
+    ));
+    await settle(tester);
+    await tester.longPress(find.text('光年之外').last);
+    await shot(tester, 'song_sheet');
+    await tester.tap(find.text('编辑信息'));
+    await shot(tester, 'song_info');
+    await tester.tapAt(const Offset(195, 60));
+    await settle(tester);
+    await tester.tap(find.text('歌单'));
+    await settle(tester);
+    await tester.tap(find.text('深夜循环'));
+    await shot(tester, 'playlist');
+    await tester.pageBack();
+    await settle(tester);
+    await tester.tap(find.text('歌手'));
+    await settle(tester);
+    await tester.tap(find.text('周深').first);
+    await shot(tester, 'artist');
+    await tester.pageBack();
+    await settle(tester);
+    await tester.tap(find.byType(TextField).first);
+    await tester.enterText(find.byType(TextField).first, '周');
+    await shot(tester, 'search');
     await finish(tester, handler);
   });
 }

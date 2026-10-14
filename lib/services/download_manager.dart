@@ -21,10 +21,20 @@ class DownloadTask {
   /// 0..1, or 0 when the server sent no content length.
   final double fraction;
 
-  const DownloadTask({required this.track, this.fraction = 0.0});
+  /// Between attempts: the last one failed and another follows shortly.
+  final bool retrying;
 
-  DownloadTask copyWith({double? fraction}) =>
-      DownloadTask(track: track, fraction: fraction ?? this.fraction);
+  const DownloadTask({
+    required this.track,
+    this.fraction = 0.0,
+    this.retrying = false,
+  });
+
+  DownloadTask copyWith({double? fraction, bool? retrying}) => DownloadTask(
+        track: track,
+        fraction: fraction ?? this.fraction,
+        retrying: retrying ?? this.retrying,
+      );
 }
 
 /// A user-initiated download that failed, kept for the session so the
@@ -178,9 +188,15 @@ class DownloadManager {
       }
       return;
     }
-    // Error events are preludes to startDownload's catch, which reports them.
+    if (p.retrying) {
+      _tasks[p.trackId] = task.copyWith(retrying: true);
+      _notify(p.trackId);
+      return;
+    }
+    // Error events are preludes to startDownload's catch (or to a retry),
+    // which reports them.
     if (p.done || p.error != null) return;
-    _tasks[p.trackId] = task.copyWith(fraction: p.fraction);
+    _tasks[p.trackId] = task.copyWith(fraction: p.fraction, retrying: false);
     _notify(p.trackId);
   }
 

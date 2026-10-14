@@ -7,6 +7,8 @@ void showAppSnackBar(
   ScaffoldMessengerState messenger, {
   required String message,
   Duration duration = const Duration(seconds: 2),
+  String? actionLabel,
+  VoidCallback? onAction,
 }) {
   messenger
     ..clearSnackBars()
@@ -15,9 +17,16 @@ void showAppSnackBar(
         message,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
-        textAlign: TextAlign.center,
+        textAlign: actionLabel == null ? TextAlign.center : TextAlign.start,
         style: AppTypography.bodyMedium.copyWith(color: AppColors.textPrimary),
       ),
+      action: actionLabel == null
+          ? null
+          : SnackBarAction(
+              label: actionLabel,
+              textColor: AppColors.accent,
+              onPressed: onAction ?? () {},
+            ),
       backgroundColor: AppColors.fieldFill,
       behavior: SnackBarBehavior.floating,
       elevation: 0,

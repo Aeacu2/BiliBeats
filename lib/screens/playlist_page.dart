@@ -247,6 +247,8 @@ class _PlaylistPageState extends State<PlaylistPage> {
             return Material(
               key: ValueKey(track.id),
               color: AppColors.background,
+              // The shape of the row's own ripple, also while it is dragged.
+              borderRadius: BorderRadius.circular(AppRadius.md),
               child: SongTile(
                 track: track,
                 onTap: () => setState(() {
@@ -378,10 +380,21 @@ class _PlaylistPageState extends State<PlaylistPage> {
   }
 
   Future<void> _removeOne(Playlist playlist, Track track) async {
+    final index = playlist.tracks.indexWhere((t) => t.id == track.id);
+    final messenger = ScaffoldMessenger.of(context);
     setState(() => _removing.add(track.id));
     await DatabaseService.removeTrackFromPlaylist(playlist.id, track.id);
     await _library.reload();
     if (mounted) setState(() => _removing.remove(track.id));
+    // A swipe is easily made by mistake: it can be taken back.
+    showAppSnackBar(
+      messenger,
+      message: '已从「${playlist.name}」移出',
+      duration: const Duration(seconds: 4),
+      actionLabel: '撤销',
+      onAction: () =>
+          DatabaseService.insertTrackInPlaylist(playlist.id, track, index),
+    );
   }
 
   Future<void> _removeSelected(Playlist playlist) async {

@@ -18,13 +18,17 @@ class DownloadProgress {
   final bool done;
   final String? error;
 
+  /// The last attempt failed and another follows shortly.
+  final bool retrying;
+
   const DownloadProgress(
     this.trackId,
     this.receivedBytes,
     this.totalBytes,
     this.done,
-    this.error,
-  );
+    this.error, {
+    this.retrying = false,
+  });
 
   double get fraction {
     final total = totalBytes;
@@ -47,6 +51,17 @@ class DownloadCancelled implements Exception {
 
   @override
   String toString() => '下载已取消';
+}
+
+/// Bilibili refuses this video's audio outright (deleted, hidden, members
+/// only…): trying again will not help.
+class VideoUnavailable implements Exception {
+  final String reason;
+
+  const VideoUnavailable(this.reason);
+
+  @override
+  String toString() => '无法下载：$reason';
 }
 
 class AudioDownloadService {
@@ -352,15 +367,19 @@ class AudioDownloadService {
         if (attempt >= retryDelays.length || !_worthRetrying(e)) rethrow;
         debugPrint('Download of ${track.id} failed ($e); '
             'retrying in ${retryDelays[attempt].inSeconds}s');
+        _emit(DownloadProgress(track.id, 0, null, false, null, retrying: true));
         await _pause(retryDelays[attempt], track.id);
       }
     }
   }
 
-  /// Called off, or a disk that refused the write: neither gets better by
-  /// waiting.
+  /// Called off, a video Bilibili will not serve, or a disk that refused
+  /// the write: none gets better by waiting.
   static bool _worthRetrying(Object e) =>
-      e is! DownloadCancelled && e is! FileSystemException && e is! Error;
+      e is! DownloadCancelled &&
+      e is! VideoUnavailable &&
+      e is! FileSystemException &&
+      e is! Error;
 
   /// Waits [delay], cut short (with [DownloadCancelled]) if the listener
   /// calls the download off meanwhile.
@@ -381,6 +400,11 @@ class AudioDownloadService {
     var isPart = false;
     if (url == null || url.isEmpty) {
       final info = await BilibiliSdk.fetchAudioStream(track.bvid, track.cid);
+      final refusal = info?['unavailable'];
+      if (refusal != null) {
+        _emit(DownloadProgress(track.id, 0, null, false, refusal));
+        throw VideoUnavailable(refusal);
+      }
       url = info?['url'];
       final loudness = double.tryParse(info?['loudness'] ?? '');
       if (loudness != null) track = track.copyWith(loudness: loudness);

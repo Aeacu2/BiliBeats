@@ -509,14 +509,37 @@ class BilibiliSdk {
 
       final body = await _httpGet(url);
       if (body != null) {
-        final stream = parseAudioStream(jsonDecode(body));
+        final json = jsonDecode(body);
+        final stream = parseAudioStream(json);
         if (stream != null) return {...stream, ...part};
+        final refusal = unavailableReason(json);
+        if (refusal != null) return {'unavailable': refusal};
       }
     } catch (e) {
       debugPrint('Failed to fetch audio stream: $e');
     }
 
     return null;
+  }
+
+  /// Bilibili's codes for "too many requests" and its own trouble: worth
+  /// asking again in a while, unlike every other refusal.
+  static const Set<int> _transientCodes = {-352, -412, -500, -503, -509, -799};
+
+  /// Why Bilibili will not give this video's audio to anyone (deleted,
+  /// hidden, members only, another region), when that is what it said;
+  /// null for a request that merely failed.
+  @visibleForTesting
+  static String? unavailableReason(dynamic json) {
+    if (json is! Map) return null;
+    final code = json['code'];
+    if (code is! int || code == 0 || _transientCodes.contains(code)) {
+      return null;
+    }
+    final message = json['message'];
+    return message is String && message.isNotEmpty && message != '$code'
+        ? message
+        : '视频无法播放';
   }
 
   /// Reads a `playurl` answer: the stream to download, and Bilibili's

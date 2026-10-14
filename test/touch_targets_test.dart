@@ -129,6 +129,20 @@ void main() {
     final handler = await boot(tester, const AppShell());
     // 设置 · 排序 · each row's 更多 · the mini player's two buttons
     expectCentredTargets(tester, atLeast: 6);
+
+    // A song's sheet.
+    await tester.tap(find.byTooltip('更多').first);
+    await tester.pump(const Duration(seconds: 1));
+    expectCentredTargets(tester, atLeast: 7);
+    await tester.tapAt(const Offset(195, 60));
+    await tester.pump(const Duration(seconds: 1));
+
+    // Searching: the clear button, the library's matches.
+    await tester.tap(find.byType(TextField).first);
+    await tester.enterText(find.byType(TextField).first, 'song');
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byTooltip('清除'), findsOneWidget);
+    expectCentredTargets(tester, atLeast: 2);
     await finish(tester, handler);
   });
 }

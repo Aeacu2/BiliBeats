@@ -91,6 +91,21 @@ void main() {
     expect(await DatabaseService.isFavorite(track.id), isTrue);
   });
 
+  test('a song taken out of a playlist goes back where it was', () async {
+    final songs = [t('dm-undo-a'), t('dm-undo-b'), t('dm-undo-c')];
+    final playlist = await DatabaseService.createPlaylist('撤销测试');
+    await DatabaseService.addTracksToPlaylist(playlist.id, songs);
+
+    await DatabaseService.removeTrackFromPlaylist(playlist.id, songs[1].id);
+    await DatabaseService.insertTrackInPlaylist(playlist.id, songs[1], 1);
+    // Twice is still once.
+    await DatabaseService.insertTrackInPlaylist(playlist.id, songs[1], 1);
+
+    final reloaded = (await DatabaseService.getPlaylists())
+        .firstWhere((p) => p.id == playlist.id);
+    expect(reloaded.tracks.map((e) => e.id), songs.map((e) => e.id));
+  });
+
   test('storage breakdown reports downloaded bytes', () async {
     const name = 'dm-size-a';
     server.serveInstant(name);

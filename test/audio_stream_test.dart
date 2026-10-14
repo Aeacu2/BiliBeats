@@ -63,4 +63,21 @@ void main() {
     }));
     expect(stream?.containsKey('loudness'), isFalse);
   });
+
+  test('a video Bilibili will not serve is told from a failed request', () {
+    expect(BilibiliSdk.unavailableReason({'code': -404, 'message': '啥都木有'}),
+        '啥都木有');
+    expect(BilibiliSdk.unavailableReason({'code': 87008}), '视频无法播放');
+    // Too many requests, or no answer at all: worth asking again.
+    for (final answer in [
+      {'code': -412, 'message': '请求被拦截'},
+      {'code': -352},
+      {'code': -799},
+      {'code': 0},
+      '<html>',
+      null,
+    ]) {
+      expect(BilibiliSdk.unavailableReason(answer), isNull, reason: '$answer');
+    }
+  });
 }

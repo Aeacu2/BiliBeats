@@ -106,6 +106,15 @@ class _TrackSheetState extends State<TrackSheet> {
 
   Future<void> _deleteDownload() async {
     final track = widget.track;
+    // Asked first, as in 下载管理: the song has to be fetched again.
+    if (!await confirmAction(
+      context,
+      title: '删除「${track.title}」的下载？',
+      confirm: '删除',
+    )) {
+      return;
+    }
+    if (!mounted) return;
     final parent = _dismiss();
     await DatabaseService.removeDownloadedTrack(track);
     if (parent.mounted) {
