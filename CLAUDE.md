@@ -102,6 +102,10 @@ docs/archive/               old review notes and a superseded feature list — h
   `test/fixtures/zhoushen_videos.json` is 126 surveyed videos with their tags, recognised
   music and hand-checked answers, replayed by `recognition_live_test.dart`. Check a
   matching change against it before believing it.
+- **Downloads** retry for about three minutes (`AudioDownloadService.retryDelays`,
+  fresh link each time, resuming the `.part`); tests run with no retries
+  (`test/flutter_test_config.dart`). Naming starts when a download does
+  (`TrackNaming.prepare`) and is applied when the song lands, if it is unchanged.
 - **Lyrics.** `LyricsController` follows the playing track. Lyrics the listener chose,
   pasted or calibrated are pinned in `LyricsStore` and never overwritten automatically.
   Sources, in order, for a song whose singer is known: Kugou (timed word by
@@ -126,7 +130,11 @@ docs/archive/               old review notes and a superseded feature list — h
   bottom sheet (`showAppSheet`, `SheetAction`, `PrimaryButton` in `widgets/sheet.dart`).
 - Every list draws songs with `SongTile` and handles taps with `openTrack`.
 - Touch targets are at least 48 pt; keep tooltips on icon-only buttons (tests and
-  screen readers find controls by them).
+  screen readers find controls by them). A glyph sits in the middle of its touch
+  area: to line one up with a margin, move the target (let it reach into the
+  gutter), never `alignment:` the glyph to an edge. `touch_targets_test.dart`
+  checks every tooltip'd control on the player and home screens.
+- Choices (sort order and the like) go in a sheet, not a popup menu.
 - Player page spacing is computed in `_Spacing` (now_playing_page.dart): spare height is
   shared between the artwork and the control rows rather than left at one end.
 

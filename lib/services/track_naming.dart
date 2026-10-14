@@ -88,6 +88,86 @@ class TrackNaming {
     });
   }
 
+  /// Answers looked up while their songs were still downloading, by id.
+  static final Map<String, Future<_Lookup?>> _early = {};
+
+  /// Starts looking up which song [track] is as its download starts, so
+  /// the name, artist and artwork are ready the moment it lands in the
+  /// library instead of only being asked for then. The answer is applied
+  /// by [autoName] once the song is downloaded, and only if the song is
+  /// still as it was asked about.
+  static void prepare(Track track) {
+    // Not before [init]: until then nothing applies an answer.
+    if (_handler != null) _prepare(track);
+  }
+
+  /// [prepare], whether or not [init] has run; completes with the lookup.
+  @visibleForTesting
+  static Future<void> prepareNow(Track track) async {
+    _prepare(track);
+    await _early[track.id];
+  }
+
+  static void _prepare(Track track) {
+    if (!enabled || _settled(track) || _early.containsKey(track.id)) {
+      return;
+    }
+    final asked = _question(track);
+    if (LyricsEngine.neverOneSong(asked.title, track.duration)) return;
+    final lookup = _lookUp(track).catchError((Object error) {
+      debugPrint('Early naming of ${track.id} failed: $error');
+      return null;
+    });
+    // Songs whose download failed leave their answer behind: only the
+    // latest few are kept.
+    if (_early.length >= 32) _early.remove(_early.keys.first);
+    _early[track.id] = lookup;
+  }
+
+  /// The early answer for [track], when it was asked about exactly as the
+  /// library now has it.
+  static Future<_Lookup?> _earlyFor(Track track) async {
+    final pending = _early.remove(track.id);
+    if (pending == null) return null;
+    final found = await pending;
+    if (found == null) return null;
+    final a = found.asked;
+    final same = a.rawTitle == track.rawTitle &&
+        a.title == track.title &&
+        a.uploader == track.uploader &&
+        a.rawUploader == track.rawUploader &&
+        a.duration == track.duration &&
+        a.named == track.named &&
+        a.matcher == track.matcher &&
+        a.partTitle == track.partTitle;
+    return same ? found : null;
+  }
+
+  /// Bilibili's evidence on [track] ([known], when already fetched) and
+  /// what the catalogues and the model make of it; null when the evidence
+  /// is incomplete (a request failed).
+  static Future<_Lookup?> _lookUp(Track track, [VideoHints? known]) async {
+    final hints = known ?? await hintsFor(track.bvid, cid: track.cid);
+    if (!hints.complete) return null;
+    final uploader = _uploaderOf(track, hints);
+    final found = await _ask(track, hints, uploader);
+    final q = _question(track);
+    final settled = LyricsEngine.identitySettled(
+      q.title,
+      uploader: uploader,
+      durationSeconds: track.duration,
+      context: q.context,
+      hints: hints,
+    );
+    return _Lookup(
+      asked: track,
+      hints: hints,
+      uploader: uploader,
+      found: found,
+      settled: settled,
+    );
+  }
+
   static Future<void> setEnabled(bool on) async {
     enabled = on;
     await DatabaseService.setPref('autoName', on);
@@ -230,7 +310,8 @@ class TrackNaming {
       final asked = _question(before);
       if (LyricsEngine.neverOneSong(asked.title, before.duration)) return;
     }
-    final hints = await hintsFor(before.bvid, cid: before.cid);
+    final early = await _earlyFor(before);
+    final hints = early?.hints ?? await hintsFor(before.bvid, cid: before.cid);
     // Named before [Track.matcher] was recorded: by the listener, or by the
     // first matcher — which credited the UP主 whenever it could not read the
     // singer. Only that mistake is worth a second look; any other artist
@@ -264,17 +345,14 @@ class TrackNaming {
       return;
     }
 
-    final uploader = _uploaderOf(before, hints);
-    final found = await _ask(before, hints, uploader);
-    final q = _question(before);
-    final settled = LyricsEngine.identitySettled(
-      q.title,
-      uploader: uploader,
-      durationSeconds: before.duration,
-      context: q.context,
-      hints: hints,
-    );
-    if (found == null && !settled) {
+    final lookup = early ?? await _lookUp(before, hints);
+    if (lookup == null) {
+      _attempted.remove(track.id);
+      return;
+    }
+    final uploader = lookup.uploader;
+    final found = lookup.found;
+    if (found == null && !lookup.settled) {
       // Offline is not "unknown": ask again the next time it plays.
       _attempted.remove(track.id);
       return;
@@ -326,4 +404,24 @@ class TrackNaming {
       matcher: matcher,
     ));
   }
+}
+
+/// What [TrackNaming] found out about one song.
+class _Lookup {
+  /// The song as it was when asked about.
+  final Track asked;
+  final VideoHints hints;
+  final String uploader;
+  final SongIdentity? found;
+
+  /// Whether the catalogues' silence ([found] null) is an answer.
+  final bool settled;
+
+  const _Lookup({
+    required this.asked,
+    required this.hints,
+    required this.uploader,
+    required this.found,
+    required this.settled,
+  });
 }

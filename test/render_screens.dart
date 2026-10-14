@@ -4,7 +4,7 @@
 //   flutter test test/render_screens.dart --update-goldens
 //
 // Images land in build/screens/. Needs a CJK font at [_cjkFont] (macOS ships
-// one); without it the run is skipped.
+// one; on Linux, WenQuanYi Zen Hei); without it the run is skipped.
 // ignore_for_file: avoid_print
 import 'dart:convert';
 import 'dart:io';
@@ -25,7 +25,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'audio_test_harness.dart';
 import 'fake_audio_player.dart';
 
-const _cjkFont = '/Library/Fonts/Arial Unicode.ttf';
+/// The first CJK font found: macOS's, else a common Linux one.
+final _cjkFont = [
+  '/Library/Fonts/Arial Unicode.ttf',
+  '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+].firstWhere((path) => File(path).existsSync(), orElse: () => '');
 final _out = '${Directory.current.path}/build/screens';
 
 const _songs = [
@@ -193,6 +197,10 @@ void main() {
       home: const AppShell(),
     ));
     await shot(tester, 'home_songs');
+    await tester.tap(find.byTooltip('排序'));
+    await shot(tester, 'home_sort');
+    await tester.tapAt(const Offset(195, 120));
+    await settle(tester);
     await tester.tap(find.text('歌单'));
     await shot(tester, 'home_playlists');
     await tester.tap(find.text('歌手'));

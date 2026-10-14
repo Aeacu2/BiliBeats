@@ -16,6 +16,7 @@ import 'bilibili_sdk.dart';
 import 'database_service.dart';
 import 'download_manager.dart';
 import 'track_credit.dart';
+import 'track_naming.dart';
 
 export '../models/playback_state.dart';
 
@@ -665,6 +666,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     if (token != _selection) return false;
 
     preparing.value = track;
+    TrackNaming.prepare(track);
     try {
       await AudioDownloadService.ensureDownloaded(track);
       return token == _selection;

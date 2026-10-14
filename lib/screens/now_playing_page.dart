@@ -236,6 +236,10 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
 
   static const double _gutter = 28;
 
+  /// How far an end button's touch area reaches past its glyph: half of
+  /// what the 52 pt target adds to the 28 pt glyph.
+  static const double _reach = 12;
+
   Widget _player(Track track) {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -269,19 +273,25 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: _gutter),
+              // The buttons at either end reach into the gutter: their
+              // glyphs line up with the title and the progress bar while
+              // each one's touch area stays centred on it.
+              padding: const EdgeInsets.symmetric(horizontal: _gutter - _reach),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _titleRow(track),
                   SizedBox(height: space.aboveSeek),
-                  PlayerSeekBar(
-                    // A drag held across a track change is dropped with it.
-                    key: ValueKey(track.id),
-                    position: _position,
-                    duration: _handler.durationNotifier,
-                    fallback: Duration(seconds: track.duration),
-                    onSeek: _handler.seek,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: _reach),
+                    child: PlayerSeekBar(
+                      // A drag held across a track change is dropped with it.
+                      key: ValueKey(track.id),
+                      position: _position,
+                      duration: _handler.durationNotifier,
+                      fallback: Duration(seconds: track.duration),
+                      onSeek: _handler.seek,
+                    ),
                   ),
                   SizedBox(height: space.aboveTransport),
                   _transport(),
@@ -421,6 +431,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
     final library = AppServices.instance.library;
     return Row(
       children: [
+        const SizedBox(width: _reach),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -440,7 +451,6 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             ],
           ),
         ),
-        const SizedBox(width: 8),
         ListenableBuilder(
           listenable: library,
           builder: (context, _) {
@@ -448,8 +458,9 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             return IconButton(
               tooltip: favorite ? '取消收藏' : '收藏',
               padding: EdgeInsets.zero,
-              alignment: Alignment.centerRight,
-              constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+              // The glyph's right edge on the progress bar's.
+              constraints: const BoxConstraints.tightFor(
+                  width: 26 + 2 * _reach, height: 52),
               onPressed: () async {
                 Haptics.light();
                 // The song this was pressed for, whatever plays by the time
@@ -493,7 +504,6 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
               tooltip: modeLabel,
               icon: modeIcon,
               active: queue.isShuffle || queue.loopMode == LoopMode.one,
-              alignment: Alignment.centerLeft,
               onPressed: () {
                 Haptics.medium();
                 _handler.cyclePlayMode();
@@ -528,7 +538,6 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             _SideButton(
               tooltip: '播放队列',
               icon: Icons.queue_music_rounded,
-              alignment: Alignment.centerRight,
               onPressed: () => PlaybackQueueSheet.show(context),
             ),
           ],
@@ -820,22 +829,19 @@ class _SkipButton extends StatelessWidget {
   }
 }
 
-/// Play mode and queue, at the two ends of the transport row.
+/// Play mode and queue, at the two ends of the transport row. The glyph is
+/// in the middle of its target, which reaches [_NowPlayingPageState._reach]
+/// into the gutter so the glyph lines up with the progress bar's ends.
 class _SideButton extends StatelessWidget {
   final String tooltip;
   final IconData icon;
   final bool active;
   final VoidCallback onPressed;
 
-  /// Where the glyph sits in its target, so the two line up with the edges
-  /// of the title and the progress bar.
-  final Alignment alignment;
-
   const _SideButton({
     required this.tooltip,
     required this.icon,
     required this.onPressed,
-    required this.alignment,
     this.active = false,
   });
 
@@ -845,8 +851,8 @@ class _SideButton extends StatelessWidget {
       tooltip: tooltip,
       onPressed: onPressed,
       padding: EdgeInsets.zero,
-      alignment: alignment,
-      constraints: const BoxConstraints.tightFor(width: 52, height: 60),
+      constraints: const BoxConstraints.tightFor(
+          width: 28 + 2 * _NowPlayingPageState._reach, height: 60),
       icon: Icon(
         icon,
         size: 28,

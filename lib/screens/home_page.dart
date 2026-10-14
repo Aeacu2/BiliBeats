@@ -350,25 +350,51 @@ class _SortButton extends StatelessWidget {
 
   const _SortButton({required this.library});
 
-  static const _labels = {
-    LibrarySort.recent: '最近下载',
-    LibrarySort.played: '最近播放',
-    LibrarySort.title: '歌名',
-    LibrarySort.artist: '歌手',
-  };
+  static const _options = [
+    (LibrarySort.recent, Icons.download_done_rounded, '最近下载'),
+    (LibrarySort.played, Icons.history_rounded, '最近播放'),
+    (LibrarySort.title, Icons.sort_by_alpha_rounded, '歌名'),
+    (LibrarySort.artist, Icons.person_outline_rounded, '歌手'),
+  ];
+
+  /// The order is chosen in the app's one kind of sheet, like every other
+  /// secondary choice.
+  void _choose(BuildContext context) {
+    showAppSheet<void>(
+      context,
+      builder: (sheet) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SheetTitle('排序'),
+          for (final (sort, icon, label) in _options)
+            SheetAction(
+              icon: icon,
+              label: label,
+              color: sort == library.sort ? AppColors.accent : null,
+              trailing: sort == library.sort
+                  ? const Icon(Icons.check_rounded,
+                      color: AppColors.accent, size: 22)
+                  : null,
+              onTap: () {
+                Haptics.selection();
+                Navigator.of(sheet).pop();
+                library.setSort(sort);
+              },
+            ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    return PopupMenuButton<LibrarySort>(
+    return IconButton(
       tooltip: '排序',
-      initialValue: library.sort,
-      onSelected: library.setSort,
+      onPressed: () => _choose(context),
       icon: const Icon(Icons.swap_vert_rounded,
           color: AppColors.textSecondary, size: 24),
-      itemBuilder: (context) => [
-        for (final entry in _labels.entries)
-          PopupMenuItem(value: entry.key, child: Text(entry.value)),
-      ],
     );
   }
 }

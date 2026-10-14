@@ -202,7 +202,23 @@ class AppTheme {
         color: AppColors.accent,
       ),
       textButtonTheme: TextButtonThemeData(
-        style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
+        style: TextButton.styleFrom(
+          foregroundColor: AppColors.textSecondary,
+          shape: const StadiumBorder(),
+          minimumSize: const Size(48, 48),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(shape: const StadiumBorder()),
+      ),
+      tooltipTheme: TooltipThemeData(
+        decoration: BoxDecoration(
+          color: AppColors.fieldFill,
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+          border: Border.all(color: AppColors.hairline),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        textStyle: AppTypography.caption.copyWith(color: AppColors.textPrimary),
       ),
       sliderTheme: const SliderThemeData(
         activeTrackColor: AppColors.accent,

@@ -306,7 +306,7 @@ class AudioDownloadService {
         completer.complete(path);
         return path;
       }
-      final result = await _download(track, dir, path);
+      final result = await _downloadPatiently(track, dir, path);
       completer.complete(result);
       return result;
     } catch (e, st) {
@@ -321,6 +321,59 @@ class AudioDownloadService {
       _inFlight.remove(id);
       _cancelled.remove(id);
     }
+  }
+
+  /// How long to wait before each further attempt at a download that
+  /// failed — about three minutes in all. Connections from a phone drop,
+  /// Bilibili's CDN refuses now and then and its links expire: most
+  /// failures are gone a few seconds later. Each attempt asks for a fresh
+  /// link and resumes what is already on disk ([_transfer]).
+  @visibleForTesting
+  static List<Duration> retryDelays = const [
+    Duration(seconds: 2),
+    Duration(seconds: 4),
+    Duration(seconds: 8),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+    Duration(seconds: 30),
+  ];
+
+  /// [_download], tried again after [retryDelays] until it works or the
+  /// failure is one that waiting does not cure.
+  static Future<String> _downloadPatiently(
+      Track track, String dir, String path) async {
+    for (var attempt = 0;; attempt++) {
+      try {
+        return await _download(track, dir, path);
+      } catch (e) {
+        if (attempt >= retryDelays.length || !_worthRetrying(e)) rethrow;
+        debugPrint('Download of ${track.id} failed ($e); '
+            'retrying in ${retryDelays[attempt].inSeconds}s');
+        await _pause(retryDelays[attempt], track.id);
+      }
+    }
+  }
+
+  /// Called off, or a disk that refused the write: neither gets better by
+  /// waiting.
+  static bool _worthRetrying(Object e) =>
+      e is! DownloadCancelled && e is! FileSystemException && e is! Error;
+
+  /// Waits [delay], cut short (with [DownloadCancelled]) if the listener
+  /// calls the download off meanwhile.
+  static Future<void> _pause(Duration delay, String id) async {
+    final until = DateTime.now().add(delay);
+    while (DateTime.now().isBefore(until)) {
+      if (_cancelled.contains(id)) throw const DownloadCancelled();
+      final left = until.difference(DateTime.now());
+      await Future<void>.delayed(left < const Duration(milliseconds: 250)
+          ? left
+          : const Duration(milliseconds: 250));
+    }
+    if (_cancelled.contains(id)) throw const DownloadCancelled();
   }
 
   static Future<String> _download(Track track, String dir, String path) async {

@@ -74,6 +74,38 @@ void main() {
     expect(now.rawTitle, t.rawTitle);
   });
 
+  group('asked about while it downloads', () {
+    test('is named on arrival without asking again', () async {
+      var asked = 0;
+      answer = () async {
+        asked++;
+        return const SongIdentity(title: '大鱼', artist: '周深', exact: true);
+      };
+      final t = video('early');
+      await TrackNaming.prepareNow(t);
+      expect(asked, 1);
+
+      await DatabaseService.saveDownloadedTrack(t);
+      await TrackNaming.nameNow(t);
+
+      expect(asked, 1);
+      expect(hintsAsked, 1);
+      expect((await stored(t)).title, '大鱼');
+    });
+
+    test('is asked again when it arrived changed', () async {
+      final t = video('early-part');
+      await TrackNaming.prepareNow(t);
+      // Stored as the first part of a multi-part video.
+      await DatabaseService.saveDownloadedTrack(
+          t.copyWith(title: '${t.rawTitle} - P1: 大鱼', duration: 180));
+      await TrackNaming.nameNow(t);
+
+      expect(hintsAsked, 2);
+      expect((await stored(t)).title, '大鱼');
+    });
+  });
+
   test('a song the listener named is never looked at', () async {
     final t = video('B').copyWith(title: 'mine', named: true, matcher: 0);
     await DatabaseService.saveDownloadedTrack(t);

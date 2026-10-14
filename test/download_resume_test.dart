@@ -223,6 +223,34 @@ void main() {
     expect(await downloaded(t), first);
   });
 
+  group('a failed attempt', () {
+    tearDown(() => AudioDownloadService.retryDelays = const []);
+
+    test('is tried again, resuming what it fetched', () async {
+      AudioDownloadService.retryDelays = const [Duration(milliseconds: 10)];
+      final t = track('retried');
+      server.cutAfter = 3000;
+
+      await AudioDownloadService.ensureDownloaded(t);
+
+      expect(server.ranges, [null, 'bytes=3000-']);
+      expect(await downloaded(t), first);
+    });
+
+    test('is given up on once the retries run out', () async {
+      AudioDownloadService.retryDelays = const [
+        Duration(milliseconds: 10),
+        Duration(milliseconds: 10),
+      ];
+      final t = track('dead');
+      server.body = const [1, 2, 3];
+
+      await expectLater(
+          AudioDownloadService.ensureDownloaded(t), throwsA(anything));
+      expect(server.ranges, hasLength(3));
+    });
+  });
+
   group('ids that are not file names', () {
     test('are recognised', () {
       expect(AudioDownloadService.isSafeKey('BV1xx411c7mD_p3'), isTrue);

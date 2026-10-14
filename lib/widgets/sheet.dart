@@ -245,6 +245,18 @@ Future<String?> promptForText(
         autofocus: true,
         style: AppTypography.body,
         onSubmitted: (value) => Navigator.pop(ctx, value),
+        // The same rounded, filled field as everywhere else.
+        decoration: InputDecoration(
+          isDense: true,
+          filled: true,
+          fillColor: AppColors.fieldFill,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppRadius.md),
+            borderSide: BorderSide.none,
+          ),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        ),
       ),
       actions: [
         TextButton(

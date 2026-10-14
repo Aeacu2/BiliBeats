@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/track.dart';
 import 'audio_download_service.dart';
+import 'track_naming.dart';
 
 /// A live snapshot of an in-flight download.
 ///
@@ -141,6 +142,8 @@ class DownloadManager {
     _tasks[track.id] = DownloadTask(track: track);
     _failed.remove(track.id);
     _notify(track.id);
+    // Which song it is is looked up alongside the audio, not after it.
+    TrackNaming.prepare(track);
     try {
       await AudioDownloadService.ensureDownloaded(track);
     } on DownloadCancelled {
