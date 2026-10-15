@@ -65,7 +65,9 @@ class _PlaybackQueueSheetState extends State<PlaybackQueueSheet> {
               '播放队列',
               detail: snapshot.tracks.isEmpty
                   ? null
-                  : '${snapshot.currentIndex + 1} / ${snapshot.tracks.length}',
+                  : snapshot.currentIndex >= 0
+                      ? '${snapshot.currentIndex + 1} / ${snapshot.tracks.length}'
+                      : '${snapshot.tracks.length} 首',
             ),
             Expanded(
               child: snapshot.tracks.isEmpty

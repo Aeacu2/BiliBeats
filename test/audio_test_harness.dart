@@ -43,6 +43,22 @@ class _SelectiveClient implements HttpClient {
   }
 
   @override
+  Future<HttpClientRequest> postUrl(Uri url) {
+    if (url.host == '127.0.0.1' || url.host == 'localhost') {
+      return _r.postUrl(url);
+    }
+    throw const SocketException('external network disabled in tests');
+  }
+
+  @override
+  Future<HttpClientRequest> openUrl(String method, Uri url) {
+    if (url.host == '127.0.0.1' || url.host == 'localhost') {
+      return _r.openUrl(method, url);
+    }
+    throw const SocketException('external network disabled in tests');
+  }
+
+  @override
   set connectionTimeout(Duration? value) {
     if (value != null) _r.connectionTimeout = value;
   }

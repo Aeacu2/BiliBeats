@@ -207,6 +207,11 @@ void main() {
     await shot(tester, 'home_artists');
     await tester.tap(find.byTooltip('设置'));
     await shot(tester, 'settings');
+    await tester.tap(find.text('下载管理'));
+    await settle(tester);
+    await shot(tester, 'downloads');
+    await tester.tapAt(const Offset(195, 60));
+    await settle(tester);
     await finish(tester, handler);
   });
 
@@ -251,6 +256,14 @@ void main() {
     await settle(tester);
     await tester.tap(find.text('深夜循环'));
     await shot(tester, 'playlist');
+    await tester.tap(find.descendant(
+        of: find.byType(SliverAppBar), matching: find.byTooltip('更多')));
+    await settle(tester);
+    await tester.tap(find.text('编辑'));
+    await settle(tester);
+    await shot(tester, 'playlist_edit');
+    await tester.tap(find.text('完成'));
+    await settle(tester);
     await tester.pageBack();
     await settle(tester);
     await tester.tap(find.text('歌手'));
