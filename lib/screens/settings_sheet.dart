@@ -171,23 +171,26 @@ class _SettingsSheetState extends State<SettingsSheet>
         // Optional: everything works without it; logged in, subtitles
         // help with names, lyrics and trims, and favourites can be
         // imported. Never asked for anywhere else.
-        ValueListenableBuilder<BiliAccount?>(
-          valueListenable: BiliAccountStore.current,
-          builder: (context, account, _) => SheetAction(
-            icon: Icons.account_circle_outlined,
-            label: '哔哩哔哩账号',
-            trailing: Text(
-              account == null
-                  ? '未登录'
-                  : (account.name.isEmpty ? '已登录' : account.name),
-              style: AppTypography.caption,
-            ),
-            onTap: () {
-              final navigator = Navigator.of(context);
-              navigator.pop();
-              unawaited(BiliAccountSheet.show(navigator.context));
-            },
-          ),
+        ValueListenableBuilder<int>(
+          valueListenable: BiliAccountStore.changes,
+          builder: (context, revision, _) {
+            final account = BiliAccountStore.current.value;
+            return SheetAction(
+              icon: Icons.account_circle_outlined,
+              label: '哔哩哔哩账号',
+              trailing: Text(
+                account == null
+                    ? (BiliAccountStore.expired ? '登录已失效' : '未登录')
+                    : (account.name.isEmpty ? '已登录' : account.name),
+                style: AppTypography.caption,
+              ),
+              onTap: () {
+                final navigator = Navigator.of(context);
+                navigator.pop();
+                unawaited(BiliAccountSheet.show(navigator.context));
+              },
+            );
+          },
         ),
         SheetAction(
           icon: Icons.history_rounded,

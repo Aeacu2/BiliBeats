@@ -19,6 +19,7 @@ import 'track_sheet.dart';
 class SongTile extends StatelessWidget {
   final Track track;
   final VoidCallback? onTap;
+  final bool showActions;
 
   /// Leading widget override (e.g. a selection check in edit mode).
   final Widget? leading;
@@ -39,6 +40,7 @@ class SongTile extends StatelessWidget {
     super.key,
     required this.track,
     this.onTap,
+    this.showActions = true,
     this.leading,
     this.trailing,
     this.queue,
@@ -57,7 +59,9 @@ class SongTile extends StatelessWidget {
         type: MaterialType.transparency,
         child: InkWell(
           onTap: onTap,
-          onLongPress: () => TrackSheet.show(context, track, queue: queue),
+          onLongPress: showActions
+              ? () => TrackSheet.show(context, track, queue: queue)
+              : null,
           borderRadius: BorderRadius.circular(AppRadius.md),
           child: SizedBox(
             height: extent,

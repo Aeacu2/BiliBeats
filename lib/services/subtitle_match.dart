@@ -151,7 +151,9 @@ class SubtitleMatcher {
     }
     if (best == null ||
         support < SubtitleMatch.minMatched ||
-        support * 2 < candidates.length) {
+        support / candidates.length < 0.75 ||
+        !candidates.first.shifts.any((x) => (x - best!).abs() <= window) ||
+        !candidates.last.shifts.any((x) => (x - best!).abs() <= window)) {
       return null;
     }
     final agreeing = <double>[
@@ -187,11 +189,12 @@ class SubtitleMatcher {
       for (final l in subtitles.lines)
         if (normalize(l.text).length >= 2) normalize(l.text),
     ];
-    if (lines.length < 8) return false;
+    if (lines.length < 8 || lines.toSet().length < 6) return false;
     // Talk runs in long sentences; a song in short lines.
     final average = lines.fold<int>(0, (n, l) => n + l.length) / lines.length;
     if (average > 16) return false;
-    if (!subtitles.ai) return true;
+    // Human captions can be speech too: short lines alone do not establish
+    // singing. Require the repeated phrases of a song for either source.
     final grams = [for (final l in lines) _grams(l)];
     var repeated = 0;
     for (var i = 0; i < grams.length; i++) {

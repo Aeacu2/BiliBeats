@@ -63,8 +63,31 @@ class BilibiliSdk {
     });
   }
 
+  @visibleForTesting
+  static Future<String?> Function(String url, {String? cookies})? requestWith;
+
   static Future<String?> _httpGet(String rawUrl, {String? cookies}) async {
+    final account = BiliAccountStore.current.value;
+    final body = await _request(rawUrl, cookies: cookies);
+    if (body != null &&
+        account != null &&
+        cookies?.contains(account.cookies) == true) {
+      try {
+        final response = jsonDecode(body);
+        if (response is Map && response['code'] == -101) {
+          await BiliAccountStore.expire(account);
+        }
+      } on FormatException catch (_) {
+        // A non-JSON response is not evidence that the login expired.
+      }
+    }
+    return body;
+  }
+
+  static Future<String?> _request(String rawUrl, {String? cookies}) async {
     try {
+      final override = requestWith;
+      if (override != null) return await override(rawUrl, cookies: cookies);
       final req = await _httpClient
           .getUrl(Uri.parse(rawUrl))
           .timeout(const Duration(seconds: 10));
@@ -83,10 +106,11 @@ class BilibiliSdk {
         },
       );
       if (res.statusCode == 200) {
-        return await res
+        final body = await res
             .transform(utf8.decoder)
             .join()
             .timeout(const Duration(seconds: 10));
+        return body;
       } else {
         await res.listen((_) {}).cancel();
         debugPrint('Bilibili HTTP ${res.statusCode}');
@@ -380,6 +404,7 @@ class BilibiliSdk {
   // ---------------------------------------------------------------------------
 
   static final Map<String, Subtitles?> _subtitlesMemo = {};
+  static BiliAccount? _subtitleAccount;
 
   /// The subtitles of one part of [bvid]: the uploader's own when there are
   /// any, else Bilibili's speech recognition; Chinese first. Null when the
@@ -391,7 +416,12 @@ class BilibiliSdk {
   static Future<Subtitles?> fetchSubtitles(String bvid, {int cid = 0}) async {
     if (bvid.isEmpty) return null;
     // Bilibili gives subtitles to logged-in viewers only.
-    final account = await BiliAccountStore.cookies();
+    await BiliAccountStore.ensureLoaded();
+    final account = BiliAccountStore.current.value;
+    if (!identical(account, _subtitleAccount)) {
+      _subtitlesMemo.clear();
+      _subtitleAccount = account;
+    }
     if (account == null) return null;
     final key = '$bvid/$cid';
     if (_subtitlesMemo.containsKey(key)) return _subtitlesMemo[key];
@@ -418,6 +448,7 @@ class BilibiliSdk {
           ai: isAiSubtitle(chosen),
         );
       }
+      if (!identical(BiliAccountStore.current.value, account)) return null;
       if (_subtitlesMemo.length > 200) _subtitlesMemo.clear();
       return _subtitlesMemo[key] = found;
     } catch (e) {
@@ -449,8 +480,7 @@ class BilibiliSdk {
     }
 
     var data = _dataOf(await signed());
-    data ??= _dataOf(await _httpGet(
-        '$_baseUrl/x/player/v2?bvid=$bvid&cid=$cid',
+    data ??= _dataOf(await _httpGet('$_baseUrl/x/player/v2?bvid=$bvid&cid=$cid',
         cookies: cookies));
     if (data is! Map) return null;
     final subtitle = data['subtitle'];
@@ -494,8 +524,8 @@ class BilibiliSdk {
         final from = item['from'], to = item['to'];
         final text = '${item['content'] ?? ''}'.trim();
         if (from is! num || to is! num || text.isEmpty) continue;
-        lines.add(SubtitleLine(
-            from: from.toDouble(), to: to.toDouble(), text: text));
+        lines.add(
+            SubtitleLine(from: from.toDouble(), to: to.toDouble(), text: text));
       }
       lines.sort((a, b) => a.from.compareTo(b.from));
       return Subtitles(language: language, ai: ai, lines: lines);
@@ -552,8 +582,8 @@ class BilibiliSdk {
   /// Starts a QR login: the address to show as a code, and the key to poll
   /// with. Null when Bilibili could not be asked.
   static Future<({String url, String key})?> qrLoginStart() async {
-    final data = _dataOf(await _httpGet(
-        '$_passport/x/passport-login/web/qrcode/generate'));
+    final data = _dataOf(
+        await _httpGet('$_passport/x/passport-login/web/qrcode/generate'));
     if (data is! Map) return null;
     final url = data['url'], key = data['qrcode_key'];
     if (url is! String || key is! String || url.isEmpty) return null;
@@ -563,9 +593,9 @@ class BilibiliSdk {
   /// Where a QR login stands: waiting, scanned, expired, or done with the
   /// session's cookies. Null when Bilibili could not be asked.
   static Future<QrLogin?> qrLoginPoll(String key) async {
-    final data = _dataOf(await _httpGet(
-        '$_passport/x/passport-login/web/qrcode/poll'
-        '?qrcode_key=${Uri.encodeQueryComponent(key)}'));
+    final data =
+        _dataOf(await _httpGet('$_passport/x/passport-login/web/qrcode/poll'
+            '?qrcode_key=${Uri.encodeQueryComponent(key)}'));
     return parseQrPoll(data);
   }
 
@@ -583,7 +613,8 @@ class BilibiliSdk {
         // The cookies come back as the query of a cross-domain address, as
         // written in a cookie (still percent-encoded).
         final url = '${data['url'] ?? ''}';
-        final query = url.contains('?') ? url.substring(url.indexOf('?') + 1) : '';
+        final query =
+            url.contains('?') ? url.substring(url.indexOf('?') + 1) : '';
         final cookies = BiliAccount.sessionCookies(query.replaceAll('&', ';'));
         if (!BiliAccount.hasSession(cookies)) return null;
         return QrLogin(QrLoginState.done, cookies);
@@ -611,22 +642,35 @@ class BilibiliSdk {
     ];
   }
 
-  /// Every video in a favourites folder, newest first (up to [max]). Null
-  /// when the first page could not be fetched.
-  static Future<List<Track>?> favoriteTracks(int folderId,
-      {int max = 1000}) async {
-    final cookies = await _withAccount();
-    final out = <Track>[];
-    for (var page = 1; out.length < max; page++) {
-      final data = _dataOf(await _httpGet(
-          '$_baseUrl/x/v3/fav/resource/list'
-          '?media_id=$folderId&pn=$page&ps=20&platform=web',
-          cookies: cookies));
-      if (data is! Map) return page == 1 ? null : out;
-      out.addAll(parseFavoritePage(data));
-      if (data['has_more'] != true) break;
+  /// One complete favourites page. A failed later page is never mistaken
+  /// for the end of a folder; callers can retry from the same page.
+  static Future<({List<Track> tracks, bool hasMore})> favoritePage(
+      int folderId, int page) async {
+    final data = _dataOf(await _httpGet(
+        '$_baseUrl/x/v3/fav/resource/list'
+        '?media_id=$folderId&pn=$page&ps=20&platform=web',
+        cookies: await _withAccount()));
+    if (data is! Map || data['medias'] is! List) {
+      throw const BiliApiException('收藏夹读取失败，请重试');
     }
-    return out;
+    if ((data['medias'] as List).isEmpty && data['has_more'] == true) {
+      throw const BiliApiException('收藏夹返回不完整，请重试');
+    }
+    return (tracks: parseFavoritePage(data), hasMore: data['has_more'] == true);
+  }
+
+  static Future<List<Track>?> favoriteTracks(int folderId, {int? max}) async {
+    final out = <Track>[];
+    try {
+      for (var page = 1; max == null || out.length < max; page++) {
+        final result = await favoritePage(folderId, page);
+        out.addAll(result.tracks);
+        if (!result.hasMore) break;
+      }
+      return max == null ? out : out.take(max).toList();
+    } on BiliApiException catch (_) {
+      return null;
+    }
   }
 
   @visibleForTesting
@@ -660,19 +704,52 @@ class BilibiliSdk {
 
   /// Music zone names Bilibili gives in a watch history (both the old
   /// partitions and the 2025 ones).
-  static final RegExp _musicZoneName = RegExp(
-      r'音乐|翻唱|演奏|VOCALOID|UTAU|MV|电音|说唱');
+  static final RegExp _musicZoneName =
+      RegExp(r'音乐|翻唱|演奏|VOCALOID|UTAU|MV|电音|说唱');
 
   /// Songs the account has watched lately, newest first: videos from the
   /// music zones only. Null when it could not be fetched (or nobody is
   /// logged in).
-  static Future<List<Track>?> watchHistory({int max = 60}) async {
+  static Future<List<Track>?> watchHistory(
+      {int max = 30, int maxPages = 4}) async {
+    if (max <= 0) return const [];
     if (await BiliAccountStore.cookies() == null) return null;
-    final data = _dataOf(await _httpGet(
-        '$_baseUrl/x/web-interface/history/cursor?ps=30&type=archive',
-        cookies: await _withAccount()));
-    if (data is! Map) return null;
-    return parseHistory(data).take(max).toList();
+    final out = <Track>[];
+    final seen = <String>{};
+    final cursors = <String>{};
+    var cursor = '';
+    final account = BiliAccountStore.current.value;
+    for (var page = 0; page < maxPages && out.length < max; page++) {
+      final data = _dataOf(await _httpGet(
+          '$_baseUrl/x/web-interface/history/cursor?ps=30&type=archive$cursor',
+          cookies: await _withAccount()));
+      if (!identical(account, BiliAccountStore.current.value)) return null;
+      if (data is! Map) return page == 0 ? null : out;
+      for (final track in parseHistory(data)) {
+        if (seen.add(track.id)) out.add(track);
+      }
+      final list = data['list'];
+      final next = data['cursor'];
+      if (list is! List || list.isEmpty || next is! Map || next['max'] == 0) {
+        break;
+      }
+      if (next['max'] is! num || next['view_at'] is! num) break;
+      cursor = '&max=${next['max']}&view_at=${next['view_at']}'
+          '&business=${Uri.encodeQueryComponent('${next['business'] ?? 'archive'}')}';
+      if (!cursors.add(cursor)) break;
+    }
+    return out.take(max).toList();
+  }
+
+  /// Ignore accidental starts. -1 means completed; older responses may
+  /// omit progress, in which case the history remains a weak taste signal.
+  static bool _engagedHistory(Map item) {
+    final progress = item['progress'];
+    if (progress is! num || progress == -1) return true;
+    if (progress <= 0) return false;
+    final duration = item['duration'];
+    return progress >= 30 ||
+        (duration is num && duration > 0 && progress / duration >= 0.5);
   }
 
   @visibleForTesting
@@ -685,6 +762,7 @@ class BilibiliSdk {
             item['history'] is Map &&
             item['history']['bvid'] is String &&
             (item['history']['bvid'] as String).isNotEmpty &&
+            _engagedHistory(item) &&
             _musicZoneName.hasMatch('${item['tag_name'] ?? ''}') &&
             !RegExp(r'教学|乐评|盘点').hasMatch('${item['tag_name']}'))
           Track(

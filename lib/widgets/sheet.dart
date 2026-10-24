@@ -81,7 +81,11 @@ class SheetTitle extends StatelessWidget {
         height: 48,
         child: Row(
           children: [
-            Text(title, style: AppTypography.title),
+            Flexible(
+                child: Text(title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTypography.title)),
             if (detail != null) ...[
               const SizedBox(width: 10),
               Expanded(

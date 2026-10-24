@@ -60,7 +60,7 @@ void main() {
       expect(profile.seedsFor(3), isEmpty);
     });
 
-    test('music watched on Bilibili seeds, and is not offered back', () {
+    test('music watched on Bilibili seeds without excluding it forever', () {
       final profile = TasteProfile.build(
         favourites: [],
         history: [],
@@ -68,7 +68,7 @@ void main() {
         searches: [],
       );
       expect(profile.seedsFor(1).single.bvid, 'BVwatched');
-      expect(profile.knownVideos, contains('BVwatched'));
+      expect(profile.knownVideos, isNot(contains('BVwatched')));
     });
 
     test('search history alone is something to go on', () {
@@ -108,8 +108,8 @@ void main() {
 
     test('a song beside several of theirs ranks above one beside one', () {
       final other = t('BVother', '光年之外', '邓紫棋', named: true);
-      final both =
-          TasteProfile.build(favourites: [seed, other], history: [], searches: []);
+      final both = TasteProfile.build(
+          favourites: [seed, other], history: [], searches: []);
       final shared = t('BVshared', '平凡之路', 'B', named: true);
       final out = RecommendationEngine.rank(both, related: {
         seed: listed([t('BVonly', '起风了', 'A', named: true), shared]),
@@ -155,7 +155,9 @@ void main() {
       final out = rank([
         t('BV1', '起风了', 'A', named: true),
         t('BV2', '平凡之路', 'B', named: true),
-      ], excludeIds: {'BV1_p1'});
+      ], excludeIds: {
+        'BV1_p1'
+      });
       expect(out.map((x) => x.bvid), ['BV2']);
     });
 

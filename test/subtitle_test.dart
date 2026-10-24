@@ -58,6 +58,25 @@ void main() {
       expect(match.offset, closeTo(-3, 0.01));
     });
 
+    test('a live performance with drifting timing is not globally shifted', () {
+      final subtitles = Subtitles(language: 'zh', ai: false, lines: [
+        for (var i = 0; i < daYu.length; i++)
+          SubtitleLine(
+              from: 10.0 + i * 4 + (i < 8 ? 2 : 9),
+              to: 13.0 + i * 4 + (i < 8 ? 2 : 9),
+              text: daYu[i]),
+      ]);
+      final match = SubtitleMatcher.compare(subtitles, song(daYu));
+      expect(match.confirms, isTrue);
+      expect(match.offset, isNull);
+    });
+
+    test('repeated generic captions do not become lyrics', () {
+      expect(
+          SubtitleMatcher.looksSung(heard(List.filled(20, '谢谢大家'), ai: false)),
+          isFalse);
+    });
+
     test('another song is not confirmed', () {
       final other = song([
         '我曾经跨过山和大海',
@@ -106,8 +125,12 @@ void main() {
         '我们下期再见拜拜',
       ];
       expect(SubtitleMatcher.looksSung(heard(talk)), isFalse);
-      // The uploader's own captions on a short-lined video are lyrics.
-      expect(SubtitleMatcher.looksSung(heard(daYu, ai: false)), isTrue);
+      // Short human captions alone are not enough evidence of singing.
+      expect(SubtitleMatcher.looksSung(heard(daYu, ai: false)), isFalse);
+      expect(
+          SubtitleMatcher.looksSung(
+              heard([...daYu, ...daYu.take(4)], ai: false)),
+          isTrue);
     });
   });
 

@@ -75,7 +75,10 @@ class TrackNaming {
   /// when there is new evidence to ask with (a login brings subtitles).
   static Future<void> retryUnnamed() async {
     _attempted.clear();
+    _early.clear();
     await DatabaseService.setPref(_gaveUpPref, null);
+    final track = _handler?.nowPlaying.value;
+    if (track != null) autoName(track);
   }
 
   /// Runs the naming of [track] now (what [autoName] queues).

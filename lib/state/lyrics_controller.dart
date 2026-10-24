@@ -7,6 +7,7 @@ import '../models/subtitles.dart';
 import '../models/track.dart';
 import '../services/audio_player_handler.dart';
 import '../services/bilibili_sdk.dart';
+import '../services/bili_account.dart';
 import '../services/lyrics_engine.dart';
 import '../services/lyrics_store.dart';
 import '../services/subtitle_match.dart';
@@ -37,11 +38,25 @@ class LyricsController {
     this._handler, {
     Future<Subtitles?> Function(String bvid, {int cid})? subtitles,
   }) : _subtitles = subtitles ?? BilibiliSdk.fetchSubtitles {
+    _account = BiliAccountStore.current.value;
+    BiliAccountStore.changes.addListener(_accountChanged);
     _handler.nowPlaying.addListener(_onTrackChanged);
     _onTrackChanged();
   }
 
   final BiliBeatsAudioHandler _handler;
+  BiliAccount? _account;
+
+  void _accountChanged() {
+    final account = BiliAccountStore.current.value;
+    if (identical(account, _account)) return;
+    _account = account;
+    _misses.clear();
+    final generation = ++_generation;
+    final track = _handler.currentTrack;
+    if (account == null || track == null || state.value.lyrics.pinned) return;
+    unawaited(_load(track, generation, recheckSubtitles: true));
+  }
 
   /// The playing video's subtitles (when logged in to Bilibili): lyrics of
   /// last resort, and the clock automatic lyrics are set against.
@@ -58,6 +73,7 @@ class LyricsController {
   final Map<String, String> _misses = {};
 
   void dispose() {
+    BiliAccountStore.changes.removeListener(_accountChanged);
     ++_generation;
     _handler.nowPlaying.removeListener(_onTrackChanged);
     state.dispose();
@@ -211,11 +227,12 @@ class LyricsController {
   /// it or behind (an intro, a live take). Where the video's subtitles
   /// hear enough of the lyrics at one steady shift, the lyrics are moved
   /// by it — as the automatic answer, which a calibration still overrides.
-  Future<void> _setAgainstVideo(Track track, Lyrics lyrics, int revision,
-      bool Function() owns) async {
+  Future<void> _setAgainstVideo(
+      Track track, Lyrics lyrics, int revision, bool Function() owns) async {
     if (!lyrics.synced || lyrics.source == 'bilibili') return;
     final subtitles = await _subtitles(track.bvid, cid: track.cid);
     if (subtitles == null || subtitles.isEmpty) return;
+    if (!owns()) return;
     final match = SubtitleMatcher.compare(subtitles, lyrics.lines);
     final offset = match.offset;
     if (!match.confirms || offset == null) return;
@@ -230,7 +247,7 @@ class LyricsController {
   }
 
   Future<void> _load(Track track, int generation,
-      {bool renamed = false}) async {
+      {bool renamed = false, bool recheckSubtitles = false}) async {
     final revision = LyricsStore.revisionOf(track.id);
     bool owns() =>
         generation == _generation &&
@@ -250,6 +267,9 @@ class LyricsController {
           stored.isNotEmpty &&
           (stored.pinned || (!renamed && _matches(stored, track)))) {
         publish(stored);
+        if (recheckSubtitles && !stored.pinned) {
+          await _setAgainstVideo(track, stored, revision, owns);
+        }
         return;
       }
       if (_misses[track.id] == _nameKeyOf(track)) {

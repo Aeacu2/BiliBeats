@@ -117,6 +117,9 @@ class DownloadManager {
 
   /// Calls off a download in progress.
   void cancelDownload(String trackId) {
+    if (_pendingIsDownloadedCheck.contains(trackId)) {
+      _cancelledPending.add(trackId);
+    }
     final task = _tasks[trackId];
     if (task != null) AudioDownloadService.cancel(task.track);
   }
@@ -132,9 +135,16 @@ class DownloadManager {
 
   // Guards double-tap while isDownloaded check is in flight.
   final Set<String> _pendingIsDownloadedCheck = {};
+  final Set<String> _cancelledPending = {};
+  final Map<String, Future<void>> _downloads = {};
 
   /// Starts downloading [track] (idempotent). Observe progress via [updates].
-  Future<void> startDownload(Track track) async {
+  Future<void> startDownload(Track track) =>
+      _downloads[track.id] ??= _startDownload(track).whenComplete(() {
+        _downloads.remove(track.id);
+      });
+
+  Future<void> _startDownload(Track track) async {
     if (_tasks.containsKey(track.id)) return;
     if (_pendingIsDownloadedCheck.contains(track.id)) return;
     _pendingIsDownloadedCheck.add(track.id);
@@ -145,6 +155,7 @@ class DownloadManager {
       alreadyDownloaded = false;
     }
     _pendingIsDownloadedCheck.remove(track.id);
+    if (_cancelledPending.remove(track.id)) return;
     // If another call claimed the slot while we checked, bail.
     if (_tasks.containsKey(track.id)) return;
     if (alreadyDownloaded) return;

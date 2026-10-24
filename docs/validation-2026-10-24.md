@@ -66,3 +66,24 @@ These live failures remain unresolved; they are not reported as passing.
   cookie store. Browser-based authenticated smoke checks succeeded, but a session
   available to the benchmark process is still required for the bulk measurement.
   Subtitle thresholds remain at 6 matched lines, 0.5 precision and 0.3 coverage.
+
+## v0.3.0 follow-up
+
+The subsequent product review was implemented: selective favourites import with
+part expansion, stable account/folder source IDs, resumable folder reads, optional
+local downloads and recommendation seeds, persistent queue controls, account-scoped
+history opt-in and caches, bounded history pagination, accidental-view filtering,
+current-song refresh after login, and stricter subtitle fallback/timing checks.
+
+- Final offline suite: 328 tests passed.
+- Static analysis: no issues.
+- Render checks: all four passed, with the new account render fixtures in a
+  separate isolate (`test/render_account_screens.dart`). Inspected the selection
+  and queue images.
+- Live recheck: 30 passed, one failed. The pre-existing `晴天` catalogue recognition
+  case above still fails; the surveyed-video test passed on this run. One Bilibili
+  request still logged HTTP 412. Live tests are excluded from CI by repository policy.
+- Recognition confirmation thresholds were not empirically retuned. The missing
+  held-out predictions and benchmark login remain dependencies for that measurement.
+- Physical-device login and playback testing is deferred to the user's phone after
+  the requested v0.3.0 release; local tests do not claim to replace it.

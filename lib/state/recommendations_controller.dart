@@ -4,10 +4,38 @@ import 'package:flutter/foundation.dart';
 
 import '../models/track.dart';
 import '../services/recommendation_engine.dart';
+import '../services/bili_account.dart';
 
 /// "为你推荐" in search: Bilibili tracks picked from the listener's
 /// favorites, history and searches, paged for infinite scroll.
 class RecommendationsController extends ChangeNotifier {
+  RecommendationsController() {
+    BiliAccountStore.changes.addListener(_accountChanged);
+  }
+
+  void _accountChanged() {
+    final reload = _loaded || _loading;
+    ++_pass;
+    _tracks = const [];
+    _seen.clear();
+    _loaded = false;
+    _loading = false;
+    _loadingMore = false;
+    _failed = false;
+    _reachedEnd = false;
+    _lastFailure = null;
+    RecommendationEngine.clearAccountData();
+    notifyListeners();
+    if (reload) unawaited(refresh());
+  }
+
+  @override
+  void dispose() {
+    ++_pass;
+    BiliAccountStore.changes.removeListener(_accountChanged);
+    super.dispose();
+  }
+
   List<Track> _tracks = const [];
   bool _loading = false;
   bool _loaded = false;

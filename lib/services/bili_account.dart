@@ -76,7 +76,26 @@ class BiliAccountStore {
   static const String _file = 'bilibeat_account.json';
 
   static final ValueNotifier<BiliAccount?> current = ValueNotifier(null);
+  static final ValueNotifier<int> changes = ValueNotifier(0);
+  static bool expired = false;
   static Future<void>? _loading;
+
+  static void notifyChanged() => changes.value++;
+
+  static Future<bool> historyEnabled() async {
+    final account = current.value;
+    if (account == null) return false;
+    return await DatabaseService.getPref(
+            'biliHistoryRecommendations:${account.mid}') ==
+        true;
+  }
+
+  static Future<void> setHistoryEnabled(BiliAccount account, bool value) async {
+    if (!identical(current.value, account)) return;
+    await DatabaseService.setPref(
+        'biliHistoryRecommendations:${account.mid}', value);
+    notifyChanged();
+  }
 
   static Future<void> ensureLoaded() => _loading ??= _load();
 
@@ -84,8 +103,10 @@ class BiliAccountStore {
     try {
       final text = await DatabaseService.readStoreFile(_file);
       if (text == null) return;
-      current.value = BiliAccount.fromMap(
-          DatabaseService.unwrapStorePayload(jsonDecode(text)));
+      final payload = DatabaseService.unwrapStorePayload(jsonDecode(text));
+      expired = payload is Map && payload['expired'] == true;
+      current.value = BiliAccount.fromMap(payload);
+      notifyChanged();
     } catch (e) {
       debugPrint('Account not loaded: $e');
       _loading = null;
@@ -99,12 +120,27 @@ class BiliAccountStore {
   }
 
   static Future<void> save(BiliAccount account) async {
-    current.value = account;
+    await ensureLoaded();
     await DatabaseService.writeStoreFile(_file, account.toMap());
+    expired = false;
+    current.value = account;
+    notifyChanged();
   }
 
   static Future<void> logOut() async {
-    current.value = null;
+    await ensureLoaded();
     await DatabaseService.writeStoreFile(_file, const <String, dynamic>{});
+    expired = false;
+    current.value = null;
+    notifyChanged();
+  }
+
+  /// An old request must never expire a newer login.
+  static Future<void> expire(BiliAccount account) async {
+    if (!identical(current.value, account)) return;
+    expired = true;
+    current.value = null;
+    notifyChanged();
+    await DatabaseService.writeStoreFile(_file, const {'expired': true});
   }
 }

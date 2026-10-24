@@ -4,6 +4,7 @@ import 'package:bilibeats/models/subtitles.dart';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/audio_download_service.dart';
 import 'package:bilibeats/services/audio_player_handler.dart';
+import 'package:bilibeats/services/bili_account.dart';
 import 'package:bilibeats/services/lyrics_engine.dart';
 import 'package:bilibeats/state/lyrics_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -129,6 +130,29 @@ void main() {
     expect(state.lyrics.lines.first.time, 10);
 
     controller.dispose();
+    await handler.dispose();
+  });
+  test('logging in aligns already cached automatic lyrics for the current song',
+      () async {
+    await BiliAccountStore.logOut();
+    catalogue(daYu);
+    final t = await downloaded('ls-login-refresh');
+    final handler = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(), manageAudioSession: false);
+    final controller = LyricsController(handler,
+        subtitles: (bvid, {cid = 0}) async =>
+            BiliAccountStore.current.value == null
+                ? null
+                : heard(daYu, start: 13));
+    await handler.playTrack(t, queue: [t]);
+    await settled(controller, (s) => s.status == LyricsStatus.ready);
+    expect(controller.state.value.lyrics.offset, 0);
+    await BiliAccountStore.save(
+        const BiliAccount(cookies: 'SESSDATA=test', mid: 1, name: 'test'));
+    await settled(controller, (s) => s.lyrics.offset == 3);
+    expect(controller.state.value.lyrics.offset, 3);
+    controller.dispose();
+    await BiliAccountStore.logOut();
     await handler.dispose();
   });
 }

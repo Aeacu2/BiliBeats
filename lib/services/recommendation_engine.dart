@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import '../models/play_stat.dart';
 import '../models/track.dart';
 import 'bilibili_sdk.dart';
+import 'bili_account.dart';
+import 'bili_favorites.dart';
 import 'database_service.dart';
 import 'lyrics_engine.dart';
 import 'track_credit.dart';
@@ -100,7 +102,9 @@ class TasteProfile {
     for (var i = 0; i < lately.length; i++) {
       absorb(lately[i], watchedWeight * (1 - 0.75 * i / _historyDepth));
     }
-    for (final t in [...favourites, ...history, ...downloaded, ...watched]) {
+    // Watching elsewhere can suggest a song worth hearing here. Only
+    // songs already kept or played in this app are excluded as familiar.
+    for (final t in [...favourites, ...history, ...downloaded]) {
       videos.add(t.bvid);
       final key = songKey(t);
       if (key.isNotEmpty) songs.add(key);
@@ -131,9 +135,8 @@ class TasteProfile {
   /// name once named, else the title as the parser reads it, without case,
   /// spaces or punctuation.
   static String songKey(Track t) {
-    final title = t.isNamed
-        ? t.title
-        : _songTitles[t.rawTitle] ??= _parse(t.rawTitle);
+    final title =
+        t.isNamed ? t.title : _songTitles[t.rawTitle] ??= _parse(t.rawTitle);
     return title.toLowerCase().replaceAll(_notWord, '');
   }
 
@@ -285,18 +288,41 @@ class RecommendationEngine {
 
   static List<Track> _watchedCache = const [];
   static DateTime? _watchedAt;
+  static BiliAccount? _watchedAccount;
+
+  @visibleForTesting
+  static Future<List<Track>?> Function() historyWith = BilibiliSdk.watchHistory;
+
+  static void clearAccountData() {
+    _watchedCache = const [];
+    _watchedAt = null;
+    _watchedAccount = null;
+  }
 
   /// The account's recent music on Bilibili, asked at most every ten
   /// minutes; nothing when not logged in or not reachable.
-  static Future<List<Track>> _watched() async {
+  @visibleForTesting
+  static Future<List<Track>> accountHistory() async {
+    await BiliAccountStore.ensureLoaded();
+    final account = BiliAccountStore.current.value;
+    final enabled = await BiliAccountStore.historyEnabled();
+    if (!identical(_watchedAccount, account) || !enabled || account == null) {
+      clearAccountData();
+      _watchedAccount = account;
+    }
+    if (!enabled || account == null) return const [];
     final at = _watchedAt;
     if (at != null && DateTime.now().difference(at).inMinutes < 10) {
       return _watchedCache;
     }
-    final fresh = await BilibiliSdk.watchHistory();
-    if (fresh == null) return _watchedCache;
+    final fresh = await historyWith();
+    if (!identical(BiliAccountStore.current.value, account) ||
+        !await BiliAccountStore.historyEnabled()) {
+      return const [];
+    }
+    // Back off on failures too, but only reuse data from this account.
     _watchedAt = DateTime.now();
-    return _watchedCache = fresh;
+    return _watchedCache = fresh ?? _watchedCache;
   }
 
   /// Returns songs for the listener, best first. Empty when there is
@@ -308,12 +334,20 @@ class RecommendationEngine {
     int page = 1,
     Set<String> excludeIds = const {},
   }) async {
+    await BiliAccountStore.ensureLoaded();
+    final account = BiliAccountStore.current.value;
+    final remoteFavorites = account == null
+        ? const <Track>[]
+        : await BiliFavorites.recommendationTracks(account.mid);
     final profile = TasteProfile.build(
-      favourites: (await DatabaseService.getFavoritesPlaylist()).tracks,
+      favourites: [
+        ...(await DatabaseService.getFavoritesPlaylist()).tracks,
+        ...remoteFavorites
+      ],
       history: await DatabaseService.getRecentlyPlayed(),
       downloaded: await DatabaseService.getDownloadedTracks(),
       plays: await DatabaseService.getPlayStats(),
-      watched: await _watched(),
+      watched: await accountHistory(),
       searches: await DatabaseService.getSearchHistory(),
     );
     if (profile.isEmpty) return const [];

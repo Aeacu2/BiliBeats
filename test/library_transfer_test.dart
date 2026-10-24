@@ -161,4 +161,117 @@ void main() {
     expect(fetched.toSet(), {tracks[0].id, tracks[1].id});
     expect(LibraryTransfer.remaining.value, 0);
   });
+  test('pause survives restart and resume continues the same queue', () async {
+    await LibraryTransfer.cancelAll();
+    await LibraryTransfer.pause();
+    final called = <String>[];
+    LibraryTransfer.downloadWith = (t) async {
+      called.add(t.id);
+      return true;
+    };
+    await LibraryTransfer.enqueueDownloads([song('pause1'), song('pause2')]);
+    expect(called, isEmpty);
+    expect(LibraryTransfer.status.value.paused, isTrue);
+    LibraryTransfer.resetForTest();
+    LibraryTransfer.downloadWith = (t) async {
+      called.add(t.id);
+      return true;
+    };
+    await LibraryTransfer.resume();
+    expect(called, isEmpty);
+    expect(LibraryTransfer.status.value.pending, 2);
+    await LibraryTransfer.continueDownloads();
+    await until(() => LibraryTransfer.remaining.value == 0);
+    expect(called, hasLength(2));
+    expect(LibraryTransfer.status.value.completed, 2);
+  });
+
+  test(
+      'cancelling queued songs persists and does not erase playlist membership',
+      () async {
+    await LibraryTransfer.cancelAll();
+    await LibraryTransfer.pause();
+    final one = song('cancel1');
+    final two = song('cancel2');
+    final playlist = await DatabaseService.createPlaylist('取消下载保留歌单');
+    await DatabaseService.addTracksToPlaylist(playlist.id, [one, two]);
+    await LibraryTransfer.enqueueDownloads([one, two]);
+    await LibraryTransfer.cancelTrack(one.id);
+    LibraryTransfer.resetForTest();
+    final called = <String>[];
+    LibraryTransfer.downloadWith = (t) async {
+      called.add(t.id);
+      return true;
+    };
+    await LibraryTransfer.resume();
+    await LibraryTransfer.continueDownloads();
+    await until(() => LibraryTransfer.remaining.value == 0);
+    expect(called, [two.id]);
+    final local = (await DatabaseService.getPlaylists())
+        .firstWhere((p) => p.id == playlist.id);
+    expect(local.tracks, hasLength(2));
+    await LibraryTransfer.pause();
+    await LibraryTransfer.enqueueDownloads([one]);
+    await LibraryTransfer.cancelAll();
+    LibraryTransfer.resetForTest();
+    LibraryTransfer.downloadWith = (t) async {
+      called.add(t.id);
+      return true;
+    };
+    await LibraryTransfer.resume();
+    expect(LibraryTransfer.status.value.pending, 0);
+    expect(called, [two.id]);
+  });
+
+  test(
+      'retry failed imports uses the queue and duplicate imports do not reset work',
+      () async {
+    await LibraryTransfer.cancelAll();
+    var calls = 0;
+    LibraryTransfer.downloadWith = (t) async {
+      calls++;
+      return false;
+    };
+    final t = song('retry');
+    expect(await LibraryTransfer.enqueueDownloads([t]), 1);
+    await until(() => LibraryTransfer.status.value.failed == 1);
+    expect(calls, 1);
+    expect(await LibraryTransfer.enqueueDownloads([t]), 0);
+    expect(calls, 1);
+    LibraryTransfer.downloadWith = (t) async {
+      calls++;
+      return true;
+    };
+    await LibraryTransfer.retryFailed();
+    await until(() => LibraryTransfer.status.value.pending == 0);
+    expect(calls, 2);
+  });
+
+  test('late completion of a cancelled job cannot remove a requeued song',
+      () async {
+    await LibraryTransfer.cancelAll();
+    final gate = Completer<bool>();
+    var calls = 0;
+    LibraryTransfer.downloadWith = (t) {
+      calls++;
+      return gate.future;
+    };
+    final t = song('late');
+    await LibraryTransfer.enqueueDownloads([t]);
+    await until(() => calls == 1);
+    await LibraryTransfer.cancelTrack(t.id);
+    await LibraryTransfer.pause();
+    await LibraryTransfer.enqueueDownloads([t]);
+    gate.complete(true);
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(LibraryTransfer.contains(t.id), isTrue);
+    expect(LibraryTransfer.status.value.completed, 0);
+    LibraryTransfer.downloadWith = (t) async {
+      calls++;
+      return true;
+    };
+    await LibraryTransfer.continueDownloads();
+    await until(() => LibraryTransfer.status.value.pending == 0);
+    expect(calls, 2);
+  });
 }

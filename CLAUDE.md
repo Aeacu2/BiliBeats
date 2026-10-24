@@ -16,7 +16,7 @@ Flutter is at `~/flutter/bin` and is not on PATH in non-interactive shells.
 export PATH="$HOME/flutter/bin:$PATH"
 flutter analyze                 # must stay at "No issues found"
 flutter test                    # ~1.5 min; tests tagged `live` query NetEase/Bilibili for real
-flutter test test/render_screens.dart --update-goldens   # PNGs in build/screens/
+flutter test test/render_screens.dart test/render_account_screens.dart --update-goldens   # PNGs in build/screens/
 tool/build_release.sh [ios|all] # obfuscated release; needs JDK 21+
 tool/release.sh patch "note"    # bump version + CHANGELOG + commit + tag (no build)
 ```
@@ -129,12 +129,21 @@ docs/archive/               old review notes and a superseded feature list — h
   最常播放 / 很久没听 and recommendations read them. A trim (`TrimStore`,
   `bilibeat_trims.json`) is applied by seeking, not by clipping the source, so
   positions — and lyric timing — stay the file's.
-- **Bilibili account and subtitles.** 设置 → 登录哔哩哔哩: in-app login page on
+- **Bilibili account and subtitles.** 设置 → 哔哩哔哩账号: in-app login page on
   Android (the WebView's HttpOnly session cookie is read natively, channel
   `bilibeats/account`) or a QR code. `BiliAccountStore` keeps the cookies in
   `bilibeat_account.json`; they are sent only for what needs an account —
-  subtitles, favourites (导入收藏夹, through `LibraryTransfer`), watch history
-  (recommendation seeds). Subtitles (`BilibiliSdk.fetchSubtitles`, none without a
+  subtitles, favourites, and watch history. Favourites are previewed before
+  importing (`FavoriteScan`, `FavoriteImportSheet`): title-based preselection,
+  all videos visible, optional part expansion, download and taste opt-ins.
+  `BiliFavorites` links folders by account/folder IDs to local playlists in
+  `biliFavoriteSources`; imports only add. `LibraryTransfer` owns the shared
+  persistent download queue (pause/resume/cancel/retry in download management).
+  History recommendations are opt-in per account, scan at most four pages,
+  ignore accidental starts, and do not permanently exclude watched videos.
+  Login changes invalidate account-specific requests and caches, refresh the
+  current song, and preserve manual lyric choices. API code -101 expires the
+  matching login without invalidating a newer session. Subtitles (`BilibiliSdk.fetchSubtitles`, none without a
   login) are compared with lyrics in `SubtitleMatcher`: a match confirms the song,
   never the singer, and a poor match is no evidence against (recognition mishears
   singing). Uses: naming where the two readers could not settle a video

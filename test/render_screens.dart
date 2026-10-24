@@ -7,6 +7,7 @@
 // one; on Linux, WenQuanYi Zen Hei); without it the run is skipped.
 // ignore_for_file: avoid_print
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -24,6 +25,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
 import 'fake_audio_player.dart';
+import 'favorite_import_fixture.dart';
+import 'player_page_harness.dart' show pumpUntil;
+import 'package:bilibeats/services/bili_account.dart';
+import 'package:bilibeats/services/bilibili_sdk.dart';
+import 'package:bilibeats/services/library_transfer.dart';
+import 'package:bilibeats/widgets/download_management_sheet.dart';
 
 /// The first CJK font found: macOS's, else a common Linux one.
 final _cjkFont = [
@@ -77,7 +84,7 @@ Future<void> _loadFonts() async {
   await icons.load();
 }
 
-void main() {
+void main({bool accountOnly = false}) {
   if (!File(_cjkFont).existsSync()) {
     print('No CJK font at $_cjkFont; nothing rendered.');
     return;
@@ -88,6 +95,7 @@ void main() {
 
   setUpAll(() async {
     docs = await stubDocs('shots');
+    await BiliAccountStore.ensureLoaded();
     await _loadFonts();
     final audio = Directory('${docs.path}/bilibeat_audio')..createSync();
     final covers = Directory('${docs.path}/covers')..createSync();
@@ -188,99 +196,168 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   }
 
-  testWidgets('home lenses', (tester) async {
-    final handler = await boot(tester);
-    await tester.pumpWidget(MaterialApp(
-      theme: AppTheme.darkTheme.copyWith(
-          textTheme: AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
-      debugShowCheckedModeBanner: false,
-      home: const AppShell(),
-    ));
-    await shot(tester, 'home_songs');
-    await tester.tap(find.byTooltip('排序'));
-    await shot(tester, 'home_sort');
-    await tester.tapAt(const Offset(195, 120));
-    await settle(tester);
-    await tester.tap(find.text('歌单'));
-    await shot(tester, 'home_playlists');
-    await tester.tap(find.text('歌手'));
-    await shot(tester, 'home_artists');
-    await tester.tap(find.byTooltip('设置'));
-    await shot(tester, 'settings');
-    await tester.tap(find.text('下载管理'));
-    await settle(tester);
-    await shot(tester, 'downloads');
-    await tester.tapAt(const Offset(195, 60));
-    await settle(tester);
-    await finish(tester, handler);
-  });
+  if (!accountOnly) {
+    testWidgets('home lenses', (tester) async {
+      final handler = await boot(tester);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.darkTheme.copyWith(
+            textTheme:
+                AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
+        debugShowCheckedModeBanner: false,
+        home: const AppShell(),
+      ));
+      await shot(tester, 'home_songs');
+      await tester.tap(find.byTooltip('排序'));
+      await shot(tester, 'home_sort');
+      await tester.tapAt(const Offset(195, 120));
+      await settle(tester);
+      await tester.tap(find.text('歌单'));
+      await shot(tester, 'home_playlists');
+      await tester.tap(find.text('歌手'));
+      await shot(tester, 'home_artists');
+      await tester.tap(find.byTooltip('设置'));
+      await shot(tester, 'settings');
+      await tester.tap(find.text('下载管理'));
+      await settle(tester);
+      await shot(tester, 'downloads');
+      await tester.tapAt(const Offset(195, 60));
+      await settle(tester);
+      await finish(tester, handler);
+    });
 
-  testWidgets('player', (tester) async {
-    final handler = await boot(tester);
-    await tester.pumpWidget(MaterialApp(
-      theme: AppTheme.darkTheme.copyWith(
-          textTheme: AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
-      debugShowCheckedModeBanner: false,
-      home: const NowPlayingPage(),
-    ));
-    await shot(tester, 'player');
-    await tester.tap(find.byTooltip('更多'));
-    await shot(tester, 'player_more');
-    await tester.tapAt(const Offset(195, 60));
-    await settle(tester);
-    await tester.tap(find.byTooltip('播放队列'));
-    await shot(tester, 'player_queue');
-    await tester.tapAt(const Offset(195, 60));
-    await settle(tester);
-    await tester.tap(find.byTooltip('更多'));
-    await settle(tester);
-    await tester.tap(find.text('裁剪'));
-    await shot(tester, 'player_trim');
-    await tester.tapAt(const Offset(195, 60));
-    await settle(tester);
-    await tester.tap(find.byTooltip('歌词'));
-    await shot(tester, 'player_lyrics');
-    await finish(tester, handler);
-  });
+    testWidgets('player', (tester) async {
+      final handler = await boot(tester);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.darkTheme.copyWith(
+            textTheme:
+                AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
+        debugShowCheckedModeBanner: false,
+        home: const NowPlayingPage(),
+      ));
+      await shot(tester, 'player');
+      await tester.tap(find.byTooltip('更多'));
+      await shot(tester, 'player_more');
+      await tester.tapAt(const Offset(195, 60));
+      await settle(tester);
+      await tester.tap(find.byTooltip('播放队列'));
+      await shot(tester, 'player_queue');
+      await tester.tapAt(const Offset(195, 60));
+      await settle(tester);
+      await tester.tap(find.byTooltip('更多'));
+      await settle(tester);
+      await tester.tap(find.text('裁剪'));
+      await shot(tester, 'player_trim');
+      await tester.tapAt(const Offset(195, 60));
+      await settle(tester);
+      await tester.tap(find.byTooltip('歌词'));
+      await shot(tester, 'player_lyrics');
+      await finish(tester, handler);
+    });
 
-  testWidgets('collections and sheets', (tester) async {
-    final handler = await boot(tester);
-    await tester.pumpWidget(MaterialApp(
-      theme: AppTheme.darkTheme.copyWith(
-          textTheme: AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
-      debugShowCheckedModeBanner: false,
-      home: const AppShell(),
-    ));
-    await settle(tester);
-    await tester.longPress(find.text('光年之外').last);
-    await shot(tester, 'song_sheet');
-    await tester.tap(find.text('编辑信息'));
-    await shot(tester, 'song_info');
-    await tester.tapAt(const Offset(195, 60));
-    await settle(tester);
-    await tester.tap(find.text('歌单'));
-    await settle(tester);
-    await tester.tap(find.text('深夜循环'));
-    await shot(tester, 'playlist');
-    await tester.tap(find.descendant(
-        of: find.byType(SliverAppBar), matching: find.byTooltip('更多')));
-    await settle(tester);
-    await tester.tap(find.text('编辑'));
-    await settle(tester);
-    await shot(tester, 'playlist_edit');
-    await tester.tap(find.text('完成'));
-    await settle(tester);
-    await tester.pageBack();
-    await settle(tester);
-    await tester.tap(find.text('歌手'));
-    await settle(tester);
-    await tester.tap(find.text('周深').first);
-    await shot(tester, 'artist');
-    await tester.pageBack();
-    await settle(tester);
-    await tester.tap(find.byType(TextField).first);
-    await tester.enterText(find.byType(TextField).first, '周');
-    await shot(tester, 'search');
-    await finish(tester, handler);
-  });
+    testWidgets('collections and sheets', (tester) async {
+      final handler = await boot(tester);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.darkTheme.copyWith(
+            textTheme:
+                AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
+        debugShowCheckedModeBanner: false,
+        home: const AppShell(),
+      ));
+      await settle(tester);
+      await tester.longPress(find.text('光年之外').last);
+      await shot(tester, 'song_sheet');
+      await tester.tap(find.text('编辑信息'));
+      await shot(tester, 'song_info');
+      await tester.tapAt(const Offset(195, 60));
+      await settle(tester);
+      await tester.tap(find.text('歌单'));
+      await settle(tester);
+      await tester.tap(find.text('深夜循环'));
+      await shot(tester, 'playlist');
+      await tester.tap(find.descendant(
+          of: find.byType(SliverAppBar), matching: find.byTooltip('更多')));
+      await settle(tester);
+      await tester.tap(find.text('编辑'));
+      await settle(tester);
+      await shot(tester, 'playlist_edit');
+      await tester.tap(find.text('完成'));
+      await settle(tester);
+      await tester.pageBack();
+      await settle(tester);
+      await tester.tap(find.text('歌手'));
+      await settle(tester);
+      await tester.tap(find.text('周深').first);
+      await shot(tester, 'artist');
+      await tester.pageBack();
+      await settle(tester);
+      await tester.tap(find.byType(TextField).first);
+      await tester.enterText(find.byType(TextField).first, '周');
+      await shot(tester, 'search');
+      await finish(tester, handler);
+    });
+  }
+  if (accountOnly) {
+    testWidgets('account import and persistent queue', (tester) async {
+      Future<void> operation(Future<void> Function() work) async {
+        var done = false;
+        Object? failure;
+        StackTrace? trace;
+        unawaited(work().then((_) {
+          done = true;
+        }, onError: (Object e, StackTrace st) {
+          failure = e;
+          trace = st;
+          done = true;
+        }));
+        await pumpUntil(tester, () => done);
+        if (failure != null) Error.throwWithStackTrace(failure!, trace!);
+      }
+
+      await settle(tester);
+      final handler = await boot(tester, play: false);
+      BilibiliSdk.requestWith = favoriteImportResponse;
+      await settle(tester);
+      await operation(() => BiliAccountStore.save(importAccount));
+      await tester.pumpWidget(MaterialApp(
+          theme: AppTheme.darkTheme.copyWith(
+              textTheme:
+                  AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
+          home: const AppShell(),
+          debugShowCheckedModeBanner: false));
+      await settle(tester);
+      await tester.tap(find.byTooltip('设置'));
+      await settle(tester);
+      await tester.tap(find.text('哔哩哔哩账号'));
+      await shot(tester, 'account_options');
+      await tester.tap(find.text('导入收藏夹 / 检查更新'));
+      await shot(tester, 'favorite_folders');
+      await tester.tap(find.text('夜里听'));
+      await shot(tester, 'favorite_selection');
+      await tester.tap(find.byTooltip('选择分P').first);
+      await shot(tester, 'favorite_parts');
+      await tester.pumpWidget(const SizedBox());
+      await operation(() async {
+        await LibraryTransfer.cancelAll();
+        await LibraryTransfer.pause();
+        await LibraryTransfer.enqueueDownloads(tracks
+            .take(5)
+            .map((t) => Track.fromMap({...t.toMap(), 'id': 'queue_${t.id}'}))
+            .toList());
+      });
+      await tester.pumpWidget(MaterialApp(
+          theme: AppTheme.darkTheme.copyWith(
+              textTheme:
+                  AppTheme.darkTheme.textTheme.apply(fontFamily: 'Roboto')),
+          home: const Scaffold(body: DownloadManagementSheet()),
+          debugShowCheckedModeBanner: false));
+      await shot(tester, 'import_queue');
+      await tester.pumpWidget(const SizedBox());
+      await operation(() async {
+        await LibraryTransfer.cancelAll();
+        await BiliAccountStore.logOut();
+      });
+      BilibiliSdk.requestWith = null;
+      await finish(tester, handler);
+    });
+  }
 }

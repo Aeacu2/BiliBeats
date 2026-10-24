@@ -28,6 +28,26 @@ void main() {
 
   Track t(String name) => serverTrack(server, name);
 
+  test('concurrent callers await the same completed download', () async {
+    const name = 'dm-shared';
+    server.serveInstant(name);
+    final first = DownloadManager.instance.startDownload(t(name));
+    final second = DownloadManager.instance.startDownload(t(name));
+    expect(identical(first, second), isTrue);
+    await Future.wait([first, second]);
+    expect(await AudioDownloadService.isDownloaded(t(name)), isTrue);
+  });
+
+  test('cancelling during the initial file check does not start a download',
+      () async {
+    const name = 'dm-cancel-before-start';
+    server.serveInstant(name);
+    final future = DownloadManager.instance.startDownload(t(name));
+    DownloadManager.instance.cancelDownload(t(name).id);
+    await future;
+    expect(await AudioDownloadService.isDownloaded(t(name)), isFalse);
+  });
+
   test('failed downloads appear with their track and error', () async {
     const name = 'dm-fail-a';
     server.serveError(name);
