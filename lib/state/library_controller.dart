@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../models/play_stat.dart';
 import '../models/playlist.dart';
 import '../models/track.dart';
 import '../services/database_service.dart';
@@ -11,7 +12,7 @@ import '../services/track_credit.dart';
 import '../services/track_naming.dart';
 
 /// How the song list is ordered.
-enum LibrarySort { recent, played, title, artist }
+enum LibrarySort { recent, played, mostPlayed, forgotten, title, artist }
 
 /// Downloaded songs that share an artist — a collection nobody has to build.
 @immutable
@@ -48,6 +49,7 @@ class LibraryController extends ChangeNotifier {
   Set<String> _downloadedIds = const {};
   List<Playlist> _playlists = const [];
   List<Track> _recent = const [];
+  Map<String, PlayStat> _plays = const {};
   List<DownloadTask> _active = const [];
   int _failedCount = 0;
   bool _loaded = false;
@@ -59,6 +61,9 @@ class LibraryController extends ChangeNotifier {
 
   List<Playlist> get playlists => _playlists;
   List<Track> get recent => _recent;
+
+  /// How often [id] has been listened to; null if never (counted).
+  PlayStat? playsOf(String id) => _plays[id];
   List<DownloadTask> get activeDownloads => _active;
   int get failedDownloadCount => _failedCount;
   bool get loaded => _loaded;
@@ -88,6 +93,7 @@ class LibraryController extends ChangeNotifier {
 
   List<Track>? _sortedCache;
   List<Track>? _sortedRecent;
+  Map<String, PlayStat>? _sortedPlays;
 
   /// Played songs first, the latest on top; the rest as downloaded.
   List<Track> _byLastPlayed() {
@@ -105,6 +111,18 @@ class LibraryController extends ChangeNotifier {
     ];
   }
 
+  /// Most listened to first; songs heard equally often, latest first.
+  List<Track> _byPlayCount() {
+    final byLast = _byLastPlayed();
+    final order = {for (var i = 0; i < byLast.length; i++) byLast[i].id: i};
+    return byLast
+      ..sort((a, b) {
+        final byCount = (_plays[b.id]?.count ?? 0)
+            .compareTo(_plays[a.id]?.count ?? 0);
+        return byCount != 0 ? byCount : order[a.id]!.compareTo(order[b.id]!);
+      });
+  }
+
   List<Track>? _sortedSource;
   LibrarySort? _sortedBy;
 
@@ -114,7 +132,8 @@ class LibraryController extends ChangeNotifier {
     if (cached != null &&
         identical(_sortedSource, _downloaded) &&
         _sortedBy == _sort &&
-        (_sort != LibrarySort.played || identical(_sortedRecent, _recent))) {
+        identical(_sortedRecent, _recent) &&
+        identical(_sortedPlays, _plays)) {
       return cached;
     }
     // Lower-cased once per song, not once per comparison.
@@ -126,6 +145,10 @@ class LibraryController extends ChangeNotifier {
     final sorted = switch (_sort) {
       LibrarySort.recent => _downloaded,
       LibrarySort.played => _byLastPlayed(),
+      LibrarySort.mostPlayed => _byPlayCount(),
+      // The songs gone longest unheard: never played first, oldest
+      // downloads first among those, then the least recently played.
+      LibrarySort.forgotten => _byLastPlayed().reversed.toList(),
       LibrarySort.title => List.of(_downloaded)..sort(byTitle),
       LibrarySort.artist => List.of(_downloaded)
         ..sort((a, b) {
@@ -135,6 +158,7 @@ class LibraryController extends ChangeNotifier {
     };
     _sortedSource = _downloaded;
     _sortedRecent = _recent;
+    _sortedPlays = _plays;
     _sortedBy = _sort;
     return _sortedCache = List.unmodifiable(sorted);
   }
@@ -217,6 +241,7 @@ class LibraryController extends ChangeNotifier {
       DatabaseService.getDownloadedTracks(),
       DatabaseService.getPlaylists(),
       DatabaseService.getRecentlyPlayed(),
+      DatabaseService.getPlayStats(),
     ]);
     final known = _downloadedIds;
     final downloaded = results[0] as List<Track>;
@@ -239,6 +264,7 @@ class LibraryController extends ChangeNotifier {
     }
     _playlists = List.unmodifiable(results[1] as List<Playlist>);
     _recent = List.unmodifiable(results[2] as List<Track>);
+    _plays = results[3] as Map<String, PlayStat>;
     _active = DownloadManager.instance.activeTasks;
     _failedCount = DownloadManager.instance.failedTasks.length;
     _loaded = true;
@@ -264,6 +290,7 @@ class LibraryController extends ChangeNotifier {
 
   Future<void> _loadRecent() async {
     _recent = List.unmodifiable(await DatabaseService.getRecentlyPlayed());
+    _plays = await DatabaseService.getPlayStats();
     notifyListeners();
   }
 

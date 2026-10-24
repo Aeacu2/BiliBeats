@@ -353,6 +353,8 @@ class _SortButton extends StatelessWidget {
   static const _options = [
     (LibrarySort.recent, Icons.download_done_rounded, '最近下载'),
     (LibrarySort.played, Icons.history_rounded, '最近播放'),
+    (LibrarySort.mostPlayed, Icons.trending_up_rounded, '最常播放'),
+    (LibrarySort.forgotten, Icons.hourglass_bottom_rounded, '很久没听'),
     (LibrarySort.title, Icons.sort_by_alpha_rounded, '歌名'),
     (LibrarySort.artist, Icons.person_outline_rounded, '歌手'),
   ];

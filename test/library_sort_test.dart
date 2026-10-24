@@ -1,3 +1,4 @@
+import 'package:bilibeats/models/play_stat.dart';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/database_service.dart';
 import 'package:bilibeats/state/library_controller.dart';
@@ -46,5 +47,32 @@ void main() {
 
     await library.setSort(LibrarySort.recent);
     expect(titles(), ['song d', 'song c', 'song b', 'song a']);
+  });
+
+  test('最常播放 counts listens; 很久没听 starts with the unheard', () async {
+    final library = LibraryController.instance;
+    // From the test above: downloaded a, b, c, d; last played c, a, b.
+    await DatabaseService.recordPlay(track('b'));
+    await DatabaseService.recordPlay(track('b'));
+    await DatabaseService.recordPlay(track('a'));
+    await library.setSort(LibrarySort.mostPlayed);
+    await library.reload();
+
+    List<String> titles() =>
+        [for (final t in library.sortedDownloaded) t.title];
+    expect(library.playsOf(track('b').id)?.count, 2);
+    // Equal counts (none, for c and d) fall back to the latest played.
+    expect(titles(), ['song b', 'song a', 'song c', 'song d']);
+
+    await library.setSort(LibrarySort.forgotten);
+    expect(titles(), ['song d', 'song b', 'song a', 'song c']);
+  });
+
+  test('a listen counts once half the song is heard, at most four minutes',
+      () {
+    expect(PlayStat.needed(const Duration(minutes: 3)),
+        const Duration(seconds: 90));
+    expect(PlayStat.needed(const Duration(minutes: 20)),
+        const Duration(minutes: 4));
   });
 }

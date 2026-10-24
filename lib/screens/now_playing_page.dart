@@ -332,18 +332,10 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             ),
             Expanded(
               child: Center(
+                // Calibrating, the instruction is a banner over the lyrics:
+                // squeezed between the bar's buttons it shrank to nothing.
                 child: calibrating
-                    ? const FittedBox(
-                        fit: BoxFit.scaleDown,
-                        child: Text(
-                          '点一下正在唱的那句',
-                          style: TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      )
+                    ? const SizedBox.shrink()
                     : FittedBox(
                         fit: BoxFit.scaleDown,
                         child: _SleepBadge(handler: _handler),
@@ -415,13 +407,21 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             return _LyricsEmpty(
                 onFind: _openLyricsSheet, onBack: _toggleLyrics);
           case LyricsStatus.ready:
-            return LyricsView(
+            final view = LyricsView(
               lyrics: state.lyrics,
               position: _position,
               playing: _handler.playingNotifier,
               onSeek: _handler.seek,
               calibrating: _calibrating != null,
               onCalibrate: _calibrate,
+            );
+            if (_calibrating == null) return view;
+            return Column(
+              children: [
+                _CalibrationBanner(offset: state.lyrics.offset),
+                const SizedBox(height: 8),
+                Expanded(child: view),
+              ],
             );
         }
       },
@@ -858,6 +858,56 @@ class _SideButton extends StatelessWidget {
         icon,
         size: 28,
         color: active ? AppColors.accent : AppColors.textSecondary,
+      ),
+    );
+  }
+}
+
+/// What to do while calibrating, and where the timing stands: big enough to
+/// read at a glance with the song playing.
+class _CalibrationBanner extends StatelessWidget {
+  final double offset;
+
+  const _CalibrationBanner({required this.offset});
+
+  @override
+  Widget build(BuildContext context) {
+    final shift = offset == 0
+        ? '未调整'
+        : '歌词${offset > 0 ? '推迟' : '提前'} '
+            '${offset.abs().toStringAsFixed(2)} 秒';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: AppColors.accent22,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        border: Border.all(color: AppColors.accent50),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.touch_app_rounded,
+              color: AppColors.textPrimary, size: 28),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '听到哪句，就点哪句',
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(shift, style: AppTypography.caption.copyWith(
+                    color: AppColors.textSecondary)),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -232,6 +232,12 @@ void main() {
     await shot(tester, 'player_queue');
     await tester.tapAt(const Offset(195, 60));
     await settle(tester);
+    await tester.tap(find.byTooltip('更多'));
+    await settle(tester);
+    await tester.tap(find.text('裁剪'));
+    await shot(tester, 'player_trim');
+    await tester.tapAt(const Offset(195, 60));
+    await settle(tester);
     await tester.tap(find.byTooltip('歌词'));
     await shot(tester, 'player_lyrics');
     await finish(tester, handler);

@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:just_audio/just_audio.dart' as ja;
 
+import '../models/play_stat.dart';
 import '../models/playback_state.dart';
 import '../models/track.dart';
 import 'audio_download_service.dart';
@@ -17,6 +18,7 @@ import 'database_service.dart';
 import 'download_manager.dart';
 import 'track_credit.dart';
 import 'track_naming.dart';
+import 'trim_store.dart';
 
 export '../models/playback_state.dart';
 
@@ -196,8 +198,13 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
   // ---------------------------------------------------------------------------
 
   void _listenToPlayer() {
+    unawaited(TrimStore.ensureLoaded());
     _player.sequenceStateStream.listen((_) => _publish());
-    _player.positionStream.listen(_positions.add);
+    _player.positionStream.listen((position) {
+      _positions.add(position);
+      _countListening(position);
+      _applyTrim(position);
+    });
 
     _player.playingStream.listen((playing) {
       playingNotifier.value = playing;
@@ -322,10 +329,92 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     }());
   }
 
+  // ---------------------------------------------------------------------------
+  // Play counts
+  // ---------------------------------------------------------------------------
+
+  String? _listeningTo;
+  Duration _heard = Duration.zero;
+  Duration _lastPosition = Duration.zero;
+  bool _counted = false;
+
+  /// Adds up what is actually heard of the current song — seeking ahead
+  /// does not count — and records one play once that is enough
+  /// ([PlayStat.needed]).
+  void _countListening(Duration position) {
+    final track = nowPlaying.value;
+    if (track == null) return;
+    if (track.id != _listeningTo) {
+      _listeningTo = track.id;
+      _heard = Duration.zero;
+      _counted = false;
+      _trimEntered = false;
+      _trimEnded = false;
+    } else if (_player.playing) {
+      final step = position - _lastPosition;
+      if (step > Duration.zero && step < const Duration(seconds: 3)) {
+        _heard += step;
+      }
+    }
+    _lastPosition = position;
+    if (_counted || !_recordHistory) return;
+    final trim = TrimStore.of(track.id);
+    final length = trim == null
+        ? durationNotifier.value
+        : (trim.end ?? durationNotifier.value) - trim.start;
+    if (_heard >= PlayStat.needed(length)) {
+      _counted = true;
+      unawaited(DatabaseService.recordPlay(track));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Trims (TrimStore)
+  // ---------------------------------------------------------------------------
+
+  bool _trimEntered = false;
+  bool _trimEnded = false;
+
+  /// A trimmed song starts at its trim start and ends at its trim end.
+  /// Positions stay the file's, so lyrics keep their timing. The start is
+  /// applied as the song begins only: seeking back into the intro by hand
+  /// is allowed.
+  void _applyTrim(Duration position) {
+    final track = nowPlaying.value;
+    if (track == null) return;
+    final trim = TrimStore.of(track.id);
+    if (!_trimEntered) {
+      _trimEntered = true;
+      if (trim != null &&
+          position < trim.start &&
+          position < const Duration(seconds: 2)) {
+        unawaited(_player.seek(trim.start));
+        return;
+      }
+    }
+    final end = trim?.end;
+    if (end == null || !_player.playing) return;
+    if (position < end - const Duration(seconds: 1)) {
+      _trimEnded = false;
+    } else if (position >= end && !_trimEnded) {
+      _trimEnded = true;
+      if (_sleepMode == SleepTimerMode.endOfTrack) {
+        _fireSleepTimer();
+      } else if (_loopMode == LoopMode.one) {
+        _listeningTo = null;
+        unawaited(_player.seek(trim!.start));
+      } else {
+        unawaited(_skip(1));
+      }
+    }
+  }
+
   void _onDiscontinuity(ja.PositionDiscontinuity discontinuity) {
     if (discontinuity.reason != ja.PositionDiscontinuityReason.autoAdvance) {
       return;
     }
+    // A song repeated (单曲循环) is heard again: count it again.
+    _listeningTo = null;
     // Fallback for end-of-track sleep when the position check missed the
     // last tick.
     if (_sleepMode == SleepTimerMode.endOfTrack) _fireSleepTimer();

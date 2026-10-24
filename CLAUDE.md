@@ -41,7 +41,8 @@ lib/
                             song_reader (the on-device model), song_judge (rules + model),
                             lyric_library (Kugou and QQ Music: search, lyrics),
                             lyrics_store, track_naming, track_credit,
-                            library_transfer (the library as text, to another device)
+                            library_transfer (the library as text, to another device),
+                            trim_store (per-song start/end cuts), audio_folder
   models/  theme/  utils/
 test/                       *_test.dart; fake_audio_player + audio_test_harness for playback;
                             tools/ holds harnesses run by hand (rule replay, model parity)
@@ -121,6 +122,15 @@ docs/archive/               old review notes and a superseded feature list — h
   (video, part, the name they were given) and playlists as one sealed line of
   text on the clipboard. Importing only adds; downloads run two at a time and
   the queue (`bilibeat_import.json`) survives a restart.
+
+- **Play counts and trims.** The handler counts a listen once half the song (at most
+  four minutes) has really been heard (`PlayStat`, `bilibeat_plays.json`); 排序 →
+  最常播放 / 很久没听 and recommendations read them. A trim (`TrimStore`,
+  `bilibeat_trims.json`) is applied by seeking, not by clipping the source, so
+  positions — and lyric timing — stay the file's.
+- **Audio files.** On Android, `AudioFilesProvider` (Kotlin) shows the downloaded
+  songs read-only in the system Files app as "BiliBeats", named after the songs;
+  设置 → 音频文件 opens it. The files themselves stay in private storage.
 
 ## UI conventions
 

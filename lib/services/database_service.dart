@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/track.dart';
 import '../models/playlist.dart';
+import '../models/play_stat.dart';
 import '../models/playback_state.dart';
 import 'audio_download_service.dart';
 
@@ -57,6 +58,9 @@ class DatabaseService {
   static final List<Track> _recentlyPlayed = [];
   static final List<Track> _downloadedTracks = [];
   static final List<String> _searchHistory = [];
+
+  /// Track id -> how often and when it was last really listened to.
+  static final Map<String, PlayStat> _plays = {};
   static final StreamController<void> _libraryUpdateController =
       StreamController<void>.broadcast();
   static final StreamController<void> _historyUpdateController =
@@ -121,6 +125,7 @@ class DatabaseService {
       await _loadTracks('$dir/bilibeat_recently_played.json', _recentlyPlayed);
       await _loadPlaylists('$dir/bilibeat_playlists.json');
       await _loadSearchHistory('$dir/bilibeat_search_history.json');
+      await _loadPlays('$dir/bilibeat_plays.json');
       _rebaseCovers(dir);
       // With a store set aside, what it referenced is unknown: keep it all.
       if (!_setAsideAny && !everSetAside) unawaited(_sweepCovers(dir));
@@ -363,6 +368,24 @@ class DatabaseService {
       _playlists
         ..clear()
         ..addAll(playlists);
+    } catch (e) {
+      debugPrint('DatabaseService load $path skipped: $e');
+      await _setAside(path);
+    }
+  }
+
+  static Future<void> _loadPlays(String path) async {
+    try {
+      final file = File(path);
+      if (!await file.exists()) return;
+      final map = _readPayload(jsonDecode(await file.readAsString()));
+      if (map is! Map) return;
+      _plays
+        ..clear()
+        ..addAll({
+          for (final e in map.entries)
+            if (PlayStat.fromMap(e.value) case final stat?) '${e.key}': stat,
+        });
     } catch (e) {
       debugPrint('DatabaseService load $path skipped: $e');
       await _setAside(path);
@@ -860,6 +883,30 @@ class DatabaseService {
     if (_recentlyPlayed.length > _historyLimit) _recentlyPlayed.removeLast();
     await _persistRecentlyPlayed();
     if (!alreadyFirst) _historyUpdateController.add(null);
+  }
+
+  /// Counts one listen of [track] — the player calls this once a play has
+  /// lasted long enough to mean it ([PlayStat.counts]).
+  static Future<void> recordPlay(Track track, {DateTime? at}) async {
+    await _ensureLoaded();
+    final before = _plays[track.id];
+    _plays[track.id] = PlayStat(
+      count: (before?.count ?? 0) + 1,
+      last: at ?? DateTime.now(),
+    );
+    try {
+      await _writeJsonAtomically('${await _docs()}/bilibeat_plays.json',
+          _envelope({for (final e in _plays.entries) e.key: e.value.toMap()}));
+    } catch (e) {
+      debugPrint('DatabaseService recordPlay error: $e');
+      _reportSaveFailure();
+    }
+    if (!_historyUpdateController.isClosed) _historyUpdateController.add(null);
+  }
+
+  static Future<Map<String, PlayStat>> getPlayStats() async {
+    await _ensureLoaded();
+    return Map.unmodifiable(_plays);
   }
 
   static Future<List<Track>> getRecentlyPlayed() async {

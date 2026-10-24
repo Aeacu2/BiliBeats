@@ -105,7 +105,7 @@ void main() {
     await tester.tap(find.text('校准'));
     await tester.pump(const Duration(milliseconds: 500));
     await settle(tester);
-    expect(find.text('点一下正在唱的那句'), findsOneWidget);
+    expect(find.text('听到哪句，就点哪句'), findsOneWidget);
     // The song being timed repeats instead of moving on.
     expect(fake.nativeLoopMode.name, 'one');
 
@@ -119,7 +119,7 @@ void main() {
     await tester.runAsync(handler.skipToNext);
     await tester.pump();
     await settle(tester);
-    expect(find.text('点一下正在唱的那句'), findsNothing);
+    expect(find.text('听到哪句，就点哪句'), findsNothing);
     expect(fake.nativeLoopMode.name, isNot('one'));
   });
 }

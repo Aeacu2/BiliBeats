@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app/app_services.dart';
+import '../services/audio_folder.dart';
 import '../services/background_protection.dart';
 import '../services/library_transfer.dart';
 import '../services/track_naming.dart';
@@ -140,6 +141,20 @@ class _SettingsSheetState extends State<SettingsSheet>
             DownloadManagementSheet.show(navigator.context);
           },
         ),
+        if (AudioFolder.supported)
+          SheetAction(
+            icon: Icons.folder_open_rounded,
+            label: '音频文件',
+            trailing: const Icon(Icons.chevron_right_rounded,
+                color: AppColors.textFaint),
+            onTap: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              if (!await AudioFolder.open()) {
+                showAppSnackBar(messenger,
+                    message: '在系统「文件」App 的侧栏中打开 BiliBeats');
+              }
+            },
+          ),
         SheetAction(
           icon: Icons.ios_share_rounded,
           label: '导出资料库',

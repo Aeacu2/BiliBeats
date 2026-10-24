@@ -8,14 +8,17 @@ import '../models/track.dart';
 import '../screens/artist_page.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
+import '../services/trim_store.dart';
 import '../state/library_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
+import '../utils/format.dart';
 import '../utils/snack.dart';
 import 'cached_cover_image.dart';
 import 'sheet.dart';
 import 'sleep_timer_sheet.dart';
 import 'track_info_sheet.dart';
+import 'trim_sheet.dart';
 
 /// A song's sheet: what it is, and everything you can do with it.
 ///
@@ -217,6 +220,27 @@ class _TrackSheetState extends State<TrackSheet> {
                 onTap: () {
                   final parent = _dismiss();
                   TrackInfoSheet.show(parent, track);
+                },
+              ),
+            if (downloaded)
+              ValueListenableBuilder<int>(
+                valueListenable: TrimStore.changes,
+                builder: (context, _, __) {
+                  final trim = TrimStore.of(track.id);
+                  return SheetAction(
+                    icon: Icons.content_cut_rounded,
+                    label: '裁剪',
+                    trailing: trim == null
+                        ? null
+                        : Text(
+                            '${formatDuration(trim.start)} – '
+                            '${trim.end == null ? '结尾' : formatDuration(trim.end!)}',
+                            style: AppTypography.caption),
+                    onTap: () {
+                      final parent = _dismiss();
+                      TrimSheet.show(parent, track);
+                    },
+                  );
                 },
               ),
             if (widget.forPlayer)

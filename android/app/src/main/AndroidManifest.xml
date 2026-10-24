@@ -42,6 +42,19 @@
             </intent-filter>
         </activity>
 
+        <!-- The downloaded songs as a read-only "BiliBeats" location in the
+             system Files app (设置 → 音频文件). Only the system may bind it. -->
+        <provider
+            android:name="com.bilibeats.app.AudioFilesProvider"
+            android:authorities="${applicationId}.audiofiles"
+            android:grantUriPermissions="true"
+            android:exported="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+
         <service android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="true">

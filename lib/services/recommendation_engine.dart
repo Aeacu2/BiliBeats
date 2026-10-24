@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
+import '../models/play_stat.dart';
 import '../models/track.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
@@ -47,6 +48,9 @@ class TasteProfile {
   static const double recentPlayWeight = 2.0;
   static const double downloadWeight = 0.5;
 
+  /// Per counted listen ([PlayStat]), up to ten.
+  static const double playCountWeight = 0.6;
+
   static const int _historyDepth = 30;
   static const int _libraryDepth = 100;
 
@@ -54,6 +58,7 @@ class TasteProfile {
     required List<Track> favourites,
     required List<Track> history,
     List<Track> downloaded = const [],
+    Map<String, PlayStat> plays = const {},
     required List<String> searches,
   }) {
     final weights = <String, double>{};
@@ -79,6 +84,11 @@ class TasteProfile {
     }
     for (final t in downloaded.take(_libraryDepth)) {
       absorb(t, downloadWeight);
+    }
+    // Played again and again is the plainest "I like this" there is.
+    for (final t in downloaded) {
+      final n = plays[t.id]?.count ?? 0;
+      if (n > 0) absorb(t, playCountWeight * math.min(n, 10));
     }
     for (final t in [...favourites, ...history, ...downloaded]) {
       videos.add(t.bvid);
@@ -276,6 +286,7 @@ class RecommendationEngine {
       favourites: (await DatabaseService.getFavoritesPlaylist()).tracks,
       history: await DatabaseService.getRecentlyPlayed(),
       downloaded: await DatabaseService.getDownloadedTracks(),
+      plays: await DatabaseService.getPlayStats(),
       searches: await DatabaseService.getSearchHistory(),
     );
     if (profile.isEmpty) return const [];

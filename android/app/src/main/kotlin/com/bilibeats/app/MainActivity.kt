@@ -2,12 +2,14 @@ package com.bilibeats.app
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.provider.DocumentsContract
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import com.ryanheise.audioservice.AudioServiceActivity
@@ -43,6 +45,41 @@ class MainActivity : AudioServiceActivity() {
                 else -> result.notImplemented()
             }
         }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "bilibeats/files",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "openAudioFolder" -> result.success(openAudioFolder())
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    /// Opens the songs' folder (AudioFilesProvider) in the system Files app:
+    /// its root, else the folder itself. False when no app takes either —
+    /// the location is then still in the Files app's side menu.
+    private fun openAudioFolder(): Boolean {
+        val authority = AudioFilesProvider.authority(this)
+        val attempts = listOf(
+            Intent(Intent.ACTION_VIEW).setDataAndType(
+                DocumentsContract.buildRootUri(authority, AudioFilesProvider.ROOT_ID),
+                DocumentsContract.Root.MIME_TYPE_ITEM,
+            ),
+            Intent(Intent.ACTION_VIEW).setDataAndType(
+                DocumentsContract.buildDocumentUri(authority, AudioFilesProvider.FOLDER_ID),
+                DocumentsContract.Document.MIME_TYPE_DIR,
+            ),
+        )
+        for (intent in attempts) {
+            try {
+                startActivity(intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                return true
+            } catch (_: ActivityNotFoundException) {
+            } catch (_: SecurityException) {
+            }
+        }
+        return false
     }
 
     /// The handler has stopped playback for good (a long pause). While this

@@ -4,6 +4,7 @@ import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/audio_download_service.dart';
 import 'package:bilibeats/services/audio_player_handler.dart';
 import 'package:bilibeats/services/database_service.dart';
+import 'package:bilibeats/services/trim_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:just_audio/just_audio.dart' as ja;
 
@@ -233,6 +234,58 @@ void main() {
     expect(queueIds(handler), [t[0].id, t[1].id]);
     expect(handler.currentTrack, t[0]);
 
+    await handler.dispose();
+  });
+
+  test('a listen is counted once enough of the song is heard', () async {
+    final t = await downloaded(['pb-count-a']);
+    final fake = FakeAudioPlayer()
+      ..durationValue = const Duration(seconds: 10);
+    final handler = handlerFor(fake);
+    await handler.playTrack(t[0], queue: t);
+    Future<int> plays() async =>
+        (await DatabaseService.getPlayStats())[t[0].id]?.count ?? 0;
+
+    // A seek far ahead is not listening.
+    fake.emitPosition(Duration.zero);
+    fake.emitPosition(const Duration(seconds: 8));
+    await pumpEventQueue();
+    expect(await plays(), 0);
+
+    for (var ms = 0; ms <= 6000; ms += 500) {
+      fake.emitPosition(Duration(milliseconds: ms));
+    }
+    await waitForTrue(() async => await plays() == 1);
+    // And only once per play.
+    fake.emitPosition(const Duration(seconds: 7));
+    fake.emitPosition(const Duration(milliseconds: 7500));
+    await pumpEventQueue();
+    expect(await plays(), 1);
+
+    await handler.dispose();
+  });
+
+  test('a trimmed song starts and ends where it was cut', () async {
+    final t = await downloaded(['pb-trim-a', 'pb-trim-b']);
+    await TrimStore.set(t[0].id,
+        const Trim(start: Duration(seconds: 12), end: Duration(seconds: 150)));
+    final fake = FakeAudioPlayer();
+    final handler = handlerFor(fake);
+    await handler.playTrack(t[0], queue: t);
+
+    fake.emitPosition(Duration.zero);
+    await waitFor(() => fake.positionValue == const Duration(seconds: 12));
+
+    // Seeking back into the intro by hand is allowed.
+    await handler.seek(const Duration(seconds: 3));
+    fake.emitPosition(const Duration(seconds: 3));
+    await pumpEventQueue();
+    expect(fake.positionValue, const Duration(seconds: 3));
+
+    fake.emitPosition(const Duration(seconds: 150));
+    await waitFor(() => handler.currentTrack == t[1]);
+
+    await TrimStore.set(t[0].id, null);
     await handler.dispose();
   });
 
