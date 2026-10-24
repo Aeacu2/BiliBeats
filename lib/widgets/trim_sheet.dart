@@ -3,7 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../app/app_services.dart';
+import '../models/lyrics.dart';
+import '../models/subtitles.dart';
 import '../models/track.dart';
+import '../services/bilibili_sdk.dart';
+import '../services/lyrics_engine.dart';
+import '../services/lyrics_store.dart';
+import '../services/subtitle_match.dart';
 import '../services/trim_store.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
@@ -46,7 +52,8 @@ class _TrimSheetState extends State<TrimSheet> {
   @override
   void initState() {
     super.initState();
-    final known = _playingThis ? _handler.durationNotifier.value : Duration.zero;
+    final known =
+        _playingThis ? _handler.durationNotifier.value : Duration.zero;
     _length = known > Duration.zero
         ? known
         : Duration(seconds: widget.track.duration);
@@ -56,6 +63,34 @@ class _TrimSheetState extends State<TrimSheet> {
       _ms(saved?.start ?? Duration.zero),
       _ms(saved?.end ?? _length),
     );
+    unawaited(_suggest());
+  }
+
+  /// Where the song starts and ends in the video, from its subtitles and
+  /// the song's timed lyrics (when logged in): offered, never applied
+  /// unasked.
+  RangeValues? _suggested;
+
+  Future<void> _suggest() async {
+    final track = widget.track;
+    final lyrics = LyricsStore.peek(track.id);
+    if (lyrics == null || !lyrics.synced) return;
+    final subtitles =
+        await BilibiliSdk.fetchSubtitles(track.bvid, cid: track.cid);
+    if (subtitles == null || subtitles.isEmpty || !mounted) return;
+    final recording = await LyricsEngine.recordingSeconds(
+      lyrics.title ?? track.title,
+      artist: lyrics.artist ?? (track.isNamed ? track.uploader : null),
+      near: _length.inSeconds,
+    );
+    if (!mounted) return;
+    final range = suggestTrim(subtitles, lyrics, _length,
+        recordingSeconds: recording?.toDouble());
+    if (range == null || !mounted) return;
+    setState(() => _suggested = RangeValues(
+          _ms(range.start),
+          _ms(range.end ?? _length),
+        ));
   }
 
   double _ms(Duration d) =>
@@ -65,9 +100,8 @@ class _TrimSheetState extends State<TrimSheet> {
   Duration get _end => Duration(milliseconds: _range.end.round());
 
   Trim get _trim => Trim(
-        start: _start < const Duration(milliseconds: 500)
-            ? Duration.zero
-            : _start,
+        start:
+            _start < const Duration(milliseconds: 500) ? Duration.zero : _start,
         // Within a second of the end is the end.
         end: _length - _end < const Duration(seconds: 1) ? null : _end,
       );
@@ -152,6 +186,22 @@ class _TrimSheetState extends State<TrimSheet> {
                 start: _before == null || values.start != _before!.start),
           ),
         ),
+        if (_suggested case final suggested?)
+          if (suggested != _range)
+            SheetAction(
+              icon: Icons.auto_fix_high_rounded,
+              label: '只留歌曲部分',
+              trailing: Text(
+                '${formatDuration(Duration(milliseconds: suggested.start.round()))}'
+                ' – '
+                '${formatDuration(Duration(milliseconds: suggested.end.round()))}',
+                style: AppTypography.caption,
+              ),
+              onTap: () {
+                Haptics.selection();
+                setState(() => _range = suggested);
+              },
+            ),
         if (_playingThis)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
@@ -203,6 +253,38 @@ class _TrimSheetState extends State<TrimSheet> {
       ],
     );
   }
+}
+
+/// Where the song itself lies in [length] of video. The subtitles say how
+/// far the lyrics' clock is from the video's (the shift at which most of
+/// the heard lines meet the lyrics); the recording starts at that shift —
+/// its intro included, which no lyric line marks — and ends one recording
+/// length ([recordingSeconds], when known) later. Null without a confirmed
+/// shift, or when there is nothing worth cutting.
+@visibleForTesting
+({Duration start, Duration? end})? suggestTrim(
+  Subtitles subtitles,
+  Lyrics? lyrics,
+  Duration length, {
+  double? recordingSeconds,
+}) {
+  if (lyrics == null || !lyrics.synced) return null;
+  final match = SubtitleMatcher.compare(subtitles, lyrics.lines);
+  final offset = match.offset;
+  if (!match.confirms || offset == null) return null;
+  // Less than this is not worth a cut.
+  const worth = 3.0;
+  final total = length.inMilliseconds / 1000;
+  final start = offset >= worth ? offset : 0.0;
+  final songEnd = recordingSeconds == null || recordingSeconds <= 0
+      ? null
+      : offset + recordingSeconds;
+  final end = songEnd != null && total - songEnd >= worth ? songEnd : null;
+  if (start == 0 && end == null) return null;
+  return (
+    start: Duration(milliseconds: (start * 1000).round()),
+    end: end == null ? null : Duration(milliseconds: (end * 1000).round()),
+  );
 }
 
 class _Time extends StatelessWidget {

@@ -2108,6 +2108,57 @@ class LyricsEngine {
     return lines;
   }
 
+  /// How long the recording of [title] (by [artist]) is, in seconds; of
+  /// several, the one by that artist, then the one nearest [near] seconds.
+  /// Null when none is found or NetEase could not be asked.
+  static Future<int?> recordingSeconds(String title,
+      {String? artist, int near = 0}) async {
+    final query =
+        artist == null || artist.trim().isEmpty ? title : '$title $artist';
+    final songs = await _netEaseSearch(query);
+    if (songs == null) return null;
+    final named = [
+      for (final s in songs)
+        if (matchesSongQuery('${s['name'] ?? ''}', title) &&
+            s['duration'] is int &&
+            (s['duration'] as int) > 0)
+          s,
+    ];
+    if (named.isEmpty) return null;
+    final by = artist == null
+        ? const <Map>[]
+        : [
+            for (final s in named)
+              if (_artistsOf(s).any((a) => isTitleMatching(a, artist))) s,
+          ];
+    final pool = by.isNotEmpty ? by : named;
+    int seconds(Map s) => ((s['duration'] as int) / 1000).round();
+    pool.sort((a, b) =>
+        (seconds(a) - near).abs().compareTo((seconds(b) - near).abs()));
+    return seconds(pool.first);
+  }
+
+  /// The lyrics of songs called [title] (up to [max] recordings, the one
+  /// by [artist] first when given): to hear in a video's subtitles which of
+  /// them it sings. Null when NetEase could not be asked.
+  static Future<List<List<LyricLine>>?> lyricsForTitle(String title,
+      {String? artist, int max = 3}) async {
+    final query =
+        artist == null || artist.trim().isEmpty ? title : '$title $artist';
+    final songs = await _netEaseSearch(query);
+    if (songs == null) return null;
+    final out = <List<LyricLine>>[];
+    for (final song in songs) {
+      if (out.length >= max) break;
+      final name = '${song['name'] ?? ''}';
+      final id = song['id'];
+      if (id is! int || !matchesSongQuery(name, title)) continue;
+      final lines = await _netEaseLines(id);
+      if (lines.isNotEmpty) out.add(lines);
+    }
+    return out;
+  }
+
   /// Every plausible match for a manual search, best first: the picker shows
   /// what the databases actually have rather than a single guess. Unlike the
   /// automatic lookup this does not filter by title — the listener is the

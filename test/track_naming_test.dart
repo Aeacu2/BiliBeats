@@ -1,3 +1,5 @@
+import 'package:bilibeats/models/lyrics.dart';
+import 'package:bilibeats/models/subtitles.dart';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/models/video_hints.dart';
 import 'package:bilibeats/services/database_service.dart';
@@ -58,6 +60,7 @@ void main() {
         );
     TrackNaming.enabled = true;
     TrackNaming.readWith = null;
+    TrackNaming.subtitlesFor = (bvid, {cid = 0}) async => null;
   });
 
   test('a confirmed answer names the song and records who named it', () async {
@@ -234,6 +237,72 @@ void main() {
       final now = await stored(t);
       expect(now.title, '大鱼');
       expect(now.uploader, '周深');
+    });
+
+    group('and its subtitles', () {
+      const sung = [
+        '海浪无声将夜幕深深淹没',
+        '漫过天空尽头的角落',
+        '大鱼在梦境的缝隙里游过',
+        '凝望你沉睡的轮廓',
+        '看海天一色听风起雨落',
+        '执子手吹散苍茫茫烟波',
+        '大鱼的翅膀已经太辽阔',
+        '我松开时间的绳索',
+      ];
+      List<LyricLine> lyricsOf(List<String> lines) => [
+            for (var i = 0; i < lines.length; i++)
+              LyricLine(time: i * 4.0, text: lines[i]),
+          ];
+
+      setUp(() {
+        TrackNaming.subtitlesFor = (bvid, {cid = 0}) async => Subtitles(
+              language: 'ai-zh',
+              ai: true,
+              lines: [
+                for (var i = 0; i < sung.length; i++)
+                  SubtitleLine(
+                      from: 5 + i * 4.0, to: 8 + i * 4.0, text: sung[i]),
+              ],
+            );
+      });
+      tearDown(() {
+        TrackNaming.lyricsFor = LyricsEngine.lyricsForTitle;
+      });
+
+      test('settle the song where the readings could not, not the singer',
+          () async {
+        reads(reading(null, const []));
+        TrackNaming.lyricsFor = (title, {artist, max = 3}) async =>
+            title == '大鱼' ? [lyricsOf(sung)] : const [];
+        final t = video('S1');
+        await DatabaseService.saveDownloadedTrack(t);
+        await TrackNaming.nameNow(t);
+
+        final now = await stored(t);
+        expect(now.title, '大鱼');
+        expect(now.uploader, 'the uploader');
+        expect(now.coverUrl, t.coverUrl);
+      });
+
+      test('that sing something else change nothing', () async {
+        reads(reading(null, const []));
+        TrackNaming.lyricsFor = (title, {artist, max = 3}) async => [
+              lyricsOf([
+                '我曾经跨过山和大海',
+                '也穿过人山人海',
+                '我曾经拥有着的一切',
+                '转眼都飘散如烟',
+                '我曾经失落失望失掉所有方向',
+                '直到看见平凡才是唯一的答案'
+              ]),
+            ];
+        final t = video('S2');
+        await DatabaseService.saveDownloadedTrack(t);
+        await TrackNaming.nameNow(t);
+
+        expect((await stored(t)).isNamed, isFalse);
+      });
     });
   });
 }

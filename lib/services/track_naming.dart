@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../models/lyrics.dart';
+import '../models/subtitles.dart';
 import '../models/track.dart';
 import '../models/video_hints.dart';
 import 'audio_player_handler.dart';
@@ -11,6 +13,7 @@ import 'lyrics_engine.dart';
 import 'song_judge.dart';
 import 'song_reader.dart';
 import 'song_reader_service.dart';
+import 'subtitle_match.dart';
 
 /// Matches downloads to the songs they are (设置 → 自动匹配歌曲信息).
 ///
@@ -28,7 +31,7 @@ class TrackNaming {
   /// The matcher's generation, recorded on every song it names
   /// ([Track.matcher]). Raise it when matching gets better: songs named by
   /// an older generation are then looked at again the next time they play.
-  static const int matcher = 6;
+  static const int matcher = 7;
   static BiliBeatsAudioHandler? _handler;
 
   /// Where the evidence comes from; replaced in tests.
@@ -56,6 +59,24 @@ class TrackNaming {
     List<String> musicArtists,
     int durationSeconds,
   })? readWith;
+
+  /// The video's subtitles ([BilibiliSdk.fetchSubtitles]); replaced in
+  /// tests.
+  @visibleForTesting
+  static Future<Subtitles?> Function(String bvid, {int cid}) subtitlesFor =
+      BilibiliSdk.fetchSubtitles;
+
+  /// The lyrics of songs of one name ([LyricsEngine.lyricsForTitle]).
+  @visibleForTesting
+  static Future<List<List<LyricLine>>?> Function(String title,
+      {String? artist, int max}) lyricsFor = LyricsEngine.lyricsForTitle;
+
+  /// Forgets which songs found no name, so they are asked about again —
+  /// when there is new evidence to ask with (a login brings subtitles).
+  static Future<void> retryUnnamed() async {
+    _attempted.clear();
+    await DatabaseService.setPref(_gaveUpPref, null);
+  }
 
   /// Runs the naming of [track] now (what [autoName] queues).
   @visibleForTesting
@@ -225,8 +246,38 @@ class TrackNaming {
       musicArtists: hints.musicArtists,
       durationSeconds: track.duration,
     );
-    return SongJudge.decide(
+    final decided = SongJudge.decide(
         catalogue: found, reading: reading, uploader: uploader);
+    if (decided != null) return decided;
+    return _heardIn(track, uploader, [
+      if (found != null) (title: found.title, artist: found.artist),
+      if (reading?.song case final song?)
+        if (song.trim().isNotEmpty)
+          (title: song.trim(), artist: reading!.performers.join(' ')),
+    ]);
+  }
+
+  /// Where the two readings could not settle a video, the one whose song
+  /// is what the video's subtitles hear. That says which song it is, not
+  /// who sings it (a cover has the same words): the singer stays the
+  /// uploader, as when the readings agree on the song alone.
+  static Future<SongIdentity?> _heardIn(Track track, String uploader,
+      List<({String title, String artist})> candidates) async {
+    if (candidates.isEmpty || uploader.trim().isEmpty) return null;
+    final subtitles = await subtitlesFor(track.bvid, cid: track.cid);
+    if (subtitles == null || subtitles.isEmpty) return null;
+    final tried = <String>{};
+    for (final c in candidates) {
+      if (!tried.add(SongReader.fold(c.title))) continue;
+      final recordings = await lyricsFor(c.title, artist: c.artist, max: 3);
+      for (final lyrics in recordings ?? const <List<LyricLine>>[]) {
+        if (SubtitleMatcher.compare(subtitles, lyrics).confirms) {
+          return SongIdentity(
+              title: c.title, artist: uploader.trim(), exact: false);
+        }
+      }
+    }
+    return null;
   }
 
   /// One part of a multi-part video (an album, a concert) is asked about by

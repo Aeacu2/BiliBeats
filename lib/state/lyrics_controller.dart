@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../models/lyrics.dart';
+import '../models/subtitles.dart';
 import '../models/track.dart';
 import '../services/audio_player_handler.dart';
+import '../services/bilibili_sdk.dart';
 import '../services/lyrics_engine.dart';
 import '../services/lyrics_store.dart';
+import '../services/subtitle_match.dart';
 
 enum LyricsStatus { loading, ready, empty }
 
@@ -30,12 +33,19 @@ class LyricsState {
 /// meant for, so it is saved for that song even if playback has moved on,
 /// and shown only when that song is the one playing.
 class LyricsController {
-  LyricsController(this._handler) {
+  LyricsController(
+    this._handler, {
+    Future<Subtitles?> Function(String bvid, {int cid})? subtitles,
+  }) : _subtitles = subtitles ?? BilibiliSdk.fetchSubtitles {
     _handler.nowPlaying.addListener(_onTrackChanged);
     _onTrackChanged();
   }
 
   final BiliBeatsAudioHandler _handler;
+
+  /// The playing video's subtitles (when logged in to Bilibili): lyrics of
+  /// last resort, and the clock automatic lyrics are set against.
+  final Future<Subtitles?> Function(String bvid, {int cid}) _subtitles;
 
   final ValueNotifier<LyricsState> state = ValueNotifier(LyricsState.empty);
 
@@ -180,6 +190,45 @@ class LyricsController {
         LyricsEngine.matchesSongQuery(storedTitle, track.title);
   }
 
+  /// What the video's subtitles say, as lyrics, when they read like a
+  /// song: timed against this very video. Null when there are none.
+  Future<Lyrics?> _fromSubtitles(Track track) async {
+    final subtitles = await _subtitles(track.bvid, cid: track.cid);
+    if (subtitles == null || !SubtitleMatcher.looksSung(subtitles)) return null;
+    return Lyrics(
+      source: 'bilibili',
+      title: track.isNamed
+          ? track.title
+          : track.partTitle ??
+              LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ??
+              track.title,
+      artist: 'B站字幕',
+      lines: SubtitleMatcher.asLyrics(subtitles),
+    );
+  }
+
+  /// Library lyrics are timed for the record; the video may run ahead of
+  /// it or behind (an intro, a live take). Where the video's subtitles
+  /// hear enough of the lyrics at one steady shift, the lyrics are moved
+  /// by it — as the automatic answer, which a calibration still overrides.
+  Future<void> _setAgainstVideo(Track track, Lyrics lyrics, int revision,
+      bool Function() owns) async {
+    if (!lyrics.synced || lyrics.source == 'bilibili') return;
+    final subtitles = await _subtitles(track.bvid, cid: track.cid);
+    if (subtitles == null || subtitles.isEmpty) return;
+    final match = SubtitleMatcher.compare(subtitles, lyrics.lines);
+    final offset = match.offset;
+    if (!match.confirms || offset == null) return;
+    final rounded = (offset * 100).round() / 100;
+    if ((rounded - lyrics.offset).abs() < 0.3) return;
+    final shifted = lyrics.copyWith(offset: rounded);
+    final stands = await LyricsStore.putAutomatic(track.id, shifted,
+        expectedRevision: revision);
+    if (stands && owns()) {
+      state.value = LyricsState(LyricsStatus.ready, shifted);
+    }
+  }
+
   Future<void> _load(Track track, int generation,
       {bool renamed = false}) async {
     final revision = LyricsStore.revisionOf(track.id);
@@ -210,7 +259,7 @@ class LyricsController {
 
       final named = _namedBy(track);
       final failuresBefore = LyricsEngine.httpFailures;
-      final fresh = await LyricsEngine.autoFetchLyrics(
+      var fresh = await LyricsEngine.autoFetchLyrics(
         track.rawTitle,
         song: named.song,
         artist: named.artist,
@@ -219,6 +268,9 @@ class LyricsController {
       // "Nothing found" is only remembered when every provider answered:
       // a lookup made offline is tried again the next time the song plays.
       final asked = LyricsEngine.httpFailures == failuresBefore;
+      if (fresh.isEmpty && asked) {
+        fresh = await _fromSubtitles(track) ?? fresh;
+      }
       if (fresh.isEmpty && asked) _misses[track.id] = _nameKeyOf(track);
       if (!owns()) return;
       if (fresh.isEmpty && !asked) {
@@ -235,6 +287,7 @@ class LyricsController {
       );
       if (!stands || !owns()) return;
       publish(fresh);
+      await _setAgainstVideo(track, fresh, revision, owns);
     } catch (error, stack) {
       debugPrint('Lyrics load failed for ${track.id}: $error\n$stack');
       if (owns()) publish(Lyrics.none);

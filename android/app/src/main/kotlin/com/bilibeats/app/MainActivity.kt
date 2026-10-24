@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.DocumentsContract
 import android.provider.Settings
+import android.webkit.CookieManager
 import androidx.core.app.ActivityCompat
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -51,6 +52,26 @@ class MainActivity : AudioServiceActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "openAudioFolder" -> result.success(openAudioFolder())
+                else -> result.notImplemented()
+            }
+        }
+        // The in-app Bilibili login (a WebView): its session cookie is
+        // HttpOnly, out of reach of the page's script, so it is read here.
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "bilibeats/account",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "cookies" -> {
+                    val url = call.argument<String>("url") ?: "https://www.bilibili.com"
+                    result.success(CookieManager.getInstance().getCookie(url) ?: "")
+                }
+                "clearCookies" -> {
+                    CookieManager.getInstance().removeAllCookies { _ ->
+                        CookieManager.getInstance().flush()
+                        result.success(null)
+                    }
+                }
                 else -> result.notImplemented()
             }
         }

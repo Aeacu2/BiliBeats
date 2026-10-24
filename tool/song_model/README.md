@@ -82,6 +82,19 @@ bge-small-zh-v1.5 597 · LERT-small 600 · granite-97m-multilingual-r2 612 ·
 **mmBERT-small 643**. Feeding the model the rules' answer as an input did not
 help (the rules are right too seldom on training data to be worth trusting).
 
+## Subtitles as evidence
+
+Bilibili's subtitles (logged-in viewers only) are what is heard in a video;
+the app confirms a song where they hear its lyrics
+(`lib/services/subtitle_match.dart`). `subtitles.py` measures that on
+`hold`: how many videos have subtitles, how well a match tells the right
+song's lyrics from a wrong candidate's, and how many unnamed videos it
+would name. Set the thresholds in `SubtitleMatch` from its grid.
+
+```bash
+SESSDATA='…' python3 subtitles.py rules.json reads.json --set hold
+```
+
 ## Labelling more
 
 `crawl.py` / `crawl_titles.py` collect videos, `mkbatch*.py` cut them into

@@ -5,11 +5,13 @@ import 'package:flutter/services.dart';
 
 import '../app/app_services.dart';
 import '../services/audio_folder.dart';
+import '../services/bili_account.dart';
 import '../services/background_protection.dart';
 import '../services/library_transfer.dart';
 import '../services/track_naming.dart';
 import '../theme/app_theme.dart';
 import '../utils/snack.dart';
+import '../widgets/bili_account_sheet.dart';
 import '../widgets/download_management_sheet.dart';
 import '../widgets/sheet.dart';
 
@@ -34,6 +36,7 @@ class _SettingsSheetState extends State<SettingsSheet>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_refresh());
+    unawaited(BiliAccountStore.ensureLoaded());
   }
 
   @override
@@ -164,6 +167,27 @@ class _SettingsSheetState extends State<SettingsSheet>
           icon: Icons.content_paste_go_rounded,
           label: '导入资料库',
           onTap: _import,
+        ),
+        // Optional: everything works without it; logged in, subtitles
+        // help with names, lyrics and trims, and favourites can be
+        // imported. Never asked for anywhere else.
+        ValueListenableBuilder<BiliAccount?>(
+          valueListenable: BiliAccountStore.current,
+          builder: (context, account, _) => SheetAction(
+            icon: Icons.account_circle_outlined,
+            label: '哔哩哔哩账号',
+            trailing: Text(
+              account == null
+                  ? '未登录'
+                  : (account.name.isEmpty ? '已登录' : account.name),
+              style: AppTypography.caption,
+            ),
+            onTap: () {
+              final navigator = Navigator.of(context);
+              navigator.pop();
+              unawaited(BiliAccountSheet.show(navigator.context));
+            },
+          ),
         ),
         SheetAction(
           icon: Icons.history_rounded,

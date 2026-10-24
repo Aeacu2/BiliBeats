@@ -60,6 +60,17 @@ void main() {
       expect(profile.seedsFor(3), isEmpty);
     });
 
+    test('music watched on Bilibili seeds, and is not offered back', () {
+      final profile = TasteProfile.build(
+        favourites: [],
+        history: [],
+        watched: [t('BVwatched', '起风了', '买辣椒也用券')],
+        searches: [],
+      );
+      expect(profile.seedsFor(1).single.bvid, 'BVwatched');
+      expect(profile.knownVideos, contains('BVwatched'));
+    });
+
     test('search history alone is something to go on', () {
       final profile =
           TasteProfile.build(favourites: [], history: [], searches: ['周深']);

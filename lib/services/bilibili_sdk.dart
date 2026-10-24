@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import '../models/subtitles.dart';
 import '../models/track.dart';
 import '../models/video_hints.dart';
+import 'bili_account.dart';
 import 'bili_http.dart';
 import 'fingerprint_service.dart';
 import 'wbi_signer.dart';
@@ -371,6 +373,333 @@ class BilibiliSdk {
       _hintsMemo[memoKey] = hints;
     }
     return hints;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Subtitles
+  // ---------------------------------------------------------------------------
+
+  static final Map<String, Subtitles?> _subtitlesMemo = {};
+
+  /// The subtitles of one part of [bvid]: the uploader's own when there are
+  /// any, else Bilibili's speech recognition; Chinese first. Null when the
+  /// part has none, or when they could not be fetched (not remembered, so
+  /// asked again next time). Never throws.
+  ///
+  /// Asked without an account: Bilibili may then list subtitles without
+  /// their address, which is the same as having none.
+  static Future<Subtitles?> fetchSubtitles(String bvid, {int cid = 0}) async {
+    if (bvid.isEmpty) return null;
+    // Bilibili gives subtitles to logged-in viewers only.
+    final account = await BiliAccountStore.cookies();
+    if (account == null) return null;
+    final key = '$bvid/$cid';
+    if (_subtitlesMemo.containsKey(key)) return _subtitlesMemo[key];
+    try {
+      var part = cid;
+      if (part == 0) {
+        final view = _dataOf(await _viewBody('view', 'bvid', bvid));
+        if (view is Map && view['cid'] is int) part = view['cid'] as int;
+      }
+      if (part == 0) return null;
+      final list = await _playerSubtitles(bvid, part);
+      if (list == null) return null;
+      final chosen = pickSubtitle(list);
+      Subtitles? found;
+      if (chosen != null) {
+        var url = '${chosen['subtitle_url']}';
+        if (url.startsWith('//')) url = 'https:$url';
+        url = url.replaceFirst('http:', 'https:');
+        final body = await _httpGet(url);
+        if (body == null) return null;
+        found = parseSubtitleBody(
+          body,
+          language: '${chosen['lan'] ?? ''}',
+          ai: isAiSubtitle(chosen),
+        );
+      }
+      if (_subtitlesMemo.length > 200) _subtitlesMemo.clear();
+      return _subtitlesMemo[key] = found;
+    } catch (e) {
+      debugPrint('Subtitles of $bvid failed: $e');
+      return null;
+    }
+  }
+
+  /// The player's subtitle list for one part; null when it could not be
+  /// asked.
+  static Future<List<Map>?> _playerSubtitles(String bvid, int cid) async {
+    final cookies = await _withAccount();
+    Future<String?> signed() async {
+      try {
+        final params = await WbiSigner.signParams({
+          'bvid': bvid,
+          'cid': cid,
+          ...FingerprintService.getDmImgParams(),
+        });
+        final query = params.entries
+            .map((e) => '${e.key}=${Uri.encodeComponent(e.value.toString())}')
+            .join('&');
+        return await _httpGet('$_baseUrl/x/player/wbi/v2?$query',
+            cookies: cookies);
+      } catch (e) {
+        debugPrint('Signed player request failed: $e');
+        return null;
+      }
+    }
+
+    var data = _dataOf(await signed());
+    data ??= _dataOf(await _httpGet(
+        '$_baseUrl/x/player/v2?bvid=$bvid&cid=$cid',
+        cookies: cookies));
+    if (data is! Map) return null;
+    final subtitle = data['subtitle'];
+    final list = subtitle is Map ? subtitle['subtitles'] : null;
+    return list is List ? list.whereType<Map>().toList() : const [];
+  }
+
+  static bool isAiSubtitle(Map entry) =>
+      entry['type'] == 1 || '${entry['lan'] ?? ''}'.startsWith('ai-');
+
+  /// Which of a part's subtitles to read: the uploader's over the machine's,
+  /// Chinese over other languages; only ones that can actually be fetched.
+  @visibleForTesting
+  static Map? pickSubtitle(List<Map> list) {
+    final usable = [
+      for (final s in list)
+        if ('${s['subtitle_url'] ?? ''}'.trim().isNotEmpty) s,
+    ];
+    if (usable.isEmpty) return null;
+    int rank(Map s) {
+      final lan = '${s['lan'] ?? ''}'.toLowerCase();
+      final chinese = lan.contains('zh') ? 0 : 1;
+      return (isAiSubtitle(s) ? 2 : 0) + chinese;
+    }
+
+    usable.sort((a, b) => rank(a).compareTo(rank(b)));
+    return usable.first;
+  }
+
+  /// A subtitle file (`{"body": [{"from", "to", "content"}]}`), in order.
+  @visibleForTesting
+  static Subtitles? parseSubtitleBody(String body,
+      {required String language, required bool ai}) {
+    try {
+      final json = jsonDecode(body);
+      final raw = json is Map ? json['body'] : null;
+      if (raw is! List) return null;
+      final lines = <SubtitleLine>[];
+      for (final item in raw) {
+        if (item is! Map) continue;
+        final from = item['from'], to = item['to'];
+        final text = '${item['content'] ?? ''}'.trim();
+        if (from is! num || to is! num || text.isEmpty) continue;
+        lines.add(SubtitleLine(
+            from: from.toDouble(), to: to.toDouble(), text: text));
+      }
+      lines.sort((a, b) => a.from.compareTo(b.from));
+      return Subtitles(language: language, ai: ai, lines: lines);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // The listener's account (subtitles, favourites, history)
+  // ---------------------------------------------------------------------------
+
+  /// The device fingerprint and, when logged in, the session.
+  static Future<String> _withAccount() async {
+    final device = await FingerprintService.getCookieString();
+    final account = await BiliAccountStore.cookies();
+    return [
+      if (device.isNotEmpty) device,
+      if (account != null && account.isNotEmpty) account,
+    ].join('; ');
+  }
+
+  /// Who [cookies] log in as; null when they do not (expired, logged out)
+  /// or Bilibili could not be asked.
+  static Future<BiliAccount?> accountFor(String cookies) async {
+    final device = await FingerprintService.getCookieString();
+    final body = await _httpGet('$_baseUrl/x/web-interface/nav',
+        cookies: [if (device.isNotEmpty) device, cookies].join('; '));
+    return parseNav(body, cookies);
+  }
+
+  @visibleForTesting
+  static BiliAccount? parseNav(String? body, String cookies) {
+    if (body == null) return null;
+    try {
+      final json = jsonDecode(body);
+      final data = json is Map ? json['data'] : null;
+      if (data is! Map || data['isLogin'] != true || data['mid'] is! int) {
+        return null;
+      }
+      return BiliAccount(
+        cookies: cookies,
+        mid: data['mid'] as int,
+        name: '${data['uname'] ?? ''}',
+        face: '${data['face'] ?? ''}'.replaceFirst('http:', 'https:'),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static const String _passport = 'https://passport.bilibili.com';
+
+  /// Starts a QR login: the address to show as a code, and the key to poll
+  /// with. Null when Bilibili could not be asked.
+  static Future<({String url, String key})?> qrLoginStart() async {
+    final data = _dataOf(await _httpGet(
+        '$_passport/x/passport-login/web/qrcode/generate'));
+    if (data is! Map) return null;
+    final url = data['url'], key = data['qrcode_key'];
+    if (url is! String || key is! String || url.isEmpty) return null;
+    return (url: url, key: key);
+  }
+
+  /// Where a QR login stands: waiting, scanned, expired, or done with the
+  /// session's cookies. Null when Bilibili could not be asked.
+  static Future<QrLogin?> qrLoginPoll(String key) async {
+    final data = _dataOf(await _httpGet(
+        '$_passport/x/passport-login/web/qrcode/poll'
+        '?qrcode_key=${Uri.encodeQueryComponent(key)}'));
+    return parseQrPoll(data);
+  }
+
+  @visibleForTesting
+  static QrLogin? parseQrPoll(Object? data) {
+    if (data is! Map) return null;
+    switch (data['code']) {
+      case 86101:
+        return const QrLogin(QrLoginState.waiting);
+      case 86090:
+        return const QrLogin(QrLoginState.scanned);
+      case 86038:
+        return const QrLogin(QrLoginState.expired);
+      case 0:
+        // The cookies come back as the query of a cross-domain address, as
+        // written in a cookie (still percent-encoded).
+        final url = '${data['url'] ?? ''}';
+        final query = url.contains('?') ? url.substring(url.indexOf('?') + 1) : '';
+        final cookies = BiliAccount.sessionCookies(query.replaceAll('&', ';'));
+        if (!BiliAccount.hasSession(cookies)) return null;
+        return QrLogin(QrLoginState.done, cookies);
+    }
+    return null;
+  }
+
+  /// The account's favourites folders: id, name and how many videos.
+  static Future<List<({int id, String title, int count})>?> favoriteFolders(
+      int mid) async {
+    final data = _dataOf(await _httpGet(
+        '$_baseUrl/x/v3/fav/folder/created/list-all?up_mid=$mid',
+        cookies: await _withAccount()));
+    if (data is! Map) return data == null ? null : const [];
+    final list = data['list'];
+    if (list is! List) return const [];
+    return [
+      for (final f in list)
+        if (f is Map && f['id'] is int)
+          (
+            id: f['id'] as int,
+            title: unescapeHtml('${f['title'] ?? ''}'),
+            count: f['media_count'] is int ? f['media_count'] as int : 0,
+          ),
+    ];
+  }
+
+  /// Every video in a favourites folder, newest first (up to [max]). Null
+  /// when the first page could not be fetched.
+  static Future<List<Track>?> favoriteTracks(int folderId,
+      {int max = 1000}) async {
+    final cookies = await _withAccount();
+    final out = <Track>[];
+    for (var page = 1; out.length < max; page++) {
+      final data = _dataOf(await _httpGet(
+          '$_baseUrl/x/v3/fav/resource/list'
+          '?media_id=$folderId&pn=$page&ps=20&platform=web',
+          cookies: cookies));
+      if (data is! Map) return page == 1 ? null : out;
+      out.addAll(parseFavoritePage(data));
+      if (data['has_more'] != true) break;
+    }
+    return out;
+  }
+
+  @visibleForTesting
+  static List<Track> parseFavoritePage(Map data) {
+    final medias = data['medias'];
+    if (medias is! List) return const [];
+    return [
+      for (final m in medias)
+        if (m is Map &&
+            m['type'] == 2 && // a video (not audio or a collection)
+            m['bvid'] is String &&
+            (m['bvid'] as String).isNotEmpty &&
+            // 已失效视频: deleted, nothing to download.
+            m['attr'] != 9 &&
+            m['attr'] != 1 &&
+            m['title'] != '已失效视频')
+          Track(
+            id: '${m['bvid']}_p1',
+            bvid: m['bvid'] as String,
+            cid: m['ugc'] is Map && m['ugc']['first_cid'] is int
+                ? m['ugc']['first_cid'] as int
+                : 0,
+            title: unescapeHtml('${m['title'] ?? ''}'),
+            rawTitle: unescapeHtml('${m['title'] ?? ''}'),
+            uploader: m['upper'] is Map ? '${m['upper']['name'] ?? ''}' : '',
+            coverUrl: '${m['cover'] ?? ''}'.replaceFirst('http:', 'https:'),
+            duration: m['duration'] is int ? m['duration'] as int : 0,
+          ),
+    ];
+  }
+
+  /// Music zone names Bilibili gives in a watch history (both the old
+  /// partitions and the 2025 ones).
+  static final RegExp _musicZoneName = RegExp(
+      r'音乐|翻唱|演奏|VOCALOID|UTAU|MV|电音|说唱');
+
+  /// Songs the account has watched lately, newest first: videos from the
+  /// music zones only. Null when it could not be fetched (or nobody is
+  /// logged in).
+  static Future<List<Track>?> watchHistory({int max = 60}) async {
+    if (await BiliAccountStore.cookies() == null) return null;
+    final data = _dataOf(await _httpGet(
+        '$_baseUrl/x/web-interface/history/cursor?ps=30&type=archive',
+        cookies: await _withAccount()));
+    if (data is! Map) return null;
+    return parseHistory(data).take(max).toList();
+  }
+
+  @visibleForTesting
+  static List<Track> parseHistory(Map data) {
+    final list = data['list'];
+    if (list is! List) return const [];
+    return [
+      for (final item in list)
+        if (item is Map &&
+            item['history'] is Map &&
+            item['history']['bvid'] is String &&
+            (item['history']['bvid'] as String).isNotEmpty &&
+            _musicZoneName.hasMatch('${item['tag_name'] ?? ''}') &&
+            !RegExp(r'教学|乐评|盘点').hasMatch('${item['tag_name']}'))
+          Track(
+            id: '${item['history']['bvid']}_p${item['history']['page'] is int && (item['history']['page'] as int) > 0 ? item['history']['page'] : 1}',
+            bvid: item['history']['bvid'] as String,
+            cid: item['history']['cid'] is int
+                ? item['history']['cid'] as int
+                : 0,
+            title: unescapeHtml('${item['title'] ?? ''}'),
+            rawTitle: unescapeHtml('${item['title'] ?? ''}'),
+            uploader: '${item['author_name'] ?? ''}',
+            coverUrl: '${item['cover'] ?? ''}'.replaceFirst('http:', 'https:'),
+            duration: item['duration'] is int ? item['duration'] as int : 0,
+          ),
+    ];
   }
 
   /// The `data` of a code-0 answer, or null.
@@ -876,4 +1205,17 @@ class BilibiliSdk {
     }
     return false;
   }
+}
+
+enum QrLoginState { waiting, scanned, expired, done }
+
+/// One answer while a QR login is pending.
+@immutable
+class QrLogin {
+  final QrLoginState state;
+
+  /// The session, once [state] is done.
+  final String? cookies;
+
+  const QrLogin(this.state, [this.cookies]);
 }

@@ -48,6 +48,9 @@ class TasteProfile {
   static const double recentPlayWeight = 2.0;
   static const double downloadWeight = 0.5;
 
+  /// A music video watched on Bilibili, latest first.
+  static const double watchedWeight = 1.0;
+
   /// Per counted listen ([PlayStat]), up to ten.
   static const double playCountWeight = 0.6;
 
@@ -59,6 +62,7 @@ class TasteProfile {
     required List<Track> history,
     List<Track> downloaded = const [],
     Map<String, PlayStat> plays = const {},
+    List<Track> watched = const [],
     required List<String> searches,
   }) {
     final weights = <String, double>{};
@@ -90,7 +94,13 @@ class TasteProfile {
       final n = plays[t.id]?.count ?? 0;
       if (n > 0) absorb(t, playCountWeight * math.min(n, 10));
     }
-    for (final t in [...favourites, ...history, ...downloaded]) {
+    // Music the account watched on Bilibili itself (when logged in): a
+    // taste shown elsewhere, weighed like a recent play here.
+    final lately = watched.take(_historyDepth).toList();
+    for (var i = 0; i < lately.length; i++) {
+      absorb(lately[i], watchedWeight * (1 - 0.75 * i / _historyDepth));
+    }
+    for (final t in [...favourites, ...history, ...downloaded, ...watched]) {
       videos.add(t.bvid);
       final key = songKey(t);
       if (key.isNotEmpty) songs.add(key);
@@ -273,6 +283,22 @@ class RecommendationEngine {
     return out;
   }
 
+  static List<Track> _watchedCache = const [];
+  static DateTime? _watchedAt;
+
+  /// The account's recent music on Bilibili, asked at most every ten
+  /// minutes; nothing when not logged in or not reachable.
+  static Future<List<Track>> _watched() async {
+    final at = _watchedAt;
+    if (at != null && DateTime.now().difference(at).inMinutes < 10) {
+      return _watchedCache;
+    }
+    final fresh = await BilibiliSdk.watchHistory();
+    if (fresh == null) return _watchedCache;
+    _watchedAt = DateTime.now();
+    return _watchedCache = fresh;
+  }
+
   /// Returns songs for the listener, best first. Empty when there is
   /// nothing to learn from, or when every page has been shown. [page]
   /// drives 换一批 and infinite scroll: each page expands other seed songs
@@ -287,6 +313,7 @@ class RecommendationEngine {
       history: await DatabaseService.getRecentlyPlayed(),
       downloaded: await DatabaseService.getDownloadedTracks(),
       plays: await DatabaseService.getPlayStats(),
+      watched: await _watched(),
       searches: await DatabaseService.getSearchHistory(),
     );
     if (profile.isEmpty) return const [];

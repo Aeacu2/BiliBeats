@@ -42,7 +42,8 @@ lib/
                             lyric_library (Kugou and QQ Music: search, lyrics),
                             lyrics_store, track_naming, track_credit,
                             library_transfer (the library as text, to another device),
-                            trim_store (per-song start/end cuts), audio_folder
+                            trim_store (per-song start/end cuts), audio_folder,
+                            bili_account, subtitle_match
   models/  theme/  utils/
 test/                       *_test.dart; fake_audio_player + audio_test_harness for playback;
                             tools/ holds harnesses run by hand (rule replay, model parity)
@@ -128,6 +129,18 @@ docs/archive/               old review notes and a superseded feature list — h
   最常播放 / 很久没听 and recommendations read them. A trim (`TrimStore`,
   `bilibeat_trims.json`) is applied by seeking, not by clipping the source, so
   positions — and lyric timing — stay the file's.
+- **Bilibili account and subtitles.** 设置 → 登录哔哩哔哩: in-app login page on
+  Android (the WebView's HttpOnly session cookie is read natively, channel
+  `bilibeats/account`) or a QR code. `BiliAccountStore` keeps the cookies in
+  `bilibeat_account.json`; they are sent only for what needs an account —
+  subtitles, favourites (导入收藏夹, through `LibraryTransfer`), watch history
+  (recommendation seeds). Subtitles (`BilibiliSdk.fetchSubtitles`, none without a
+  login) are compared with lyrics in `SubtitleMatcher`: a match confirms the song,
+  never the singer, and a poor match is no evidence against (recognition mishears
+  singing). Uses: naming where the two readers could not settle a video
+  (`TrackNaming._heardIn`), shifting automatic lyrics onto the video's clock, lyrics
+  of last resort (source `bilibili`), and a suggested trim. The thresholds in
+  `SubtitleMatch` are guesses until `tool/song_model/subtitles.py` has measured them.
 - **Audio files.** On Android, `AudioFilesProvider` (Kotlin) shows the downloaded
   songs read-only in the system Files app as "BiliBeats", named after the songs;
   设置 → 音频文件 opens it. The files themselves stay in private storage.
