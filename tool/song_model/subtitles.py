@@ -116,7 +116,8 @@ def lyrics_of(title, artist, lyr, put, n=3):
 
 
 # ---- the app's comparison (SubtitleMatcher.compare), without timing --------------------------------
-def normalize(s): return ''.join(c for c in E.t2s(s).lower() if c.isalnum())
+# Match SubtitleMatcher.normalize: the app does not convert traditional Chinese.
+def normalize(s): return ''.join(c for c in s.lower() if c.isalnum())
 def grams(s): return {s[i:i + 2] for i in range(len(s) - 1)}
 
 

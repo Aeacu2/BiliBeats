@@ -95,6 +95,12 @@ would name. Set the thresholds in `SubtitleMatch` from its grid.
 SESSDATA='…' python3 subtitles.py rules.json reads.json --set hold
 ```
 
+This needs `work/eval.json` and the matching `rules.json` and `reads.json`
+generated above, in the same video order. Use predictions from the checkpoint
+trained without `hold`, not the shipping checkpoint (which also trains on
+`hold`). The subtitle comparison preserves traditional Chinese, just as the
+app does; simplified/traditional equivalence is only used to score song names.
+
 ## Labelling more
 
 `crawl.py` / `crawl_titles.py` collect videos, `mkbatch*.py` cut them into

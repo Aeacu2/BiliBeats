@@ -91,7 +91,8 @@ class _FavoriteFoldersState extends State<_FavoriteFolders> {
     Haptics.light();
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _importing = folder.id);
-    final tracks = await BilibiliSdk.favoriteTracks(folder.id);
+    final tracks =
+        await BilibiliSdk.favoriteTracks(folder.id, max: folder.count);
     if (!mounted) return;
     setState(() => _importing = null);
     if (tracks == null) {
