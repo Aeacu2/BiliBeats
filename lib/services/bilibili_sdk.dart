@@ -806,6 +806,57 @@ class BilibiliSdk {
     return [];
   }
 
+  /// Music sub-zones whose videos are songs: original, cover, VOCALOID,
+  /// performance, MV, live, general and electronic. Reviews, rankings and
+  /// lessons (乐评盘点, 音乐教学) are about songs, not songs.
+  static const Set<int> songZones = {28, 31, 30, 59, 193, 29, 130, 194};
+
+  /// What Bilibili lists beside [bvid] (相关推荐): the videos people who
+  /// watch it go on to watch. Only songs ([songZones]) are kept, with their
+  /// play counts. Throws [BiliApiException] when it could not be asked.
+  static Future<List<({Track track, int views})>> related(String bvid) async {
+    final body = await _viewBody('archive/related', 'bvid', bvid);
+    if (body == null || isRiskControlled(body)) {
+      throw BiliApiException('related to $bvid: no answer');
+    }
+    return parseRelated(body);
+  }
+
+  @visibleForTesting
+  static List<({Track track, int views})> parseRelated(String body) {
+    final data = _dataOf(body);
+    if (data is! List) return const [];
+    final out = <({Track track, int views})>[];
+    for (final item in data) {
+      if (item is! Map) continue;
+      final bvid = item['bvid'];
+      if (bvid is! String || bvid.isEmpty) continue;
+      // A video without a zone id is let through (title and length are
+      // still checked by the caller): should Bilibili stop sending the old
+      // ids, recommendations thin out rather than vanish.
+      final tid = item['tid'];
+      if (tid is int && tid != 0 && !songZones.contains(tid)) continue;
+      final title = unescapeHtml('${item['title'] ?? ''}').trim();
+      final owner = item['owner'];
+      final pic = '${item['pic'] ?? ''}'.replaceFirst('http:', 'https:');
+      final stat = item['stat'];
+      out.add((
+        track: Track(
+          id: '${bvid}_p1',
+          bvid: bvid,
+          cid: item['cid'] is int ? item['cid'] as int : 0,
+          title: title,
+          rawTitle: title,
+          uploader: owner is Map ? '${owner['name'] ?? ''}'.trim() : '',
+          coverUrl: pic.startsWith('//') ? 'https:$pic' : pic,
+          duration: item['duration'] is int ? item['duration'] as int : 0,
+        ),
+        views: stat is Map && stat['view'] is int ? stat['view'] as int : 0,
+      ));
+    }
+    return out;
+  }
+
   /// True when the response is B站's risk-control rejection: code -352 or
   /// 412, or — the quiet form — code 0 with a `v_voucher` to solve a captcha
   /// with and no results. Either should trigger the fallback API.

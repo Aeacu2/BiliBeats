@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../models/lyrics.dart';
 import '../theme/app_theme.dart';
@@ -24,6 +26,12 @@ import '../theme/motion.dart';
 class LyricsView extends StatefulWidget {
   final Lyrics lyrics;
   final ValueListenable<Duration> position;
+
+  /// Whether the song is moving. The player reports its position a few
+  /// times a second; a word-timed line is filled between reports by
+  /// extrapolating from the last one, but only while this is true. Without
+  /// it, the fill runs on briefly past each report.
+  final ValueListenable<bool>? playing;
   final ValueChanged<Duration>? onSeek;
   final bool calibrating;
 
@@ -34,6 +42,7 @@ class LyricsView extends StatefulWidget {
     super.key,
     required this.lyrics,
     required this.position,
+    this.playing,
     this.onSeek,
     this.calibrating = false,
     this.onCalibrate,
@@ -226,6 +235,7 @@ class _LyricsViewState extends State<LyricsView> {
                           distance: _synced ? (i - _active).abs() : 1,
                           active: i == _active,
                           position: widget.position,
+                          playing: widget.playing,
                           offset: widget.lyrics.offset,
                           onTap: tappable ? () => _tap(i) : null,
                         ),
@@ -259,6 +269,7 @@ class _Line extends StatelessWidget {
 
   /// For a word-timed line while it is the one being sung.
   final ValueListenable<Duration> position;
+  final ValueListenable<bool>? playing;
   final double offset;
 
   const _Line({
@@ -269,28 +280,21 @@ class _Line extends StatelessWidget {
     required this.distance,
     required this.onTap,
     required this.position,
+    required this.playing,
     required this.offset,
   });
 
-  /// The line as text; while it is sung and its words are timed, the words
-  /// still to come wait in a dimmer shade, so the line fills as it is sung.
+  /// The line as text; while it is sung and its words are timed, it fills
+  /// left to right as the song moves, KTV-style ([KaraokeText]).
   Widget _text() {
     final words = line.words;
     if (!active || !synced || words == null) return Text(line.text);
-    return ValueListenableBuilder<Duration>(
-      valueListenable: position,
-      builder: (context, at, _) {
-        final now = at.inMilliseconds / 1000 - offset;
-        return Text.rich(TextSpan(children: [
-          for (final word in words)
-            TextSpan(
-              text: word.text,
-              style: word.start <= now
-                  ? null
-                  : const TextStyle(color: AppColors.white45),
-            ),
-        ]));
-      },
+    return KaraokeText(
+      text: line.text,
+      words: words,
+      position: position,
+      playing: playing,
+      offset: offset,
     );
   }
 
@@ -347,6 +351,182 @@ class _Line extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A word-timed line being sung, filled left to right like a KTV caption:
+/// the sung part in the line's own colour, the rest dimmed, and the edge
+/// between them gliding through each word over the time it is sung.
+///
+/// It repaints every frame while it is on screen, without rebuilding.
+class KaraokeText extends StatefulWidget {
+  final String text;
+  final List<LyricWord> words;
+  final ValueListenable<Duration> position;
+  final ValueListenable<bool>? playing;
+
+  /// The lyrics' timing correction, in seconds.
+  final double offset;
+
+  const KaraokeText({
+    super.key,
+    required this.text,
+    required this.words,
+    required this.position,
+    this.playing,
+    this.offset = 0,
+  });
+
+  /// How far into each word the song is at [now] (seconds, on the lyrics'
+  /// own clock): 0 before it starts, 1 once it ends, linear in between.
+  static List<double> progress(List<LyricWord> words, double now) => [
+        for (final w in words)
+          if (now >= w.end)
+            1.0
+          else if (now <= w.start)
+            0.0
+          else
+            (now - w.start) / (w.end - w.start),
+      ];
+
+  @override
+  State<KaraokeText> createState() => KaraokeTextState();
+}
+
+@visibleForTesting
+class KaraokeTextState extends State<KaraokeText>
+    with SingleTickerProviderStateMixin {
+  late final Ticker _ticker = createTicker(_tick);
+
+  /// Seconds on the lyrics' clock, as last painted.
+  final ValueNotifier<double> now = ValueNotifier(0);
+
+  /// The last reported position and when (ticker time) it arrived.
+  int _reportedMs = -1;
+  Duration _reportedAt = Duration.zero;
+  Duration _elapsed = Duration.zero;
+
+  /// Never run ahead of the last report by more than this: if the reports
+  /// stop (a stall the playing flag has not caught up with), so does the fill.
+  static const int _maxLeadMs = 600;
+
+  @override
+  void initState() {
+    super.initState();
+    _reportedMs = widget.position.value.inMilliseconds;
+    now.value = _reportedMs / 1000 - widget.offset;
+    _ticker.start();
+  }
+
+  void _tick(Duration elapsed) {
+    _elapsed = elapsed;
+    final reported = widget.position.value.inMilliseconds;
+    if (reported != _reportedMs) {
+      _reportedMs = reported;
+      _reportedAt = elapsed;
+    }
+    final moving = widget.playing?.value ?? true;
+    final lead = moving
+        ? (elapsed - _reportedAt).inMilliseconds.clamp(0, _maxLeadMs)
+        : 0;
+    final next = (_reportedMs + lead) / 1000 - widget.offset;
+    // A report slightly behind what was already drawn is jitter, not the
+    // song going back: hold rather than let the fill flicker backwards.
+    // A real jump back (a seek) is larger and is followed.
+    final behind = now.value - next;
+    if (behind > 0 && behind < 0.35) return;
+    now.value = next;
+  }
+
+  @visibleForTesting
+  Duration get elapsed => _elapsed;
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    now.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = DefaultTextStyle.of(context).style;
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    return Semantics(
+      label: widget.text,
+      excludeSemantics: true,
+      child: LayoutBuilder(builder: (context, constraints) {
+        TextPainter painter(Color? color) => TextPainter(
+              text: TextSpan(
+                  text: widget.text, style: style.copyWith(color: color)),
+              textDirection: direction,
+              textScaler: scaler,
+            )..layout(maxWidth: constraints.maxWidth);
+        final sung = painter(style.color);
+        final ahead = painter(AppColors.white45);
+        return CustomPaint(
+          size: sung.size,
+          painter: _KaraokePainter(
+            sung: sung,
+            ahead: ahead,
+            words: widget.words,
+            now: now,
+          ),
+        );
+      }),
+    );
+  }
+}
+
+class _KaraokePainter extends CustomPainter {
+  final TextPainter sung;
+  final TextPainter ahead;
+  final List<LyricWord> words;
+  final ValueListenable<double> now;
+
+  _KaraokePainter({
+    required this.sung,
+    required this.ahead,
+    required this.words,
+    required this.now,
+  }) : super(repaint: now);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    ahead.paint(canvas, Offset.zero);
+    final fractions = KaraokeText.progress(words, now.value);
+    final clip = Path();
+    var from = 0;
+    for (var i = 0; i < words.length; i++) {
+      final to = from + words[i].text.length;
+      final f = fractions[i];
+      if (f > 0) {
+        // A word can wrap onto the next line: fill its pieces in order.
+        final boxes = sung.getBoxesForSelection(
+          TextSelection(baseOffset: from, extentOffset: to),
+          boxHeightStyle: ui.BoxHeightStyle.max,
+        );
+        final width = boxes.fold<double>(0, (sum, b) => sum + b.right - b.left);
+        var left = width * f;
+        for (final b in boxes) {
+          if (left <= 0) break;
+          final w = (b.right - b.left).clamp(0.0, left);
+          // A little taller than the line, so no stroke is cut.
+          clip.addRect(Rect.fromLTRB(b.left, b.top - 4, b.left + w, b.bottom + 4));
+          left -= w;
+        }
+      }
+      from = to;
+    }
+    canvas.save();
+    canvas.clipPath(clip);
+    sung.paint(canvas, Offset.zero);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_KaraokePainter old) =>
+      old.sung != sung || old.ahead != ahead || old.words != words;
 }
 
 class _ResumeButton extends StatelessWidget {

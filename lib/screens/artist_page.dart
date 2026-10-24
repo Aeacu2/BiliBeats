@@ -11,6 +11,7 @@ import '../theme/app_theme.dart';
 import '../utils/snack.dart';
 import '../widgets/collection_header.dart';
 import '../widgets/docked_player.dart';
+import '../widgets/sheet.dart';
 import '../widgets/song_tile.dart';
 import 'playlist_page.dart';
 
@@ -47,6 +48,27 @@ class ArtistPage extends StatelessWidget {
     if (context.mounted) unawaited(PlaylistPage.open(context, playlist.id));
   }
 
+  void _showMenu(BuildContext context, ArtistGroup group) {
+    showAppSheet<void>(
+      context,
+      builder: (sheet) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 4),
+          SheetAction(
+            icon: Icons.playlist_add_rounded,
+            label: '存为歌单',
+            onTap: () {
+              Navigator.pop(sheet);
+              _saveAsPlaylist(context, group);
+            },
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final library = AppServices.instance.library;
@@ -68,11 +90,14 @@ class ArtistPage extends StatelessWidget {
                       backgroundColor: AppColors.background,
                       surfaceTintColor: Colors.transparent,
                       actions: [
+                        // Behind 更多, where the playlist page keeps its menu:
+                        // as a bare button in that spot it made a playlist
+                        // from a tap meant for the menu.
                         if (tracks.isNotEmpty)
                           IconButton(
-                            tooltip: '存为歌单',
-                            onPressed: () => _saveAsPlaylist(context, group),
-                            icon: const Icon(Icons.playlist_add_rounded,
+                            tooltip: '更多',
+                            onPressed: () => _showMenu(context, group),
+                            icon: const Icon(Icons.more_horiz_rounded,
                                 color: AppColors.textSecondary),
                           ),
                         const SizedBox(width: 4),

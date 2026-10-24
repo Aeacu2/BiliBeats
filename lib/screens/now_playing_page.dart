@@ -418,6 +418,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
             return LyricsView(
               lyrics: state.lyrics,
               position: _position,
+              playing: _handler.playingNotifier,
               onSeek: _handler.seek,
               calibrating: _calibrating != null,
               onCalibrate: _calibrate,

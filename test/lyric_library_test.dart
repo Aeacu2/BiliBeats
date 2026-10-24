@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:bilibeats/models/lyrics.dart';
 import 'package:bilibeats/services/lyric_library.dart';
 import 'package:bilibeats/services/lyrics_engine.dart';
-import 'package:bilibeats/theme/app_theme.dart';
 import 'package:bilibeats/widgets/lyrics_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -134,8 +133,10 @@ void main() {
     });
   });
 
-  testWidgets('the line being sung fills word by word', (tester) async {
+  testWidgets('the line being sung fills continuously, KTV-style',
+      (tester) async {
     final position = ValueNotifier(const Duration(milliseconds: 44100));
+    final playing = ValueNotifier(false);
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: SizedBox(
@@ -143,36 +144,42 @@ void main() {
           child: LyricsView(
             lyrics: Lyrics(source: 'kugou', lines: LyricLibrary.parseKrc(krc)),
             position: position,
+            playing: playing,
           ),
         ),
       ),
     ));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 1));
 
-    Map<String, Color?> shades() {
-      final rich = tester
-          .widgetList<RichText>(find.byType(RichText))
-          .firstWhere((r) => r.text.toPlainText() == '海浪无声');
-      final out = <String, Color?>{};
-      rich.text.visitChildren((span) {
-        if (span is TextSpan && span.text != null) {
-          out[span.text!] = span.style?.color;
-        }
-        return true;
-      });
-      return out;
-    }
+    final karaoke = tester.widget<KaraokeText>(find.byType(KaraokeText));
+    expect(karaoke.text, '海浪无声');
+    double now() =>
+        tester.state<KaraokeTextState>(find.byType(KaraokeText)).now.value;
+    List<double> fill() => KaraokeText.progress(karaoke.words, now());
 
-    // 44.1 s: 海 (43.41) and 浪 (43.66) have begun, 无 (44.07) only just.
-    expect(shades(), {
-      '海': null,
-      '浪': null,
-      '无': null,
-      '声': AppColors.white45,
-    });
+    // 44.1 s: 海 (43.41) is sung, 浪 (43.66) nearly, 无 (44.07) just begun,
+    // 声 not yet — and the edge sits inside 无, not at a word boundary.
+    var f = fill();
+    expect(f[0], 1.0);
+    expect(f[2], inExclusiveRange(0.0, 0.5));
+    expect(f[3], 0.0);
+
+    // Paused, the fill holds between the player's reports.
+    final held = now();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(now(), held);
+
+    // Playing, it moves on between reports, frame by frame.
+    playing.value = true;
+    await tester.pump(const Duration(milliseconds: 16));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(now(), greaterThan(held));
+
+    // A seek back is followed.
     position.value = const Duration(milliseconds: 43500);
-    await tester.pump();
-    expect(shades()['浪'], AppColors.white45);
-    expect(shades()['海'], isNull);
+    await tester.pump(const Duration(milliseconds: 16));
+    f = fill();
+    expect(f[1], lessThan(1.0));
+    expect(f[2], 0.0);
   });
 }
