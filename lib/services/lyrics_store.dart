@@ -154,8 +154,23 @@ class LyricsStore {
     }
   }
 
-  static Future<void> _persist() => DatabaseService.writeStoreFile(
-        _file,
-        _entries.map((id, lyrics) => MapEntry(id, lyrics.toMap())),
-      );
+  /// Each entry as JSON, kept while that entry is unchanged. Word-timed
+  /// lyrics make the file megabytes: re-encoding all of it on the UI
+  /// isolate whenever one song's lyrics arrived was a hitch on skipping.
+  static final Expando<String> _encoded = Expando('lyrics json');
+
+  static Future<void> _persist() {
+    final out = StringBuffer('{');
+    var first = true;
+    _entries.forEach((id, lyrics) {
+      if (!first) out.write(',');
+      first = false;
+      out
+        ..write(jsonEncode(id))
+        ..write(':')
+        ..write(_encoded[lyrics] ??= jsonEncode(lyrics.toMap()));
+    });
+    out.write('}');
+    return DatabaseService.writeStoreFile(_file, EncodedJson(out.toString()));
+  }
 }

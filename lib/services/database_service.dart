@@ -54,6 +54,14 @@ List<Playlist> _parsePlaylistList(String json) {
   return out;
 }
 
+/// JSON a store has already encoded (see [DatabaseService.writeStoreFile]):
+/// written as it is, so a large store can encode only what changed.
+@immutable
+class EncodedJson {
+  final String text;
+  const EncodedJson(this.text);
+}
+
 class DatabaseService {
   static final List<Track> _recentlyPlayed = [];
   static final List<Track> _downloadedTracks = [];
@@ -439,11 +447,12 @@ class DatabaseService {
     }
     File? tmp;
     try {
-      final payload = jsonEncode(data);
+      final payload =
+          utf8.encode(data is EncodedJson ? data.text : jsonEncode(data));
       for (var attempt = 0; attempt < 2; attempt++) {
         final unique = DateTime.now().microsecondsSinceEpoch;
         tmp = File('$path.$unique.tmp');
-        await tmp.writeAsString(payload, flush: true);
+        await tmp.writeAsBytes(payload, flush: true);
         final target = File(path);
         // rename() replaces the target atomically everywhere but Windows,
         // where it fails if the target exists. Only there is the old file
@@ -461,8 +470,10 @@ class DatabaseService {
         tmp = null;
         // Verify what landed: a torn write must not silently become the
         // library. One retry, then propagate the failure to the caller.
+        // A torn write is a short one, so the length is the check: reading
+        // the whole file back doubled the work of every save.
         try {
-          if (await File(path).readAsString() == payload) return;
+          if (await File(path).length() == payload.length) return;
           debugPrint(
               'DatabaseService _writeJsonAtomically verify mismatch: $path');
         } catch (e) {
@@ -494,8 +505,9 @@ class DatabaseService {
   /// upgrade migrates each file in place.
   static const int schemaVersion = 1;
 
-  static Map<String, dynamic> _envelope(Object payload) =>
-      {'schema_version': schemaVersion, 'data': payload};
+  static Object _envelope(Object payload) => payload is EncodedJson
+      ? EncodedJson('{"schema_version":$schemaVersion,"data":${payload.text}}')
+      : {'schema_version': schemaVersion, 'data': payload};
 
   /// Unwraps a persisted payload, accepting both the versioned envelope and
   /// the bare legacy shape. Throws for envelopes written by a NEWER schema
@@ -1024,6 +1036,7 @@ class DatabaseService {
       );
     } catch (e) {
       debugPrint('DatabaseService setPref error: $e');
+      _reportSaveFailure();
     }
   }
 
@@ -1054,6 +1067,7 @@ class DatabaseService {
       );
     } catch (e) {
       debugPrint('DatabaseService savePlaybackSession error: $e');
+      _reportSaveFailure();
     }
   }
 
@@ -1070,7 +1084,8 @@ class DatabaseService {
 
   /// Atomically writes [payload] (wrapped in the versioned envelope) to
   /// `<documents>/[name]`, through the same write lock as every other file.
-  /// Failures propagate to the caller.
+  /// [payload] may be [EncodedJson] already. Failures propagate to the
+  /// caller.
   static Future<void> writeStoreFile(String name, Object payload) async {
     final dir = await _docs();
     await _writeJsonAtomically('$dir/$name', _envelope(payload));

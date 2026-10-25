@@ -148,21 +148,23 @@ class BilibiliSdk {
     return _avId.firstMatch(input)?.group(1);
   }
 
+  static final RegExp _shareLink = RegExp(
+      r'(?:https?://)?(?:www\.)?(?:b23\.tv|bili2233\.cn|acg\.tv)/[^\s]+',
+      caseSensitive: false);
+  static final RegExp _anyLink = RegExp(r'https?://[^\s]+');
+  static final RegExp _trailingPunctuation = RegExp(r'[\)\]】」』）.,;!]+$');
+
   /// Resolve Bilibili short links (b23.tv / bili2233.cn / acg.tv) that do not
   /// contain a BV directly. Returns the resolved URL or extracted id, or null.
   static Future<String?> _resolveShortLink(String input) async {
     // Find first URL in the input (share text often is `【标题】 https://b23.tv/xxx`)
     // Also handle bare domain without scheme: `b23.tv/xxx`
-    final urlMatch =
-        RegExp(r'(?:https?://)?(?:www\.)?(?:b23\.tv|bili2233\.cn|acg\.tv)/[^\s]+',
-                    caseSensitive: false)
-                .firstMatch(input) ??
-            RegExp(r'https?://[^\s]+').firstMatch(input);
+    final urlMatch = _shareLink.firstMatch(input) ?? _anyLink.firstMatch(input);
     if (urlMatch == null) return null;
     var urlStr = urlMatch.group(0)!;
     if (!urlStr.startsWith('http')) urlStr = 'https://$urlStr';
     // Strip trailing punctuation that is not part of URL
-    urlStr = urlStr.replaceAll(RegExp(r'[\)\]】」』）.,;!]+$'), '');
+    urlStr = urlStr.replaceAll(_trailingPunctuation, '');
     if (!urlStr.contains('b23.tv') &&
         !urlStr.contains('bili2233.cn') &&
         !urlStr.contains('acg.tv')) {
@@ -180,54 +182,46 @@ class BilibiliSdk {
         return null;
       }
       // The redirect itself names the video: read it rather than follow it
-      // to a whole page (and to wherever else it might point).
-      final first =
-          await _httpClient.getUrl(uri).timeout(const Duration(seconds: 5));
-      first.followRedirects = false;
-      first.headers.set('User-Agent', kBiliUserAgent);
-      first.headers.set('Referer', 'https://www.bilibili.com/');
-      final hop = await first.close().timeout(const Duration(seconds: 5));
-      final target = hop.headers.value(HttpHeaders.locationHeader);
-      await hop.listen((_) {}).cancel();
-      if (target != null) {
-        final bv = extractBvOrAvId(target);
-        if (bv != null) return bv;
-      }
-      if (hop.isRedirect && target != null) {
-        final next = uri.resolve(target);
-        if (next.scheme != 'https' ||
-            !(next.host == 'bilibili.com' ||
-                next.host.endsWith('.bilibili.com') ||
-                hosts
-                    .any((h) => next.host == h || next.host.endsWith('.$h')))) {
-          return null;
+      // to a whole page. Each hop is followed by hand, and only to the
+      // share hosts or bilibili.com: the link came from pasted text.
+      bool trusted(Uri u) =>
+          u.scheme == 'https' &&
+          (u.host == 'bilibili.com' ||
+              u.host.endsWith('.bilibili.com') ||
+              hosts.any((h) => u.host == h || u.host.endsWith('.$h')));
+      var at = uri;
+      for (var hop = 0; hop < 5; hop++) {
+        final req =
+            await _httpClient.getUrl(at).timeout(const Duration(seconds: 5));
+        req.followRedirects = false;
+        req.headers.set('User-Agent', kBiliUserAgent);
+        req.headers.set('Referer', 'https://www.bilibili.com/');
+        final res = await req.close().timeout(
+          const Duration(seconds: 5),
+          onTimeout: () {
+            req.abort();
+            throw TimeoutException('short link timed out');
+          },
+        );
+        final target = res.headers.value(HttpHeaders.locationHeader);
+        if (target != null) {
+          await res.listen((_) {}).cancel();
+          final id = extractBvOrAvId(target);
+          if (id != null) return id;
+          if (!res.isRedirect) return null;
+          final next = at.resolve(target);
+          if (!trusted(next)) return null;
+          at = next;
+          continue;
         }
-      }
-      final req =
-          await _httpClient.getUrl(uri).timeout(const Duration(seconds: 5));
-      req.headers.set('User-Agent', kBiliUserAgent);
-      req.headers.set('Referer', 'https://www.bilibili.com/');
-      // Let HttpClient follow redirects automatically; we inspect redirects
-      final res = await req.close().timeout(const Duration(seconds: 5));
-      // Drain body to reuse connection
-      final body = await res
-          .transform(utf8.decoder)
-          .join()
-          .timeout(const Duration(seconds: 5))
-          .catchError((_) => '');
-      // Check redirect history
-      if (res.redirects.isNotEmpty) {
-        final bv = extractBvOrAvId(res.redirects.last.location.toString());
-        if (bv != null) return bv;
-      }
-      // Some short links return 200 with HTML containing canonical BV
-      final bvInBody = _bvId.firstMatch(body);
-      if (bvInBody != null) return 'BV${bvInBody.group(1)}';
-      // Fallback: Location header even when not in redirects list
-      final loc = res.headers.value(HttpHeaders.locationHeader);
-      if (loc != null) {
-        final bv = extractBvOrAvId(loc);
-        if (bv != null) return bv;
+        // Some short links answer 200 with a page naming the video.
+        final body = await res
+            .transform(utf8.decoder)
+            .join()
+            .timeout(const Duration(seconds: 5))
+            .catchError((_) => '');
+        final bvInBody = _bvId.firstMatch(body);
+        return bvInBody == null ? null : 'BV${bvInBody.group(1)}';
       }
     } catch (e) {
       debugPrint('Resolve short link failed: $e');
@@ -1273,6 +1267,11 @@ class BilibiliSdk {
   @visibleForTesting
   static bool isRiskControlled(String? body) {
     if (body == null) return false;
+    // The usual answer, settled without decoding a large body that the
+    // caller decodes anyway.
+    if (body.startsWith('{"code":0,') && !body.contains('v_voucher')) {
+      return false;
+    }
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map) {

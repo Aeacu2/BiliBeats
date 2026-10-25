@@ -1,4 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:bilibeats/models/playlist.dart';
 import 'package:bilibeats/models/track.dart';
@@ -71,6 +75,14 @@ void main() {
     final back = LibraryTransfer.decode(LibraryTransfer.encode(
         LibrarySnapshot(tracks: [local], playlists: const [])))!;
     expect(back.tracks.single.coverUrl, isEmpty);
+  });
+
+  test('text that expands without end is not read', () {
+    // A sealed, well-formed paste of 70 MB of spaces: a few kB of text.
+    final body = base64Url.encode(gzip.encode(List.filled(70 << 20, 0x20)));
+    final seal = sha256.convert(ascii.encode(body)).toString().substring(0, 8);
+    expect(
+        LibraryTransfer.decode('${LibraryTransfer.prefix}$body.$seal'), isNull);
   });
 
   test('text that is not a library is not one', () {

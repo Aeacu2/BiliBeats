@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -109,6 +111,21 @@ class LibraryTransfer {
   static String _seal(String body) =>
       sha256.convert(ascii.encode(body)).toString().substring(0, 8);
 
+  /// What a pasted library may expand to: tens of thousands of songs fit
+  /// in a few MB, and a few hundred bytes of crafted text could otherwise
+  /// expand until the app runs out of memory.
+  static const int _maxExpanded = 64 << 20;
+
+  static List<int> _inflate(List<int> packed) {
+    final out = _CappedSink(_maxExpanded);
+    final input = gzip.decoder.startChunkedConversion(out);
+    for (var i = 0; i < packed.length; i += 4096) {
+      input.add(packed.sublist(i, math.min(i + 4096, packed.length)));
+    }
+    input.close();
+    return out.bytes.takeBytes();
+  }
+
   /// The library in [text], or null when it holds none that can be read.
   static LibrarySnapshot? decode(String text) {
     final match = _payload.firstMatch(text);
@@ -116,7 +133,7 @@ class LibraryTransfer {
     try {
       final body = match.group(1)!;
       if (_seal(body) != match.group(2)) return null;
-      final json = jsonDecode(utf8.decode(gzip.decode(base64Url.decode(body))));
+      final json = jsonDecode(utf8.decode(_inflate(base64Url.decode(body))));
       if (json is! Map) return null;
       final tracks = <Track>[];
       final byIndex = <int, Track>{};
@@ -484,4 +501,23 @@ class LibraryTransfer {
     status.value = const ImportQueueState();
     downloadWith = null;
   }
+}
+
+/// Collects decompressed bytes, refusing more than [limit].
+class _CappedSink implements Sink<List<int>> {
+  _CappedSink(this.limit);
+
+  final int limit;
+  final BytesBuilder bytes = BytesBuilder(copy: false);
+
+  @override
+  void add(List<int> chunk) {
+    if (bytes.length + chunk.length > limit) {
+      throw const FormatException('library text expands too far');
+    }
+    bytes.add(chunk);
+  }
+
+  @override
+  void close() {}
 }
