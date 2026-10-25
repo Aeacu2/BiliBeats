@@ -8,6 +8,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'app/app_services.dart';
 import 'app/app_shell.dart';
+import 'services/audio_folder.dart';
 import 'services/audio_player_handler.dart';
 import 'services/background_protection.dart';
 import 'services/error_log.dart';
@@ -69,6 +70,7 @@ Future<void> main() async {
   // killed in the background resumes exactly where it was.
   unawaited(handler.restoreSession());
   unawaited(LibraryTransfer.resume());
+  AudioFolder.followLibrary();
 
   // Android 13+ gates notifications behind a runtime grant on stricter OEM
   // builds. Fire-and-forget.

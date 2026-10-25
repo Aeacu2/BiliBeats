@@ -52,6 +52,10 @@ class MainActivity : AudioServiceActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "openAudioFolder" -> result.success(openAudioFolder())
+                "notifyAudioFiles" -> {
+                    AudioFilesProvider.notifyChanged(this)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

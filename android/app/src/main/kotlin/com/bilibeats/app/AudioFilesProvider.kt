@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
@@ -29,6 +30,15 @@ class AudioFilesProvider : DocumentsProvider() {
         private const val FILE_PREFIX = "audio/"
 
         fun authority(context: Context) = "${context.packageName}.audiofiles"
+
+        /// Tells a Files app showing the folder to list it again: a song
+        /// was downloaded, deleted or renamed.
+        fun notifyChanged(context: Context) {
+            context.contentResolver.notifyChange(
+                DocumentsContract.buildChildDocumentsUri(authority(context), FOLDER_ID),
+                null,
+            )
+        }
 
         private val ROOT_COLUMNS = arrayOf(
             Root.COLUMN_ROOT_ID,
@@ -60,13 +70,15 @@ class AudioFilesProvider : DocumentsProvider() {
     private fun songs(): Map<String, File> {
         val dir = audioDir()
         val files = dir.listFiles() ?: return emptyMap()
+        // One listing answers every "is it whole", not a stat per song.
+        val names = files.mapTo(HashSet()) { it.name }
         val out = LinkedHashMap<String, File>()
         for (file in files.sortedByDescending { it.lastModified() }) {
             val name = file.name
             if (!name.startsWith("audio_") || !name.endsWith(".m4a")) continue
             val id = name.removePrefix("audio_").removeSuffix(".m4a")
             if (!SAFE_ID.matches(id)) continue
-            if (!File(dir, "audio_$id.ready").exists()) continue
+            if ("audio_$id.ready" !in names) continue
             out[id] = file
         }
         return out
@@ -202,7 +214,7 @@ class AudioFilesProvider : DocumentsProvider() {
         for ((id, file) in songs) addSong(cursor, id, file, names[id] ?: "$id.m4a")
         cursor.setNotificationUri(
             context!!.contentResolver,
-            android.provider.DocumentsContract.buildChildDocumentsUri(
+            DocumentsContract.buildChildDocumentsUri(
                 authority(context!!), FOLDER_ID,
             ),
         )
