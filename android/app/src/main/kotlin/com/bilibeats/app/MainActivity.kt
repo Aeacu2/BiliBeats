@@ -66,6 +66,9 @@ class MainActivity : AudioServiceActivity() {
                     val url = call.argument<String>("url") ?: "https://www.bilibili.com"
                     result.success(CookieManager.getInstance().getCookie(url) ?: "")
                 }
+                "openInBilibili" -> {
+                    result.success(openInBilibili(call.argument<String>("url") ?: ""))
+                }
                 "clearCookies" -> {
                     CookieManager.getInstance().removeAllCookies { _ ->
                         CookieManager.getInstance().flush()
@@ -101,6 +104,25 @@ class MainActivity : AudioServiceActivity() {
             }
         }
         return false
+    }
+
+    /// Opens [url] in the Bilibili app's own browser, where the app's session
+    /// is at hand (the login code's confirmation page). False when no
+    /// Bilibili app is installed.
+    private fun openInBilibili(url: String): Boolean {
+        if (url.isEmpty()) return false
+        val target = Uri.parse("bilibili://browser")
+            .buildUpon()
+            .appendQueryParameter("url", url)
+            .build()
+        return try {
+            startActivity(Intent(Intent.ACTION_VIEW, target))
+            true
+        } catch (_: ActivityNotFoundException) {
+            false
+        } catch (_: SecurityException) {
+            false
+        }
     }
 
     /// The handler has stopped playback for good (a long pause). While this
