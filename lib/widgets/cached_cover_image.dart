@@ -203,14 +203,14 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       final fetchUrl =
           CachedCoverImage.sizedUrl(widget.url, _targetW, _targetH);
 
-      // Application Support, not the temp dir: iOS/Android may purge temp
-      // under storage pressure, which silently re-downloaded every cover.
-      final supportDir = await getApplicationSupportDirectory();
-      final cacheDir = Directory('${supportDir.path}/bilibeat_covers');
-      if (!await cacheDir.exists()) {
-        await cacheDir.create(recursive: true);
+      // A row scrolled back into view: no disk at all.
+      final seen = _seen[fetchUrl];
+      if (seen != null) {
+        _settle(token, seen);
+        return;
       }
-      _trimOnce ??= CachedCoverImage.trimCache(cacheDir);
+
+      final cacheDir = await (_cacheDir ??= _openCacheDir());
       // Named by the cover, then by the size asked for, so that another
       // size of the same cover can stand in when this one cannot be fetched.
       final source = md5.convert(utf8.encode(widget.url)).toString();
@@ -218,8 +218,10 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
           md5.convert(utf8.encode(fetchUrl)).toString().substring(0, 10);
       final file = File('${cacheDir.path}/img_${source}_$sized.img');
 
-      if (await file.exists() && await file.length() > 0) {
-        unawaited(_touch(file));
+      final stat = await file.stat();
+      if (stat.type == FileSystemEntityType.file && stat.size > 0) {
+        unawaited(_touch(file, stat.modified));
+        _remember(fetchUrl, file);
         _settle(token, file);
         return;
       }
@@ -237,6 +239,15 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
           _inFlight.remove(fetchUrl);
         }
       }
+      if (cached != null) {
+        _remember(fetchUrl, cached);
+        // A stand-in for this cover's other sizes, if none was indexed.
+        final index = _largest;
+        if (index != null) {
+          unawaited(index.then((map) => map.putIfAbsent(source, () => cached!),
+              onError: (_) => null));
+        }
+      }
       _settle(token, cached ?? await _anySize(cacheDir, source));
     } catch (_) {
       _settle(token, null);
@@ -247,33 +258,70 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   /// still has the thumbnail its row was drawn with).
   static Future<File?> _anySize(Directory cacheDir, String source) async {
     try {
-      File? best;
-      var bestSize = 0;
-      await for (final entity in cacheDir.list()) {
-        if (entity is! File) continue;
-        final name = entity.uri.pathSegments.last;
-        if (!name.startsWith('img_${source}_') || !name.endsWith('.img')) {
-          continue;
-        }
-        final size = await entity.length();
-        if (size > bestSize) {
-          best = entity;
-          bestSize = size;
-        }
-      }
-      return best;
+      return (await (_largest ??= _indexCache(cacheDir)))[source];
     } catch (_) {
+      _largest = null;
       return null;
     }
   }
 
-  static Future<void>? _trimOnce;
+  /// Offline, every row on screen asks [_anySize]: the folder is listed
+  /// once for all of them, not once per row.
+  static Future<Map<String, File>>? _largest;
+
+  static Future<Map<String, File>> _indexCache(Directory cacheDir) async {
+    final best = <String, (File, int)>{};
+    await for (final entity in cacheDir.list()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      // img_<32 hex>_<10 hex>.img
+      if (!name.startsWith('img_') || !name.endsWith('.img')) continue;
+      final cut = name.indexOf('_', 4);
+      if (cut < 0) continue;
+      final source = name.substring(4, cut);
+      final size = await entity.length();
+      if (size > (best[source]?.$2 ?? 0)) best[source] = (entity, size);
+    }
+    return {for (final e in best.entries) e.key: e.value.$1};
+  }
+
+  static Future<Directory>? _cacheDir;
+
+  /// Application Support, not the temp dir: iOS/Android may purge temp
+  /// under storage pressure, which silently re-downloaded every cover.
+  /// Found once per launch, and trimmed then.
+  static Future<Directory> _openCacheDir() async {
+    try {
+      final supportDir = await getApplicationSupportDirectory();
+      final cacheDir = Directory('${supportDir.path}/bilibeat_covers');
+      if (!await cacheDir.exists()) {
+        await cacheDir.create(recursive: true);
+      }
+      // What trimming removes must not be remembered as there.
+      unawaited(CachedCoverImage.trimCache(cacheDir).whenComplete(() {
+        _seen.clear();
+        _largest = null;
+      }));
+      return cacheDir;
+    } catch (_) {
+      _cacheDir = null;
+      rethrow;
+    }
+  }
+
+  /// Covers already found on disk this launch, by the address fetched.
+  static final Map<String, File> _seen = {};
+
+  static void _remember(String fetchUrl, File file) {
+    if (_seen.length >= 2000) _seen.remove(_seen.keys.first);
+    _seen[fetchUrl] = file;
+  }
 
   /// Marks a cover as used, at most once a day per file.
-  static Future<void> _touch(File file) async {
+  static Future<void> _touch(File file, DateTime modified) async {
     try {
       final now = DateTime.now();
-      if (now.difference(await file.lastModified()).inHours < 24) return;
+      if (now.difference(modified).inHours < 24) return;
       await file.setLastModified(now);
     } catch (_) {}
   }
