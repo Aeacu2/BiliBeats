@@ -8,7 +8,8 @@ class SubtitleLine {
   final double to;
   final String text;
 
-  const SubtitleLine({required this.from, required this.to, required this.text});
+  const SubtitleLine(
+      {required this.from, required this.to, required this.text});
 }
 
 /// A video part's subtitles: the uploader's own (CC), or Bilibili's

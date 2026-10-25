@@ -15,6 +15,7 @@ Flutter is at `~/flutter/bin` and is not on PATH in non-interactive shells.
 ```bash
 export PATH="$HOME/flutter/bin:$PATH"
 flutter analyze                 # must stay at "No issues found"
+dart format lib test            # CI fails on unformatted code
 flutter test                    # ~1.5 min; tests tagged `live` query NetEase/Bilibili for real
 flutter test test/render_screens.dart test/render_account_screens.dart --update-goldens   # PNGs in build/screens/
 tool/build_release.sh [ios|all] # obfuscated release; needs JDK 21+

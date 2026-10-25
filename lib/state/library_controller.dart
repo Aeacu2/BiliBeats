@@ -117,8 +117,8 @@ class LibraryController extends ChangeNotifier {
     final order = {for (var i = 0; i < byLast.length; i++) byLast[i].id: i};
     return byLast
       ..sort((a, b) {
-        final byCount = (_plays[b.id]?.count ?? 0)
-            .compareTo(_plays[a.id]?.count ?? 0);
+        final byCount =
+            (_plays[b.id]?.count ?? 0).compareTo(_plays[a.id]?.count ?? 0);
         return byCount != 0 ? byCount : order[a.id]!.compareTo(order[b.id]!);
       });
   }

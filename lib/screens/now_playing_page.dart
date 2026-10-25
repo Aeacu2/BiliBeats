@@ -902,8 +902,9 @@ class _CalibrationBanner extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                Text(shift, style: AppTypography.caption.copyWith(
-                    color: AppColors.textSecondary)),
+                Text(shift,
+                    style: AppTypography.caption
+                        .copyWith(color: AppColors.textSecondary)),
               ],
             ),
           ),
