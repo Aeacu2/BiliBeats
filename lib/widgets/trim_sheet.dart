@@ -106,10 +106,17 @@ class _TrimSheetState extends State<TrimSheet> {
         end: _length - _end < const Duration(seconds: 1) ? null : _end,
       );
 
+  /// A handle pushed against the other stops [_minimum] short of it,
+  /// rather than not moving at all.
   void _onChanged(RangeValues values) {
     final minimum = _minimum.inMilliseconds.toDouble();
-    if (values.end - values.start < minimum) return;
-    setState(() => _range = values);
+    final length = _length.inMilliseconds.toDouble();
+    final next = values.start != _range.start
+        ? RangeValues(
+            values.start.clamp(0, _range.end - minimum).toDouble(), _range.end)
+        : RangeValues(_range.start,
+            values.end.clamp(_range.start + minimum, length).toDouble());
+    setState(() => _range = next);
   }
 
   /// Let go of a handle: hear the cut.
@@ -121,43 +128,6 @@ class _TrimSheetState extends State<TrimSheet> {
   }
 
   RangeValues? _before;
-
-  /// Moves one cut by [by]: the bar is the whole video, too coarse to land
-  /// on a second.
-  void _nudge({required bool start, required Duration by}) {
-    final step = by.inMilliseconds.toDouble();
-    final minimum = _minimum.inMilliseconds.toDouble();
-    final length = _length.inMilliseconds.toDouble();
-    final next = start
-        ? RangeValues(
-            (_range.start + step).clamp(0, _range.end - minimum).toDouble(),
-            _range.end)
-        : RangeValues(
-            _range.start,
-            (_range.end + step)
-                .clamp(_range.start + minimum, length)
-                .toDouble());
-    if (next == _range) return;
-    Haptics.selection();
-    setState(() => _range = next);
-    _preview(next, start: start);
-  }
-
-  Widget _nudges({required bool start}) {
-    final what = start ? '开始' : '结束';
-    Widget button(IconData icon, String tip, int seconds) => IconButton(
-          tooltip: tip,
-          icon: Icon(icon, color: AppColors.textPrimary, size: 20),
-          onPressed: () => _nudge(start: start, by: Duration(seconds: seconds)),
-        );
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        button(Icons.remove_rounded, '$what提前 1 秒', -1),
-        button(Icons.add_rounded, '$what推后 1 秒', 1),
-      ],
-    );
-  }
 
   void _setFromNow({required bool start}) {
     Haptics.selection();
@@ -207,24 +177,50 @@ class _TrimSheetState extends State<TrimSheet> {
           child: Row(
             children: [
               _Time(label: '开始', value: _start),
-              const SizedBox(width: 4),
-              _nudges(start: true),
               const Spacer(),
-              _nudges(start: false),
-              const SizedBox(width: 4),
               _Time(label: '结束', value: _end, end: true),
             ],
           ),
         ),
+        // Handled like the player's progress bar: a thin line the whole
+        // width of the times above it, the handles small until held.
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: RangeSlider(
-            values: _range,
-            max: _length.inMilliseconds.toDouble(),
-            onChangeStart: (values) => _before = values,
-            onChanged: _onChanged,
-            onChangeEnd: (values) => _preview(values,
-                start: _before == null || values.start != _before!.start),
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 4),
+          child: GestureDetector(
+            // A drag that strays downwards moves the handle, not the sheet.
+            onVerticalDragStart: (_) {},
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: _before == null ? 3 : 5,
+                activeTrackColor: AppColors.textPrimary,
+                inactiveTrackColor: AppColors.white24,
+                thumbColor: AppColors.textPrimary,
+                overlayColor: AppColors.white12,
+                rangeTrackShape: const _FullWidthRangeTrack(),
+                rangeThumbShape: RoundRangeSliderThumbShape(
+                  enabledThumbRadius: _before == null ? 6 : 8,
+                  elevation: 0,
+                  pressedElevation: 0,
+                ),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+              ),
+              child: SizedBox(
+                height: 40,
+                child: RangeSlider(
+                  values: _range,
+                  max: _length.inMilliseconds.toDouble(),
+                  onChangeStart: (values) => setState(() => _before = values),
+                  onChanged: _onChanged,
+                  onChangeEnd: (values) {
+                    Haptics.light();
+                    final before = _before;
+                    setState(() => _before = null);
+                    _preview(values,
+                        start: before == null || values.start != before.start);
+                  },
+                ),
+              ),
+            ),
           ),
         ),
         if (_suggested case final suggested?)
@@ -326,6 +322,24 @@ class _TrimSheetState extends State<TrimSheet> {
     start: Duration(milliseconds: (start * 1000).round()),
     end: end == null ? null : Duration(milliseconds: (end * 1000).round()),
   );
+}
+
+/// A range track that spans the whole width, as the player's does.
+class _FullWidthRangeTrack extends RoundedRectRangeSliderTrackShape {
+  const _FullWidthRangeTrack();
+
+  @override
+  Rect getPreferredRect({
+    required RenderBox parentBox,
+    Offset offset = Offset.zero,
+    required SliderThemeData sliderTheme,
+    bool isEnabled = false,
+    bool isDiscrete = false,
+  }) {
+    final height = sliderTheme.trackHeight ?? 3;
+    final top = offset.dy + (parentBox.size.height - height) / 2;
+    return Rect.fromLTWH(offset.dx, top, parentBox.size.width, height);
+  }
 }
 
 class _Time extends StatelessWidget {
