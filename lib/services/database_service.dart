@@ -572,11 +572,27 @@ class DatabaseService {
     if (!_saveFailureController.isClosed) _saveFailureController.add(null);
   }
 
+  /// Each song as JSON, kept while that copy is unchanged ([Track] is
+  /// immutable; an edit is a new copy). History alone is a thousand songs,
+  /// rewritten on every play: re-encoding all of them each time was most
+  /// of the cost of saving.
+  static final Expando<String> _trackJson = Expando('track json');
+
+  static String _tracksJson(List<Track> tracks) => '[${[
+        for (final t in tracks) _trackJson[t] ??= jsonEncode(t.toMap()),
+      ].join(',')}]';
+
+  /// [objectJson] (an encoded map) with a `tracks` entry added.
+  static String _withTracks(String objectJson, String tracksJson) {
+    final body = objectJson.substring(0, objectJson.length - 1);
+    return '$body${body == '{' ? '' : ','}"tracks":$tracksJson}';
+  }
+
   static Future<void> _persistDownloaded() async {
     try {
       final dir = await _docs();
       await _writeJsonAtomically('$dir/bilibeat_downloaded.json',
-          _envelope(_downloadedTracks.map((t) => t.toMap()).toList()));
+          _envelope(EncodedJson(_tracksJson(_downloadedTracks))));
     } catch (e) {
       debugPrint('DatabaseService _persistDownloaded error: $e');
       _reportSaveFailure();
@@ -587,7 +603,7 @@ class DatabaseService {
     try {
       final dir = await _docs();
       await _writeJsonAtomically('$dir/bilibeat_recently_played.json',
-          _envelope(_recentlyPlayed.map((t) => t.toMap()).toList()));
+          _envelope(EncodedJson(_tracksJson(_recentlyPlayed))));
     } catch (e) {
       debugPrint('DatabaseService _persistRecentlyPlayed error: $e');
       _reportSaveFailure();
@@ -597,13 +613,12 @@ class DatabaseService {
   static Future<void> _persistPlaylists() async {
     try {
       final dir = await _docs();
-      final list = _playlists.map((p) {
-        final map = p.toMap();
-        map['tracks'] = p.tracks.map((t) => t.toMap()).toList();
-        return map;
-      }).toList();
-      await _writeJsonAtomically(
-          '$dir/bilibeat_playlists.json', _envelope(list));
+      final list = [
+        for (final p in _playlists)
+          _withTracks(jsonEncode(p.toMap()), _tracksJson(p.tracks)),
+      ];
+      await _writeJsonAtomically('$dir/bilibeat_playlists.json',
+          _envelope(EncodedJson('[${list.join(',')}]')));
     } catch (e) {
       debugPrint('DatabaseService _persistPlaylists error: $e');
       _reportSaveFailure();
