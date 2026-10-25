@@ -446,7 +446,14 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     final playing = _player.playing;
     final state = _player.sequenceState;
     final current = state.currentIndex;
-    final queueIndex = current == null ? null : _order(state).indexOf(current);
+    // Runs on every playback event: in order, the play position is the index.
+    final queueIndex = current == null
+        ? null
+        : state.shuffleModeEnabled
+            ? state.shuffleIndices.indexOf(current)
+            : current < state.sequence.length
+                ? current
+                : -1;
 
     // An unplayable file leaves the player idle for a moment while it moves
     // on. Reported as idle, that moment makes the system end the media

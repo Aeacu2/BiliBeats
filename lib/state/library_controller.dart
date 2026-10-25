@@ -127,13 +127,20 @@ class LibraryController extends ChangeNotifier {
   LibrarySort? _sortedBy;
 
   /// [downloaded] in the chosen [sort] order (cached until either changes).
+  /// Every song played replaces [recent] and the play counts; only the
+  /// orders that read them are worked out again for it.
   List<Track> get sortedDownloaded {
     final cached = _sortedCache;
+    final byListening = switch (_sort) {
+      LibrarySort.recent || LibrarySort.title || LibrarySort.artist => false,
+      _ => true,
+    };
     if (cached != null &&
         identical(_sortedSource, _downloaded) &&
         _sortedBy == _sort &&
-        identical(_sortedRecent, _recent) &&
-        identical(_sortedPlays, _plays)) {
+        (!byListening ||
+            identical(_sortedRecent, _recent) &&
+                identical(_sortedPlays, _plays))) {
       return cached;
     }
     // Lower-cased once per song, not once per comparison.

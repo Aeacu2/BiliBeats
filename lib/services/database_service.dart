@@ -411,13 +411,32 @@ class DatabaseService {
   /// Whole-file rewrites are truncated-then-written by default; a crash in the
   /// middle corrupts the file. Writing to a temp file and renaming keeps the
   /// previous snapshot intact instead.
-  static Future<void> _writeJsonAtomically(String path, Object data) async {
+  ///
+  /// Every caller hands over a snapshot of the whole file, so a write still
+  /// waiting for the lock when a newer one for the same file is queued is
+  /// skipped: the newer one carries its changes too, and its outcome is
+  /// this one's. A burst (naming a library, dragging a playlist) then
+  /// rewrites each file once, not once per change.
+  static Future<void> _writeJsonAtomically(String path, Object data) {
+    final ticket = _writeTickets[path] = (_writeTickets[path] ?? 0) + 1;
+    return _newestWrites[path] = _writeQueued(path, data, ticket);
+  }
+
+  static final Map<String, int> _writeTickets = {};
+  static final Map<String, Future<void>> _newestWrites = {};
+
+  static Future<void> _writeQueued(String path, Object data, int ticket) async {
     // Serialize all whole-file writes through a single async mutex so two
     // concurrent persists never share the same tmp file.
     final previous = _writeLock;
     final completer = Completer<void>();
     _writeLock = completer.future;
     await previous;
+    if (_writeTickets[path] != ticket) {
+      completer.complete();
+      await _newestWrites[path];
+      return;
+    }
     File? tmp;
     try {
       final payload = jsonEncode(data);

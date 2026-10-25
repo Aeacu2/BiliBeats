@@ -71,7 +71,10 @@ class BilibiliSdk {
     final body = await _request(rawUrl, cookies: cookies);
     if (body != null &&
         account != null &&
-        cookies?.contains(account.cookies) == true) {
+        cookies?.contains(account.cookies) == true &&
+        // Decoded here only when it can be the answer: callers decode the
+        // body again, and favourites or history pages are large.
+        body.contains('-101')) {
       try {
         final response = jsonDecode(body);
         if (response is Map && response['code'] == -101) {
@@ -97,7 +100,7 @@ class BilibiliSdk {
         req.headers.set('Cookie', cookies);
       }
       // A request given up on is aborted: left alone it keeps one of the
-      // four connections the pool allows this host.
+      // connections the pool allows this host.
       final res = await req.close().timeout(
         const Duration(seconds: 10),
         onTimeout: () {

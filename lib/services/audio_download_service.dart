@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -661,6 +662,9 @@ class AudioDownloadService {
     // a failed write (a full disk) and its flush() then never completes.
     final file = await part.open(mode: mode);
     var lastEmitted = received;
+    // TLS hands over a record (~16 KiB) at a time: gathered here, the file
+    // sees a few hundred writes for a song instead of a few thousand.
+    final pending = BytesBuilder(copy: false);
     try {
       // Apply read timeout per chunk: stall >30s is failure. res itself has
       // no idle timeout once headers arrived; chunk stream can hang forever.
@@ -671,7 +675,10 @@ class AudioDownloadService {
       );
       await for (final chunk in timeoutRes) {
         if (_cancelled.contains(trackId)) throw const DownloadCancelled();
-        await file.writeFrom(chunk);
+        pending.add(chunk);
+        if (pending.length >= _writeBatchBytes) {
+          await file.writeFrom(pending.takeBytes());
+        }
         received += chunk.length;
         // Throttle progress events to ~every 64 KiB to avoid stream spam.
         if (received - lastEmitted >= 65536) {
@@ -679,9 +686,14 @@ class AudioDownloadService {
           _emit(DownloadProgress(trackId, received, total, false, null));
         }
       }
+      if (pending.isNotEmpty) await file.writeFrom(pending.takeBytes());
       // On disk before it is called downloaded.
       await file.flush();
     } finally {
+      // What arrived before a dropped connection is kept for the resume.
+      try {
+        if (pending.isNotEmpty) await file.writeFrom(pending.takeBytes());
+      } catch (_) {}
       try {
         await file.close();
       } catch (_) {}
@@ -699,6 +711,8 @@ class AudioDownloadService {
     }
     return (received: received, total: total);
   }
+
+  static const int _writeBatchBytes = 256 * 1024;
 
   static void _emit(DownloadProgress p) {
     if (!_progressController.isClosed) _progressController.add(p);
