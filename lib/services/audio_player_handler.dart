@@ -58,14 +58,15 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     ja.AudioPlayer? player,
     bool manageAudioSession = true,
     Future<double?> Function(String bvid, int cid)? loudnessLookup,
+    @visibleForTesting ja.AndroidLoudnessEnhancer? enhancer,
   }) {
     if (player != null) {
       return BiliBeatsAudioHandler._(
-          player, null, manageAudioSession, loudnessLookup);
+          player, enhancer, manageAudioSession, loudnessLookup);
     }
     // Android cannot raise a player's volume above 1.0; quiet tracks are
     // lifted by the platform's loudness enhancer instead.
-    final enhancer =
+    final effect =
         !kIsWeb && Platform.isAndroid ? ja.AndroidLoudnessEnhancer() : null;
     return BiliBeatsAudioHandler._(
       ja.AudioPlayer(
@@ -74,11 +75,11 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
         handleInterruptions: false,
         // A missing or corrupt file skips ahead instead of stalling.
         maxSkipsOnError: 3,
-        audioPipeline: enhancer == null
+        audioPipeline: effect == null
             ? null
-            : ja.AudioPipeline(androidAudioEffects: [enhancer]),
+            : ja.AudioPipeline(androidAudioEffects: [effect]),
       ),
-      enhancer,
+      effect,
       manageAudioSession,
       loudnessLookup ?? BilibiliSdk.fetchLoudness,
     );
@@ -95,6 +96,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
         DatabaseService.downloadRemovedStream.listen(removeTracks);
     if (manageAudioSession) unawaited(_configureAudioSession());
     unawaited(_loadNormalizationPref());
+    unawaited(_loadAppGainPref());
   }
 
   final ja.AudioPlayer _player;
@@ -124,6 +126,11 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
 
   /// Whether tracks are levelled to a common loudness (音量均衡).
   final ValueNotifier<bool> normalizeVolume = ValueNotifier(true);
+
+  /// The app's own volume (设置 → 音量), in dB on top of the level every
+  /// track is brought to: the music stays where it was set when another
+  /// app changes the system's media volume. 0 is that level.
+  final ValueNotifier<double> appGain = ValueNotifier(0);
 
   final StreamController<String> _messages =
       StreamController<String>.broadcast();
@@ -550,11 +557,56 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
         .toDouble();
   }
 
+  static const double minAppGainDb = -30.0;
+
+  /// Above the levelled loudness: the enhancer's, so Android only.
+  static const double _maxAppBoostDb = 6.0;
+
+  /// How far [appGain] may go up: nothing where nothing can be boosted.
+  double get maxAppGainDb => canBoost ? _maxAppBoostDb : 0.0;
+
+  /// Whether the player can play louder than the file (Android's loudness
+  /// enhancer).
+  bool get canBoost => _enhancer != null;
+
+  /// What a track of [loudness] is played at: a volume (0–1) for a cut, a
+  /// gain in dB through the enhancer for a boost — the levelling and the
+  /// app's own volume ([appGain]) together.
+  @visibleForTesting
+  ({double volume, double boostDb}) levelFor(double? loudness) =>
+      _level(gainFor(loudness));
+
+  ({double volume, double boostDb}) _level(double level) {
+    // A boost that cannot be made is not counted against a cut: on a
+    // quiet track turned down, the cut is heard all the same.
+    if (!canBoost && level > 0) level = 0;
+    final gain = (level + appGain.value)
+        .clamp(-60.0, _maxBoostDb + _maxAppBoostDb)
+        .toDouble();
+    return gain >= 0
+        ? (volume: 1.0, boostDb: canBoost ? gain : 0.0)
+        : (volume: pow(10, gain / 20).toDouble(), boostDb: 0.0);
+  }
+
+  /// Sets the app's volume, [save]d once the slider is let go.
+  Future<void> setAppGain(double db, {bool save = true}) async {
+    final clamped = db.clamp(minAppGainDb, maxAppGainDb).toDouble();
+    if (appGain.value != clamped) {
+      appGain.value = clamped;
+      _applyLoudness(nowPlaying.value);
+    }
+    if (save) await DatabaseService.setPref('appGainDb', clamped);
+  }
+
+  Future<void> _loadAppGainPref() async {
+    final saved = await DatabaseService.getPref('appGainDb');
+    if (saved is num) await setAppGain(saved.toDouble(), save: false);
+  }
+
   void _applyLoudness(Track? track) {
-    final gain = track == null ? 0.0 : gainFor(track.loudness);
-    // Cuts are plain volume; boosts need the enhancer (Android only — on
-    // other platforms a quiet track simply plays at full volume).
-    final volume = gain >= 0 ? 1.0 : pow(10, gain / 20).toDouble();
+    final level = track == null ? _level(0) : levelFor(track.loudness);
+    final gain = level.boostDb;
+    final volume = level.volume;
     unawaited(_player.setVolume(volume).catchError((Object error) {
       debugPrint('setVolume failed: $error');
     }));

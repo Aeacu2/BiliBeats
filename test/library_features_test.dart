@@ -4,6 +4,7 @@ import 'package:bilibeats/services/audio_player_handler.dart';
 import 'package:bilibeats/services/lyrics_engine.dart';
 import 'package:bilibeats/state/library_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:just_audio/just_audio.dart' as ja;
 
 import 'fake_audio_player.dart';
 
@@ -43,6 +44,39 @@ void main() {
 
     test('an unmeasured track is assumed typical, not left at full volume', () {
       expect(handler().gainFor(null), lessThan(0));
+    });
+
+    test('the app volume turns every track down alike', () async {
+      final h = handler();
+      await h.setAppGain(-6, save: false);
+      // A track at the target, and a loud one already cut 5 dB.
+      expect(h.levelFor(-14).volume, closeTo(0.501, 0.001));
+      expect(h.levelFor(-9).volume, closeTo(0.282, 0.001));
+      // Off with 音量均衡 too: the app volume stays.
+      h.normalizeVolume.value = false;
+      expect(h.levelFor(-9).volume, closeTo(0.501, 0.001));
+    });
+
+    test('above the levelled loudness only where it can be boosted', () async {
+      final plain = handler();
+      expect(plain.maxAppGainDb, 0);
+      await plain.setAppGain(6, save: false);
+      expect(plain.appGain.value, 0);
+      // A quiet track it cannot lift is still turned down by the app.
+      await plain.setAppGain(-6, save: false);
+      expect(plain.levelFor(-20).volume, closeTo(0.501, 0.001));
+
+      final android = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(),
+        manageAudioSession: false,
+        enhancer: ja.AndroidLoudnessEnhancer(),
+      );
+      await android.setAppGain(4, save: false);
+      expect(android.levelFor(-14), (volume: 1.0, boostDb: 4.0));
+      // Louder than any track could be levelled to, within a limit.
+      expect(android.levelFor(-40).boostDb, 12);
+      await android.setAppGain(10, save: false);
+      expect(android.appGain.value, 6);
     });
 
     test('switched off, nothing is changed', () async {
