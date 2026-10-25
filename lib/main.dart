@@ -10,6 +10,7 @@ import 'app/app_services.dart';
 import 'app/app_shell.dart';
 import 'services/audio_player_handler.dart';
 import 'services/background_protection.dart';
+import 'services/error_log.dart';
 import 'services/library_transfer.dart';
 import 'services/track_naming.dart';
 import 'theme/app_theme.dart';
@@ -20,6 +21,8 @@ Future<void> main() async {
   // debugPrint is not compiled out of release builds: titles and file paths
   // would go to the system log, readable by anything with log access.
   if (kReleaseMode) debugPrint = (String? message, {int? wrapWidth}) {};
+  // What nothing caught is kept on the device instead (设置 → 复制错误日志).
+  ErrorLog.install();
 
   // Covers are decoded at display size, so many small entries fit in a
   // modest budget. A large cache is what gets a backgrounded app killed

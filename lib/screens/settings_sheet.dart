@@ -7,6 +7,7 @@ import '../app/app_services.dart';
 import '../services/audio_folder.dart';
 import '../services/bili_account.dart';
 import '../services/background_protection.dart';
+import '../services/error_log.dart';
 import '../services/library_transfer.dart';
 import '../services/track_naming.dart';
 import '../theme/app_theme.dart';
@@ -201,6 +202,24 @@ class _SettingsSheetState extends State<SettingsSheet>
             await AppServices.instance.onlineSearch.clearHistory();
             showAppSnackBar(messenger, message: '已清除');
           },
+        ),
+        // Only once something went wrong: for a bug report.
+        ValueListenableBuilder<bool>(
+          valueListenable: ErrorLog.hasEntries,
+          builder: (context, any, _) => !any
+              ? const SizedBox.shrink()
+              : SheetAction(
+                  icon: Icons.bug_report_outlined,
+                  label: '复制错误日志',
+                  onTap: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    Navigator.of(context).pop();
+                    await Clipboard.setData(
+                        ClipboardData(text: await ErrorLog.read()));
+                    await ErrorLog.clear();
+                    showAppSnackBar(messenger, message: '已复制，可粘贴到反馈中');
+                  },
+                ),
         ),
         const SizedBox(height: 8),
       ],
