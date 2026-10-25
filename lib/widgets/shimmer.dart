@@ -33,8 +33,10 @@ class _ShimmerState extends State<Shimmer> with SingleTickerProviderStateMixin {
   void didChangeDependencies() {
     super.didChangeDependencies();
     // Respect reduced motion: a static placeholder instead of a sweep.
-    final media = MediaQuery.of(context);
-    if (media.disableAnimations || media.accessibleNavigation) {
+    // Only these: depending on all of MediaQuery rebuilt every placeholder
+    // on each frame of the keyboard sliding in.
+    if (MediaQuery.disableAnimationsOf(context) ||
+        MediaQuery.accessibleNavigationOf(context)) {
       _controller.stop();
     } else if (!_controller.isAnimating) {
       _controller.repeat();
@@ -98,7 +100,7 @@ class SkeletonTrackTile extends StatelessWidget {
                 const Shimmer(width: double.infinity, height: 14),
                 const SizedBox(height: 8),
                 Shimmer(
-                  width: MediaQuery.of(context).size.width * 0.4,
+                  width: MediaQuery.sizeOf(context).width * 0.4,
                   height: 11,
                 ),
               ],

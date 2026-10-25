@@ -193,6 +193,7 @@ class LibraryTransfer {
     };
 
     var merged = 0;
+    // Grows as playlists are made, so two of the same name become one.
     final existing = await DatabaseService.getPlaylists();
     for (final p in snapshot.playlists) {
       if (p.tracks.isEmpty) continue;
@@ -203,9 +204,13 @@ class LibraryTransfer {
         final name = p.name.trim();
         final same = existing.where(
             (e) => e.id != Playlist.favoritesId && e.name.trim() == name);
-        id = same.isNotEmpty
-            ? same.first.id
-            : (await DatabaseService.createPlaylist(name)).id;
+        if (same.isNotEmpty) {
+          id = same.first.id;
+        } else {
+          final created = await DatabaseService.createPlaylist(name);
+          existing.add(created);
+          id = created.id;
+        }
       }
       await DatabaseService.addTracksToPlaylist(id, p.tracks);
       merged++;

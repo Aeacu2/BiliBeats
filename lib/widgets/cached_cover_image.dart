@@ -132,6 +132,9 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   void didUpdateWidget(covariant CachedCoverImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.url != widget.url) {
+      // A recycled row: the retries left were the old cover's.
+      _retryTimer?.cancel();
+      _retries = 0;
       _loadKey = widget.url;
       setState(() {
         _file = null;
@@ -142,12 +145,12 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   }
 
   int get _targetW {
-    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     return (widget.width * dpr).round().clamp(1, _maxEdge);
   }
 
   int get _targetH {
-    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     return (widget.height * dpr).round().clamp(1, _maxEdge);
   }
 
@@ -320,7 +323,7 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
 
   @override
   Widget build(BuildContext context) {
-    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     // Decode headroom: [ResizeImagePolicy.fit] fits the image *inside* the
     // box, but `BoxFit.cover` then scales by the box's *larger* ratio. Sizing
     // the decode box up by the widest cover we expect (16:9) keeps a landscape

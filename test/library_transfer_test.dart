@@ -137,6 +137,23 @@ void main() {
         contains(incoming[0].id));
   });
 
+  test('two incoming playlists of one name become one here', () async {
+    LibraryTransfer.downloadWith = (_) async => true;
+    final a = song('J'), b = song('K');
+    await LibraryTransfer.import(LibrarySnapshot(
+      tracks: [a, b],
+      playlists: [
+        (name: '通勤', favorites: false, tracks: [a]),
+        (name: '通勤 ', favorites: false, tracks: [b]),
+      ],
+    ));
+    final lists = await DatabaseService.getPlaylists();
+    final same = lists.where((p) => p.name == '通勤');
+    expect(same, hasLength(1));
+    expect(same.single.tracks.map((t) => t.id).toSet(), {a.id, b.id});
+    await until(() => LibraryTransfer.remaining.value == 0);
+  });
+
   test('an unfinished import carries on after a restart', () async {
     final tracks = [song('J'), song('K')];
     final fetched = <String>[];

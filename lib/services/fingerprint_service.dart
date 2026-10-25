@@ -80,11 +80,12 @@ class FingerprintService {
 
     _retryAfter = now.add(const Duration(minutes: 5));
 
-    // Fallback: generate a random buvid3 in UUID-like format
+    // Fallback: generate a random buvid3 in UUID-like format. Not stamped
+    // as fetched: the real one is asked for again once [_retryAfter] passes,
+    // rather than an hour from now.
     if (_buvid3.isEmpty) {
       _buvid3 = _generateRandomBuvid3();
       _buvid4 = '';
-      _cacheTime = now;
     }
 
     return {'buvid3': _buvid3, 'buvid4': _buvid4};

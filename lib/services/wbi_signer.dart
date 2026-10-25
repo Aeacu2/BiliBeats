@@ -127,7 +127,13 @@ class WbiSigner {
     return newParams;
   }
 
-  static Future<Map<String, String>> _getWbiKeys() async {
+  /// Signed requests made together on a cold start (a recommendation pass)
+  /// share one fetch of the keys.
+  static Future<Map<String, String>> _getWbiKeys() =>
+      _pending ??= _fetchWbiKeys().whenComplete(() => _pending = null);
+  static Future<Map<String, String>>? _pending;
+
+  static Future<Map<String, String>> _fetchWbiKeys() async {
     // A stamp in the future (the clock was set back) is no stamp at all.
     final age =
         _cacheTime == null ? null : DateTime.now().difference(_cacheTime!);

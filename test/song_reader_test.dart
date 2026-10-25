@@ -107,4 +107,24 @@ void main() {
     expect(File('${support.path}/song_model/song_model.json').existsSync(),
         isTrue);
   }, skip: present ? false : 'the song model is not installed');
+
+  test('readings in a row share one loaded model', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final support = await Directory.systemTemp.createTemp('bilibeat_model');
+    addTearDown(() => support.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+            const MethodChannel('plugins.flutter.io/path_provider'),
+            (call) async => support.path);
+    Future<SongReading?> read(String title) => SongReaderService.read(
+          title: title,
+          uploader: '某剪辑站',
+          tags: ['周深'],
+          durationSeconds: 300,
+        );
+    await read('周深《大鱼》');
+    // Asked together, answered each in turn.
+    final both = await Future.wait([read('周深《大鱼》'), read('周深《光亮》')]);
+    expect(both.map((r) => r?.song), ['大鱼', '光亮']);
+  }, skip: present ? false : 'the song model is not installed');
 }

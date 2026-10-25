@@ -123,8 +123,9 @@ class _LoginPageState extends State<_LoginPage> {
     ..setNavigationDelegate(NavigationDelegate(
       onPageFinished: (_) => unawaited(_check()),
       // Links that leave the web (open the Bilibili app, a store page)
-      // have nowhere to go here.
-      onNavigationRequest: (request) => request.url.startsWith('http')
+      // have nowhere to go here, and nothing is loaded in the clear while
+      // the page holds a session.
+      onNavigationRequest: (request) => request.url.startsWith('https://')
           ? NavigationDecision.navigate
           : NavigationDecision.prevent,
     ))
