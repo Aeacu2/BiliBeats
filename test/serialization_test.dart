@@ -25,7 +25,7 @@ Track _track({String id = 'BV1_p1', String? audioUrl}) => Track(
 
 void main() {
   group('Track', () {
-    test('full JSON round-trip preserves every field', () {
+    test('full JSON round-trip preserves every lasting field', () {
       final t = _track(audioUrl: 'https://example.com/a.m4a');
       final rt = Track.fromMap(throughJson(t.toMap()));
 
@@ -37,13 +37,16 @@ void main() {
       expect(rt.uploader, t.uploader);
       expect(rt.coverUrl, t.coverUrl);
       expect(rt.duration, t.duration);
-      expect(rt.audioUrl, t.audioUrl);
+      // A signed link expires within the hour: never written.
+      expect(rt.audioUrl, isNull);
+      expect(t.toMap().containsKey('audioUrl'), isFalse);
       expect(
           rt, t); // identity is the id — rehydrated tracks must compare equal
     });
 
-    test('null audioUrl survives the round-trip', () {
-      final rt = Track.fromMap(throughJson(_track().toMap()));
+    test('a link saved by an older build is not read back', () {
+      final rt = Track.fromMap(throughJson(
+          {..._track().toMap(), 'audioUrl': 'https://example.com/old.m4s'}));
       expect(rt.audioUrl, isNull);
     });
 

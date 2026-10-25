@@ -131,6 +131,12 @@ class AudioDownloadService {
   /// callers pair it with [isDownloadedById] or the downloaded library.
   static Future<String> audioPathForId(String id) async =>
       _audioPath(await _dir(), id);
+
+  /// Where downloaded audio lives.
+  static Future<String> audioFolder() => _dir();
+
+  /// [audioPathForId] in the [audioFolder] already looked up.
+  static String audioPathIn(String dir, String id) => _audioPath(dir, id);
   static String _readyPath(String dir, String key) => '$dir/audio_$key.ready';
   static String _metaPath(String dir, String key) => '$dir/audio_$key.json';
 
@@ -226,19 +232,26 @@ class AudioDownloadService {
     final result = <String, int>{};
     try {
       final dir = await _dir();
+      // One listing answers both "is it whole" and "how big".
+      final audio = <String, File>{};
+      final ready = <String>{};
       await for (final entity in Directory(dir).list()) {
         if (entity is! File) continue;
         // URI segments always use `/`, unlike platform paths.
         final segments = entity.uri.pathSegments;
         if (segments.isEmpty) continue;
         final name = segments.last;
-        if (!name.startsWith('audio_') || !name.endsWith('.m4a')) continue;
-        final id = name.substring('audio_'.length, name.length - '.m4a'.length);
-        if (id.isEmpty) continue;
-        final ready = File('$dir/audio_$id.ready');
-        if (!await ready.exists()) continue;
+        if (!name.startsWith('audio_')) continue;
+        if (name.endsWith('.m4a')) {
+          audio[name.substring(6, name.length - 4)] = entity;
+        } else if (name.endsWith('.ready')) {
+          ready.add(name.substring(6, name.length - 6));
+        }
+      }
+      for (final MapEntry(key: id, value: file) in audio.entries) {
+        if (id.isEmpty || !ready.contains(id)) continue;
         try {
-          result[id] = await entity.length();
+          result[id] = await file.length();
         } catch (_) {}
       }
     } catch (e) {

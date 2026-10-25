@@ -98,7 +98,8 @@ class Track {
       'uploader': uploader,
       'coverUrl': coverUrl,
       'duration': duration,
-      'audioUrl': audioUrl,
+      // Not [audioUrl]: a signed link that expires within the hour. One
+      // read back days later sent every download retry to a dead address.
       if (loudness != null) 'loudness': loudness,
       if (named) 'named': true,
       if (rawUploader != null) 'rawUploader': rawUploader,
@@ -155,9 +156,6 @@ class Track {
     } else {
       duration = 0;
     }
-    final rawAudioUrl = map['audioUrl'];
-    final audioUrl =
-        rawAudioUrl is String ? rawAudioUrl : rawAudioUrl?.toString();
     final rawLoudness = map['loudness'];
     final rawOwner = map['rawUploader'];
     final rawMatcher = map['matcher'];
@@ -171,7 +169,6 @@ class Track {
       uploader: uploader,
       coverUrl: coverUrl,
       duration: duration,
-      audioUrl: audioUrl,
       loudness: rawLoudness is num ? rawLoudness.toDouble() : null,
       named: map['named'] == true,
       rawUploader: rawOwner is String && rawOwner.isNotEmpty ? rawOwner : null,

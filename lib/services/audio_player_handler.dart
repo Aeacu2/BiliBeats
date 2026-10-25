@@ -674,10 +674,12 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
   }) async {
     if (tracks.isEmpty) return false;
 
+    // The folder is looked up once, not once per song in the queue.
+    final folder = await AudioDownloadService.audioFolder();
     final sources = <ja.AudioSource>[
       for (final track in tracks)
         ja.AudioSource.file(
-          await AudioDownloadService.audioPathForId(track.id),
+          AudioDownloadService.audioPathIn(folder, track.id),
           tag: track,
         ),
     ];
