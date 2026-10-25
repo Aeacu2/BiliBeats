@@ -52,6 +52,7 @@ class MainActivity : AudioServiceActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "openAudioFolder" -> result.success(openAudioFolder())
+                "openAudioFile" -> result.success(openAudioFile(call.argument<String>("id")))
                 else -> result.notImplemented()
             }
         }
@@ -101,6 +102,32 @@ class MainActivity : AudioServiceActivity() {
             }
         }
         return false
+    }
+
+    /// Offers one downloaded song (AudioFilesProvider's document for it) to
+    /// the apps that open audio — players, file managers — in the system
+    /// chooser. False when the song has no file or no app takes it.
+    private fun openAudioFile(id: String?): Boolean {
+        if (id == null || !AudioFilesProvider.isSong(this, id)) return false
+        val uri = DocumentsContract.buildDocumentUri(
+            AudioFilesProvider.authority(this),
+            AudioFilesProvider.documentIdOf(id),
+        )
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "audio/mp4")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (packageManager.queryIntentActivities(view, 0).isEmpty()) return false
+        return try {
+            startActivity(
+                Intent.createChooser(view, null)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+            )
+            true
+        } catch (_: ActivityNotFoundException) {
+            false
+        } catch (_: SecurityException) {
+            false
+        }
     }
 
     /// The handler has stopped playback for good (a long pause). While this

@@ -64,12 +64,28 @@ void main() {
     // Equal counts (none, for c and d) fall back to the latest played.
     expect(titles(), ['song b', 'song a', 'song c', 'song d']);
 
+    // Never heard (c was only started), oldest download first; then the
+    // longest ago heard: b before a.
     await library.setSort(LibrarySort.forgotten);
-    expect(titles(), ['song d', 'song b', 'song a', 'song c']);
+    expect(titles(), ['song c', 'song d', 'song b', 'song a']);
   });
 
-  test('a listen counts once half the song is heard, at most four minutes',
-      () {
+  test('很久没听 puts the older download first when two were heard alike',
+      () async {
+    final library = LibraryController.instance;
+    final at = DateTime(2026);
+    // c and d heard at the same moment; a and b later.
+    await DatabaseService.recordPlay(track('d'), at: at);
+    await DatabaseService.recordPlay(track('c'), at: at);
+    await DatabaseService.recordPlay(track('a'), at: DateTime(2026, 2));
+    await DatabaseService.recordPlay(track('b'), at: DateTime(2026, 3));
+    await library.setSort(LibrarySort.forgotten);
+    await library.reload();
+    expect([for (final t in library.sortedDownloaded) t.title],
+        ['song c', 'song d', 'song a', 'song b']);
+  });
+
+  test('a listen counts once half the song is heard, at most four minutes', () {
     expect(PlayStat.needed(const Duration(minutes: 3)),
         const Duration(seconds: 90));
     expect(PlayStat.needed(const Duration(minutes: 20)),
