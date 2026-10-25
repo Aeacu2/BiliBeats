@@ -73,7 +73,14 @@ class BiliAccount {
 class BiliAccountStore {
   BiliAccountStore._();
 
-  static const String _file = 'bilibeat_account.json';
+  /// In a folder of its own, which iOS leaves out of iCloud and computer
+  /// backups (AppDelegate; Android backs up no app data at all): a backup
+  /// is no place for a login. The file is rewritten whole on every save,
+  /// which would drop a mark set on the file itself.
+  static const String _file = 'bilibeat_private/bilibeat_account.json';
+
+  /// Where versions up to 0.3.0 kept it.
+  static const String _oldFile = 'bilibeat_account.json';
 
   static final ValueNotifier<BiliAccount?> current = ValueNotifier(null);
   static final ValueNotifier<int> changes = ValueNotifier(0);
@@ -101,8 +108,12 @@ class BiliAccountStore {
 
   static Future<void> _load() async {
     try {
-      final text = await DatabaseService.readStoreFile(_file);
-      if (text == null) return;
+      var text = await DatabaseService.readStoreFile(_file);
+      if (text == null) {
+        text = await DatabaseService.readStoreFile(_oldFile);
+        if (text == null) return;
+        await _moveOldFile(text);
+      }
       final payload = DatabaseService.unwrapStorePayload(jsonDecode(text));
       expired = payload is Map && payload['expired'] == true;
       current.value = BiliAccount.fromMap(payload);
@@ -110,6 +121,19 @@ class BiliAccountStore {
     } catch (e) {
       debugPrint('Account not loaded: $e');
       _loading = null;
+    }
+  }
+
+  /// Moves the file of an older version where backups do not reach. Left
+  /// where it was if it cannot be written anew: losing the login would be
+  /// worse.
+  static Future<void> _moveOldFile(String text) async {
+    try {
+      await DatabaseService.writeStoreFile(_file,
+          DatabaseService.unwrapStorePayload(jsonDecode(text)) as Object);
+      await DatabaseService.deleteStoreFile(_oldFile);
+    } catch (e) {
+      debugPrint('Account file not moved: $e');
     }
   }
 

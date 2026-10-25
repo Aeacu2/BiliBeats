@@ -132,7 +132,7 @@ docs/archive/               old review notes and a superseded feature list — h
 - **Bilibili account and subtitles.** 设置 → 哔哩哔哩账号: in-app login page on
   Android (the WebView's HttpOnly session cookie is read natively, channel
   `bilibeats/account`) or a QR code. `BiliAccountStore` keeps the cookies in
-  `bilibeat_account.json`; they are sent only for what needs an account —
+  `bilibeat_private/bilibeat_account.json` (a folder iOS leaves out of backups); they are sent only for what needs an account —
   subtitles, favourites, and watch history. Favourites are previewed before
   importing (`FavoriteScan`, `FavoriteImportSheet`): title-based preselection,
   all videos visible, optional part expansion, download and taste opt-ins.

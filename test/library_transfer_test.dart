@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:bilibeats/models/playlist.dart';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/database_service.dart';
 import 'package:bilibeats/services/library_transfer.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
@@ -70,6 +73,25 @@ void main() {
     final local = song('C', cover: '/data/user/0/app/bilibeat_covers/c.jpg');
     final back = LibraryTransfer.decode(LibraryTransfer.encode(
         LibrarySnapshot(tracks: [local], playlists: const [])))!;
+    expect(back.tracks.single.coverUrl, isEmpty);
+  });
+
+  test('a pasted download address is not fetched', () {
+    // Export never writes one; a hand-made text might.
+    final body = base64Url.encode(gzip.encode(utf8.encode(jsonEncode({
+      't': [
+        {
+          ...song('J').toMap(),
+          'audioUrl': 'https://example.com/anything',
+          'coverUrl': '/data/user/0/elsewhere/c.jpg',
+        }
+      ],
+      'p': const [],
+    }))));
+    final seal = sha256.convert(ascii.encode(body)).toString().substring(0, 8);
+    final back =
+        LibraryTransfer.decode('${LibraryTransfer.prefix}$body.$seal')!;
+    expect(back.tracks.single.audioUrl, isNull);
     expect(back.tracks.single.coverUrl, isEmpty);
   });
 

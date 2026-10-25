@@ -765,7 +765,7 @@ class DatabaseService {
     if (idx == -1) return;
     final playlist = _playlists[idx];
     if (!playlist.tracks.any((t) => t.id == track.id)) {
-      playlist.tracks.insert(0, track);
+      playlist.tracks.insert(0, _knownCopy(track) ?? track);
       await _persistPlaylists();
     }
   }
@@ -788,13 +788,17 @@ class DatabaseService {
     if (idx == -1) return;
     final tracks = _playlists[idx].tracks;
     if (tracks.any((t) => t.id == track.id)) return;
-    tracks.insert(index.clamp(0, tracks.length), track);
+    tracks.insert(index.clamp(0, tracks.length), _knownCopy(track) ?? track);
     await _persistPlaylists();
   }
 
   /// Batch variant of [addTrackToPlaylist]: one persist for the whole batch
   /// instead of a full-file rewrite per track. The batch goes to the front
   /// in the order given.
+  ///
+  /// A song the library already holds goes in as the library has it: a
+  /// favourites import or a search result describes the video, and a song
+  /// named since would show in the playlist under the video's title.
   static Future<void> addTracksToPlaylist(
       String playlistId, List<Track> tracks) async {
     await _ensureLoaded();
@@ -806,7 +810,7 @@ class DatabaseService {
     for (final track in tracks) {
       if (!existingIds.contains(track.id)) {
         existingIds.add(track.id);
-        toAdd.add(track);
+        toAdd.add(_knownCopy(track) ?? track);
       }
     }
     if (toAdd.isEmpty) return;
@@ -1054,7 +1058,18 @@ class DatabaseService {
   /// Failures propagate to the caller.
   static Future<void> writeStoreFile(String name, Object payload) async {
     final dir = await _docs();
+    final slash = name.lastIndexOf('/');
+    if (slash > 0) {
+      await Directory('$dir/${name.substring(0, slash)}')
+          .create(recursive: true);
+    }
     await _writeJsonAtomically('$dir/$name', _envelope(payload));
+  }
+
+  /// Deletes `<documents>/[name]`, if it is there.
+  static Future<void> deleteStoreFile(String name) async {
+    final file = File('${await _docs()}/$name');
+    if (await file.exists()) await file.delete();
   }
 
   /// Unwraps a decoded store file (see [_readPayload]).
