@@ -155,4 +155,58 @@ void main() {
     await BiliAccountStore.logOut();
     await handler.dispose();
   });
+
+  test('a live take\'s talk between songs does not stop the lyrics moving',
+      () async {
+    catalogue(daYu);
+    final t = await downloaded('ls-live');
+    final handler = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(), manageAudioSession: false);
+    final talk = [
+      for (var i = 0; i < 10; i++)
+        SubtitleLine(from: i * 0.5, to: i * 0.5 + 0.4, text: '谢谢大家今天来到现场第$i次'),
+    ];
+    final sung = heard(daYu, start: 30);
+    final controller = LyricsController(handler,
+        subtitles: (bvid, {cid = 0}) async => Subtitles(
+            language: 'ai-zh', ai: true, lines: [...talk, ...sung.lines]));
+    await handler.playTrack(t, queue: [t]);
+
+    final state = await settled(controller,
+        (s) => s.status == LyricsStatus.ready && s.lyrics.offset != 0);
+    expect(state.lyrics.offset, closeTo(20, 0.01));
+
+    controller.dispose();
+    await handler.dispose();
+  });
+
+  test('lyrics found before logging in are moved on a later play', () async {
+    await BiliAccountStore.logOut();
+    catalogue(daYu);
+    final t = await downloaded('ls-later-play');
+    final other = await downloaded('ls-later-other');
+    final handler = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(), manageAudioSession: false);
+    final controller = LyricsController(handler,
+        subtitles: (bvid, {cid = 0}) async =>
+            BiliAccountStore.current.value == null
+                ? null
+                : heard(daYu, start: 14));
+    await handler.playTrack(t, queue: [t, other]);
+    await settled(controller, (s) => s.status == LyricsStatus.ready);
+    expect(controller.state.value.lyrics.offset, 0);
+
+    // Logged in while another song plays; this one comes back later.
+    await handler.playTrack(other, queue: [t, other]);
+    await settled(controller, (s) => s.status == LyricsStatus.ready);
+    await BiliAccountStore.save(
+        const BiliAccount(cookies: 'SESSDATA=test', mid: 1, name: 'test'));
+    await handler.playTrack(t, queue: [t, other]);
+    await settled(controller, (s) => s.lyrics.offset == 4);
+    expect(controller.state.value.lyrics.offset, 4);
+
+    controller.dispose();
+    await BiliAccountStore.logOut();
+    await handler.dispose();
+  });
 }

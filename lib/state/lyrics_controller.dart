@@ -55,7 +55,7 @@ class LyricsController {
     final generation = ++_generation;
     final track = _handler.currentTrack;
     if (account == null || track == null || state.value.lyrics.pinned) return;
-    unawaited(_load(track, generation, recheckSubtitles: true));
+    unawaited(_load(track, generation));
   }
 
   /// The playing video's subtitles (when logged in to Bilibili): lyrics of
@@ -227,6 +227,9 @@ class LyricsController {
   /// it or behind (an intro, a live take). Where the video's subtitles
   /// hear enough of the lyrics at one steady shift, the lyrics are moved
   /// by it — as the automatic answer, which a calibration still overrides.
+  /// The song is already named here, so the shift alone is asked for (six
+  /// or more lines agreeing on it), not that the subtitles be mostly the
+  /// song: a live take's talk and applause would otherwise rule it out.
   Future<void> _setAgainstVideo(
       Track track, Lyrics lyrics, int revision, bool Function() owns) async {
     if (!lyrics.synced || lyrics.source == 'bilibili') return;
@@ -235,7 +238,7 @@ class LyricsController {
     if (!owns()) return;
     final match = SubtitleMatcher.compare(subtitles, lyrics.lines);
     final offset = match.offset;
-    if (!match.confirms || offset == null) return;
+    if (offset == null) return;
     final rounded = (offset * 100).round() / 100;
     if ((rounded - lyrics.offset).abs() < 0.3) return;
     final shifted = lyrics.copyWith(offset: rounded);
@@ -247,7 +250,7 @@ class LyricsController {
   }
 
   Future<void> _load(Track track, int generation,
-      {bool renamed = false, bool recheckSubtitles = false}) async {
+      {bool renamed = false}) async {
     final revision = LyricsStore.revisionOf(track.id);
     bool owns() =>
         generation == _generation &&
@@ -267,7 +270,9 @@ class LyricsController {
           stored.isNotEmpty &&
           (stored.pinned || (!renamed && _matches(stored, track)))) {
         publish(stored);
-        if (recheckSubtitles && !stored.pinned) {
+        // Lyrics found before logging in (or before the video had
+        // subtitles) are set against the video on a later play too.
+        if (!stored.pinned) {
           await _setAgainstVideo(track, stored, revision, owns);
         }
         return;
