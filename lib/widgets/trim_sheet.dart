@@ -122,6 +122,43 @@ class _TrimSheetState extends State<TrimSheet> {
 
   RangeValues? _before;
 
+  /// Moves one cut by [by]: the bar is the whole video, too coarse to land
+  /// on a second.
+  void _nudge({required bool start, required Duration by}) {
+    final step = by.inMilliseconds.toDouble();
+    final minimum = _minimum.inMilliseconds.toDouble();
+    final length = _length.inMilliseconds.toDouble();
+    final next = start
+        ? RangeValues(
+            (_range.start + step).clamp(0, _range.end - minimum).toDouble(),
+            _range.end)
+        : RangeValues(
+            _range.start,
+            (_range.end + step)
+                .clamp(_range.start + minimum, length)
+                .toDouble());
+    if (next == _range) return;
+    Haptics.selection();
+    setState(() => _range = next);
+    _preview(next, start: start);
+  }
+
+  Widget _nudges({required bool start}) {
+    final what = start ? '开始' : '结束';
+    Widget button(IconData icon, String tip, int seconds) => IconButton(
+          tooltip: tip,
+          icon: Icon(icon, color: AppColors.textPrimary, size: 20),
+          onPressed: () => _nudge(start: start, by: Duration(seconds: seconds)),
+        );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        button(Icons.remove_rounded, '$what提前 1 秒', -1),
+        button(Icons.add_rounded, '$what推后 1 秒', 1),
+      ],
+    );
+  }
+
   void _setFromNow({required bool start}) {
     Haptics.selection();
     final now = _ms(_handler.position);
@@ -170,7 +207,11 @@ class _TrimSheetState extends State<TrimSheet> {
           child: Row(
             children: [
               _Time(label: '开始', value: _start),
+              const SizedBox(width: 4),
+              _nudges(start: true),
               const Spacer(),
+              _nudges(start: false),
+              const SizedBox(width: 4),
               _Time(label: '结束', value: _end, end: true),
             ],
           ),
