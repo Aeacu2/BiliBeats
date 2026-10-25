@@ -1645,7 +1645,7 @@ class LyricsEngine {
       if (url.contains('UeTuwE7pvjBpypWLudqukA') || url.endsWith('/0.jpg')) {
         return null;
       }
-      return url.replaceFirst('http://', 'https://');
+      return secureUrl(url);
     } catch (e) {
       debugPrint('NetEase cover lookup error: $e');
       return null;

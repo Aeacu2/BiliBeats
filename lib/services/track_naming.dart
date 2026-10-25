@@ -333,10 +333,8 @@ class TrackNaming {
     await DatabaseService.setPref(_gaveUpPref, map);
   }
 
-  static Future<Track?> _stored(String id) async =>
-      (await DatabaseService.getDownloadedTracks())
-          .where((t) => t.id == id)
-          .firstOrNull;
+  static Future<Track?> _stored(String id) =>
+      DatabaseService.downloadedTrack(id);
 
   static Future<void> _save(Track track) async {
     await DatabaseService.updateTrackMetadata(track);

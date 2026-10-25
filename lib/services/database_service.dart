@@ -92,6 +92,9 @@ class DatabaseService {
 
   static int _playlistSeq = 0;
 
+  /// Plays remembered: long enough to order a library by (排序 → 最近播放).
+  static const int _historyLimit = 1000;
+
   /// Cached documents directory. The path is fixed for the lifetime of the
   /// app, yet every persist used to re-fetch it across the platform channel.
   static String? _docsPath;
@@ -902,15 +905,12 @@ class DatabaseService {
   /// Records a play. De-duplication is by track **id** (`bvid_cid`) only:
   /// keying by `bvid` used to collapse the separate parts (P1/P2/…) of one
   /// video into a single entry, silently dropping tracks from the list.
-  static const int _historyLimit = 1000;
-
   static Future<void> addRecentlyPlayed(Track track) async {
     await _ensureLoaded();
     final alreadyFirst =
         _recentlyPlayed.isNotEmpty && _recentlyPlayed.first.id == track.id;
     _recentlyPlayed.removeWhere((t) => t.id == track.id);
     _recentlyPlayed.insert(0, track);
-    // Long enough to order a library by (排序 → 最近播放).
     if (_recentlyPlayed.length > _historyLimit) _recentlyPlayed.removeLast();
     await _persistRecentlyPlayed();
     if (!alreadyFirst) _historyUpdateController.add(null);
@@ -984,6 +984,15 @@ class DatabaseService {
   static Future<List<Track>> getDownloadedTracks() async {
     await _ensureLoaded();
     return List<Track>.from(_downloadedTracks);
+  }
+
+  /// The library's copy of the download [id], without copying the library.
+  static Future<Track?> downloadedTrack(String id) async {
+    await _ensureLoaded();
+    for (final t in _downloadedTracks) {
+      if (t.id == id) return t;
+    }
+    return null;
   }
 
   /// Ids whose local audio was just deleted. The player drops them from its

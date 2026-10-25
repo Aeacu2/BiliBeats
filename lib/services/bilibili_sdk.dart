@@ -292,8 +292,7 @@ class BilibiliSdk {
       final data = json['data'];
       final bvid = data['bvid'] as String;
       final title = data['title'] as String;
-      var pic = (data['pic'] as String? ?? '').replaceAll('http:', 'https:');
-      if (pic.startsWith('//')) pic = 'https:$pic';
+      final pic = secureUrl(data['pic'] as String? ?? '');
       final owner = data['owner'] ?? {};
       final uploader = owner['name'] as String? ?? '未知UP主';
       final totalDuration = data['duration'] as int? ?? 0;
@@ -384,7 +383,7 @@ class BilibiliSdk {
       musicTitle: music?.title ?? '',
       musicArtists: music?.artists ?? const [],
       cover: view is Map && view['pic'] is String
-          ? (view['pic'] as String).replaceFirst('http:', 'https:')
+          ? secureUrl(view['pic'] as String)
           : '',
       complete: view is Map && tags is List && music != null,
     );
@@ -435,8 +434,7 @@ class BilibiliSdk {
       Subtitles? found;
       if (chosen != null) {
         var url = '${chosen['subtitle_url']}';
-        if (url.startsWith('//')) url = 'https:$url';
-        url = url.replaceFirst('http:', 'https:');
+        url = secureUrl(url);
         final body = await _httpGet(url);
         if (body == null) return null;
         found = parseSubtitleBody(
@@ -567,7 +565,7 @@ class BilibiliSdk {
         cookies: cookies,
         mid: data['mid'] as int,
         name: '${data['uname'] ?? ''}',
-        face: '${data['face'] ?? ''}'.replaceFirst('http:', 'https:'),
+        face: secureUrl('${data['face'] ?? ''}'),
       );
     } catch (_) {
       return null;
@@ -693,7 +691,7 @@ class BilibiliSdk {
             title: unescapeHtml('${m['title'] ?? ''}'),
             rawTitle: unescapeHtml('${m['title'] ?? ''}'),
             uploader: m['upper'] is Map ? '${m['upper']['name'] ?? ''}' : '',
-            coverUrl: '${m['cover'] ?? ''}'.replaceFirst('http:', 'https:'),
+            coverUrl: secureUrl('${m['cover'] ?? ''}'),
             duration: m['duration'] is int ? m['duration'] as int : 0,
           ),
     ];
@@ -771,7 +769,7 @@ class BilibiliSdk {
             title: unescapeHtml('${item['title'] ?? ''}'),
             rawTitle: unescapeHtml('${item['title'] ?? ''}'),
             uploader: '${item['author_name'] ?? ''}',
-            coverUrl: '${item['cover'] ?? ''}'.replaceFirst('http:', 'https:'),
+            coverUrl: secureUrl('${item['cover'] ?? ''}'),
             duration: item['duration'] is int ? item['duration'] as int : 0,
           ),
     ];
@@ -964,7 +962,7 @@ class BilibiliSdk {
       final url = (durl.first as Map)['url'];
       if (url is String && url.isNotEmpty) {
         return {
-          'url': url.replaceAll('http:', 'https:'),
+          'url': secureUrl(url),
           'quality': '高品质 AAC/M4A',
           ...loudness,
         };
@@ -994,7 +992,7 @@ class BilibiliSdk {
         }
         if (url != null) {
           return {
-            'url': url.replaceAll('http:', 'https:'),
+            'url': secureUrl(url),
             'quality': '320k DASH',
             ...loudness,
           };
@@ -1171,8 +1169,7 @@ class BilibiliSdk {
         final rawTitle = item['title'] as String? ?? '';
         final cleanTitle = unescapeHtml(rawTitle.replaceAll(_htmlTagRegex, ''));
         final author = unescapeHtml(item['author'] as String? ?? 'UP主');
-        final pic =
-            (item['pic'] as String? ?? '').replaceAll('http:', 'https:');
+        final pic = secureUrl(item['pic'] as String? ?? '');
 
         int durationSec = 0;
         final durRaw = item['duration'];
@@ -1200,7 +1197,7 @@ class BilibiliSdk {
           title: cleanTitle,
           rawTitle: cleanTitle,
           uploader: author,
-          coverUrl: pic.startsWith('//') ? 'https:$pic' : pic,
+          coverUrl: pic,
           duration: durationSec,
         ));
       }
@@ -1242,7 +1239,7 @@ class BilibiliSdk {
       if (tid is int && tid != 0 && !songZones.contains(tid)) continue;
       final title = unescapeHtml('${item['title'] ?? ''}').trim();
       final owner = item['owner'];
-      final pic = '${item['pic'] ?? ''}'.replaceFirst('http:', 'https:');
+      final pic = secureUrl('${item['pic'] ?? ''}');
       final stat = item['stat'];
       out.add((
         track: Track(
@@ -1252,7 +1249,7 @@ class BilibiliSdk {
           title: title,
           rawTitle: title,
           uploader: owner is Map ? '${owner['name'] ?? ''}'.trim() : '',
-          coverUrl: pic.startsWith('//') ? 'https:$pic' : pic,
+          coverUrl: pic,
           duration: item['duration'] is int ? item['duration'] as int : 0,
         ),
         views: stat is Map && stat['view'] is int ? stat['view'] as int : 0,
