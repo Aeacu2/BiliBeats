@@ -289,6 +289,40 @@ void main() {
     await handler.dispose();
   });
 
+  test('Previous and Next land on a trimmed song\'s start, not its intro',
+      () async {
+    final t = await downloaded(['pb-trimnav-a', 'pb-trimnav-b']);
+    const trim = Trim(start: Duration(seconds: 20));
+    await TrimStore.set(t[0].id, trim);
+    await TrimStore.set(t[1].id, trim);
+    final fake = FakeAudioPlayer();
+    final handler = handlerFor(fake);
+    await handler.playTrack(t[1], queue: t);
+
+    // Restarting goes back to where the song was cut, …
+    fake.positionValue = const Duration(seconds: 60);
+    await handler.skipToPrevious();
+    expect(handler.currentTrack, t[1]);
+    expect(fake.positionValue, trim.start);
+
+    // … just after that point, Previous is the song before, …
+    fake.positionValue = const Duration(seconds: 22);
+    await handler.skipToPrevious();
+    await pumpEventQueue();
+    expect(handler.currentTrack, t[0]);
+    expect(fake.positionValue, trim.start);
+
+    // … and Next starts the next song where it was cut too.
+    await handler.skipToNext();
+    await pumpEventQueue();
+    expect(handler.currentTrack, t[1]);
+    expect(fake.positionValue, trim.start);
+
+    await TrimStore.set(t[0].id, null);
+    await TrimStore.set(t[1].id, null);
+    await handler.dispose();
+  });
+
   test('play modes cycle 列表循环 → 单曲循环 → 随机 → 列表循环', () async {
     final t = await downloaded(['pb-mode-a', 'pb-mode-b', 'pb-mode-c']);
     final fake = FakeAudioPlayer();

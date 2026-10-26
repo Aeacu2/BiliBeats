@@ -324,7 +324,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
       await _player.pause();
       final order = _order(_player.sequenceState);
       if (order.isNotEmpty) {
-        await _player.seek(Duration.zero, index: order.first);
+        await _player.seek(_startAt(order.first), index: order.first);
       }
     }());
   }
@@ -407,6 +407,20 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
         unawaited(_skip(1));
       }
     }
+  }
+
+  /// Where the song at sequence [index] begins: its trim start, if any.
+  /// Seeking there directly, rather than to zero and letting [_applyTrim]
+  /// move on, keeps the cut intro from being heard for a moment — and from
+  /// being heard at all when the song was already playing (the trim start
+  /// is only applied as a song begins).
+  Duration _startAt(int index) {
+    final sequence = _player.sequenceState.sequence;
+    if (index < 0 || index >= sequence.length) return Duration.zero;
+    final track = _trackOf(sequence[index]);
+    return track == null
+        ? Duration.zero
+        : TrimStore.of(track.id)?.start ?? Duration.zero;
   }
 
   void _onDiscontinuity(ja.PositionDiscontinuity discontinuity) {
@@ -928,7 +942,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     if (_player.processingState == ja.ProcessingState.completed) {
       final order = _order(_player.sequenceState);
       if (order.isNotEmpty) {
-        await _player.seek(Duration.zero, index: order.first);
+        await _player.seek(_startAt(order.first), index: order.first);
       }
     }
     _startPlayback();
@@ -992,9 +1006,13 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> skipToPrevious() async {
-    if (_navTarget == null && _player.position > const Duration(seconds: 3)) {
-      await _player.seek(Duration.zero);
-      return;
+    final current = _player.sequenceState.currentIndex;
+    if (_navTarget == null && current != null) {
+      final start = _startAt(current);
+      if (_player.position > start + const Duration(seconds: 3)) {
+        await _player.seek(start);
+        return;
+      }
     }
     await _skip(-1);
   }
@@ -1022,7 +1040,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     final target = order[next];
     _navTarget = target;
     try {
-      await _player.seek(Duration.zero, index: target);
+      await _player.seek(_startAt(target), index: target);
     } finally {
       if (_navTarget == target) _navTarget = null;
     }
@@ -1033,7 +1051,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> skipToQueueItem(int index) async {
     final order = _order(_player.sequenceState);
     if (index < 0 || index >= order.length) return;
-    await _player.seek(Duration.zero, index: order[index]);
+    await _player.seek(_startAt(order[index]), index: order[index]);
     if (!_player.playing) _startPlayback();
   }
 
@@ -1216,7 +1234,9 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
         final deadline = _sleepDeadline;
         if (deadline != null) remaining = deadline.difference(DateTime.now());
       case SleepTimerMode.endOfTrack:
-        final total = _player.duration ?? durationNotifier.value;
+        final id = nowPlaying.value?.id;
+        final end = id == null ? null : TrimStore.of(id)?.end;
+        final total = end ?? _player.duration ?? durationNotifier.value;
         remaining = total - _player.position;
     }
     sleepTimerNotifier.value = SleepTimerState(

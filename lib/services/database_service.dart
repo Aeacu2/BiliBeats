@@ -408,16 +408,43 @@ class DatabaseService {
     }
   }
 
+  /// Writes waiting for the lock, by path, with the snapshot each will
+  /// save. Every file holds a whole snapshot, so a later request for a path
+  /// whose write has not begun yet only replaces what that write will save:
+  /// a burst of changes (an import adding songs one by one, a playlist
+  /// edited in quick succession) is one rewrite, not one per change.
+  static final Map<String, _QueuedWrite> _queuedWrites = {};
+
+  /// Saves what [snapshot] returns to [path], atomically, through the one
+  /// write lock. [snapshot] is called when the write begins, so the file
+  /// gets the state of that moment — including changes made after this
+  /// call. The future fails if the file could not be written.
+  static Future<void> _writeJsonAtomically(
+      String path, Object Function() snapshot) {
+    final queued = _queuedWrites[path];
+    if (queued != null) {
+      queued.snapshot = snapshot;
+      return queued.done;
+    }
+    final write = _QueuedWrite(snapshot);
+    _queuedWrites[path] = write;
+    final previous = _writeLock;
+    final done = () async {
+      await previous;
+      // From here on a change needs a write of its own.
+      _queuedWrites.remove(path);
+      await _writeNow(path, write.snapshot());
+    }();
+    write.done = done;
+    // The lock only orders writes; each caller hears of its own failure.
+    _writeLock = done.then((_) {}, onError: (Object _) {});
+    return done;
+  }
+
   /// Whole-file rewrites are truncated-then-written by default; a crash in the
   /// middle corrupts the file. Writing to a temp file and renaming keeps the
-  /// previous snapshot intact instead.
-  static Future<void> _writeJsonAtomically(String path, Object data) async {
-    // Serialize all whole-file writes through a single async mutex so two
-    // concurrent persists never share the same tmp file.
-    final previous = _writeLock;
-    final completer = Completer<void>();
-    _writeLock = completer.future;
-    await previous;
+  /// previous snapshot intact instead. Only called with the write lock held.
+  static Future<void> _writeNow(String path, Object data) async {
     File? tmp;
     try {
       final payload = jsonEncode(data);
@@ -464,7 +491,6 @@ class DatabaseService {
           if (await tmp.exists()) await tmp.delete();
         } catch (_) {}
       }
-      completer.complete();
     }
   }
 
@@ -542,7 +568,7 @@ class DatabaseService {
     try {
       final dir = await _docs();
       await _writeJsonAtomically('$dir/bilibeat_downloaded.json',
-          _envelope(_downloadedTracks.map((t) => t.toMap()).toList()));
+          () => _envelope([for (final t in _downloadedTracks) t.toMap()]));
     } catch (e) {
       debugPrint('DatabaseService _persistDownloaded error: $e');
       _reportSaveFailure();
@@ -553,7 +579,7 @@ class DatabaseService {
     try {
       final dir = await _docs();
       await _writeJsonAtomically('$dir/bilibeat_recently_played.json',
-          _envelope(_recentlyPlayed.map((t) => t.toMap()).toList()));
+          () => _envelope([for (final t in _recentlyPlayed) t.toMap()]));
     } catch (e) {
       debugPrint('DatabaseService _persistRecentlyPlayed error: $e');
       _reportSaveFailure();
@@ -561,27 +587,31 @@ class DatabaseService {
   }
 
   static Future<void> _persistPlaylists() async {
+    // Shown at once, not once the file is written: a heart tapped waits
+    // for no disk (and, with writes queued, for no other file either).
+    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
     try {
       final dir = await _docs();
-      final list = _playlists.map((p) {
-        final map = p.toMap();
-        map['tracks'] = p.tracks.map((t) => t.toMap()).toList();
-        return map;
-      }).toList();
       await _writeJsonAtomically(
-          '$dir/bilibeat_playlists.json', _envelope(list));
+          '$dir/bilibeat_playlists.json',
+          () => _envelope([
+                for (final p in _playlists)
+                  {
+                    ...p.toMap(),
+                    'tracks': [for (final t in p.tracks) t.toMap()],
+                  },
+              ]));
     } catch (e) {
       debugPrint('DatabaseService _persistPlaylists error: $e');
       _reportSaveFailure();
     }
-    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
   }
 
   static Future<void> _persistSearchHistory() async {
     try {
       final dir = await _docs();
-      await _writeJsonAtomically(
-          '$dir/bilibeat_search_history.json', _envelope(_searchHistory));
+      await _writeJsonAtomically('$dir/bilibeat_search_history.json',
+          () => _envelope(List.of(_searchHistory)));
     } catch (e) {
       debugPrint('DatabaseService _persistSearchHistory error: $e');
       _reportSaveFailure();
@@ -895,8 +925,10 @@ class DatabaseService {
       last: at ?? DateTime.now(),
     );
     try {
-      await _writeJsonAtomically('${await _docs()}/bilibeat_plays.json',
-          _envelope({for (final e in _plays.entries) e.key: e.value.toMap()}));
+      await _writeJsonAtomically(
+          '${await _docs()}/bilibeat_plays.json',
+          () => _envelope(
+              {for (final e in _plays.entries) e.key: e.value.toMap()}));
     } catch (e) {
       debugPrint('DatabaseService recordPlay error: $e');
       _reportSaveFailure();
@@ -1001,7 +1033,7 @@ class DatabaseService {
     try {
       await _writeJsonAtomically(
         '${await _docs()}/bilibeat_prefs.json',
-        _envelope(prefs),
+        () => _envelope(Map.of(prefs)),
       );
     } catch (e) {
       debugPrint('DatabaseService setPref error: $e');
@@ -1031,7 +1063,7 @@ class DatabaseService {
       final dir = await _docs();
       await _writeJsonAtomically(
         '$dir/bilibeat_session.json',
-        _envelope(session.toMap()),
+        () => _envelope(session.toMap()),
       );
     } catch (e) {
       debugPrint('DatabaseService savePlaybackSession error: $e');
@@ -1051,10 +1083,11 @@ class DatabaseService {
 
   /// Atomically writes [payload] (wrapped in the versioned envelope) to
   /// `<documents>/[name]`, through the same write lock as every other file.
-  /// Failures propagate to the caller.
+  /// [payload] must be the whole file: a write still waiting for the lock
+  /// saves the latest payload asked for. Failures propagate to the caller.
   static Future<void> writeStoreFile(String name, Object payload) async {
     final dir = await _docs();
-    await _writeJsonAtomically('$dir/$name', _envelope(payload));
+    await _writeJsonAtomically('$dir/$name', () => _envelope(payload));
   }
 
   /// Unwraps a decoded store file (see [_readPayload]).
@@ -1063,4 +1096,11 @@ class DatabaseService {
   /// Sets `<documents>/[name]` aside as unreadable (see [_setAside]).
   static Future<void> setAsideStoreFile(String name) async =>
       _setAside('${await _docs()}/$name');
+}
+
+class _QueuedWrite {
+  _QueuedWrite(this.snapshot);
+
+  Object Function() snapshot;
+  late Future<void> done;
 }

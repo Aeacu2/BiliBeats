@@ -76,8 +76,9 @@ class LibraryController extends ChangeNotifier {
     return null;
   }
 
-  bool isFavorite(String id) =>
-      favorites?.tracks.any((t) => t.id == id) ?? false;
+  Set<String> _favoriteIds = const {};
+
+  bool isFavorite(String id) => _favoriteIds.contains(id);
 
   /// User playlists (everything except 收藏).
   List<Playlist> get userPlaylists => [
@@ -263,6 +264,7 @@ class LibraryController extends ChangeNotifier {
       }
     }
     _playlists = List.unmodifiable(results[1] as List<Playlist>);
+    _favoriteIds = {...?favorites?.tracks.map((t) => t.id)};
     _recent = List.unmodifiable(results[2] as List<Track>);
     _plays = results[3] as Map<String, PlayStat>;
     _active = DownloadManager.instance.activeTasks;

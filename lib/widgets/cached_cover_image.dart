@@ -124,7 +124,7 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
     super.didChangeDependencies();
     if (_needsLoad) {
       _needsLoad = false;
-      _loadImage();
+      if (!_showKnown()) _loadImage();
     }
   }
 
@@ -133,12 +133,42 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.url != widget.url) {
       _loadKey = widget.url;
+      _retryTimer?.cancel();
+      _retries = 0;
+      if (_showKnown()) return;
       setState(() {
         _file = null;
         _status = _CoverStatus.loading;
       });
       _loadImage();
     }
+  }
+
+  /// Covers already found on disk this session, by URL and size asked for.
+  /// A row scrolled back into view (or rebuilt by a list that changed) is
+  /// drawn at once from here, without a placeholder frame, a fade, or the
+  /// directory lookup and file checks of [_loadImage].
+  static final Map<String, File> _known = {};
+  static const int _knownCap = 600;
+
+  String get _knownKey => '${widget.url}\n${_targetW}x$_targetH';
+
+  static void _remember(String key, File file) {
+    _known.remove(key);
+    _known[key] = file;
+    if (_known.length > _knownCap) _known.remove(_known.keys.first);
+  }
+
+  /// Shows a cover known from earlier; false when it has to be loaded.
+  bool _showKnown() {
+    if (widget.url.isEmpty || CachedCoverImage.isLocalPath(widget.url)) {
+      return false;
+    }
+    final file = _known[_knownKey];
+    if (file == null) return false;
+    _file = file;
+    _status = _CoverStatus.ready;
+    return true;
   }
 
   int get _targetW {
@@ -196,18 +226,11 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       return;
     }
 
+    final knownKey = _knownKey;
     try {
       final fetchUrl =
           CachedCoverImage.sizedUrl(widget.url, _targetW, _targetH);
-
-      // Application Support, not the temp dir: iOS/Android may purge temp
-      // under storage pressure, which silently re-downloaded every cover.
-      final supportDir = await getApplicationSupportDirectory();
-      final cacheDir = Directory('${supportDir.path}/bilibeat_covers');
-      if (!await cacheDir.exists()) {
-        await cacheDir.create(recursive: true);
-      }
-      _trimOnce ??= CachedCoverImage.trimCache(cacheDir);
+      final cacheDir = await (_cacheDir ??= _openCacheDir());
       // Named by the cover, then by the size asked for, so that another
       // size of the same cover can stand in when this one cannot be fetched.
       final source = md5.convert(utf8.encode(widget.url)).toString();
@@ -217,6 +240,7 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
 
       if (await file.exists() && await file.length() > 0) {
         unawaited(_touch(file));
+        _remember(knownKey, file);
         _settle(token, file);
         return;
       }
@@ -234,9 +258,33 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
           _inFlight.remove(fetchUrl);
         }
       }
+      // Only the size asked for is remembered: a stand-in is tried again.
+      if (cached != null) _remember(knownKey, cached);
       _settle(token, cached ?? await _anySize(cacheDir, source));
     } catch (_) {
       _settle(token, null);
+    }
+  }
+
+  /// The cover cache, looked up (and trimmed) once per launch: asking the
+  /// platform for the directory on every row cost a channel round-trip.
+  static Future<Directory>? _cacheDir;
+
+  static Future<Directory> _openCacheDir() async {
+    try {
+      // Application Support, not the temp dir: iOS/Android may purge temp
+      // under storage pressure, which silently re-downloaded every cover.
+      final supportDir = await getApplicationSupportDirectory();
+      final cacheDir = Directory('${supportDir.path}/bilibeat_covers');
+      if (!await cacheDir.exists()) {
+        await cacheDir.create(recursive: true);
+      }
+      unawaited(CachedCoverImage.trimCache(cacheDir));
+      return cacheDir;
+    } catch (_) {
+      // Asked again by the next cover.
+      _cacheDir = null;
+      rethrow;
     }
   }
 
@@ -263,8 +311,6 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       return null;
     }
   }
-
-  static Future<void>? _trimOnce;
 
   /// Marks a cover as used, at most once a day per file.
   static Future<void> _touch(File file) async {
@@ -353,11 +399,16 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
           height: widget.height,
           fit: widget.fit,
           gaplessPlayback: true,
-          errorBuilder: (context, error, stackTrace) => _buildFallback(),
+          errorBuilder: (context, error, stackTrace) {
+            // Gone from disk (the cache was trimmed): fetched again next time.
+            _known.removeWhere((_, file) => file.path == _file?.path);
+            return _buildPlaceholder();
+          },
         );
       case _CoverStatus.failed:
-        child = _buildFallback();
       case _CoverStatus.loading:
+        // Missing artwork looks like artwork still loading: it never
+        // invents colour that competes with real covers.
         child = _buildPlaceholder();
     }
 
@@ -374,23 +425,6 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   }
 
   Widget _buildPlaceholder() {
-    return Container(
-      width: widget.width,
-      height: widget.height,
-      color: AppColors.surfaceDeep,
-      child: Center(
-        child: Icon(
-          Icons.music_note_rounded,
-          color: AppColors.textFaint,
-          size: (widget.width * 0.28).clamp(14.0, 40.0),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFallback() {
-    // Same quiet treatment as the loading placeholder: missing artwork
-    // never invents color that competes with real covers.
     return Container(
       width: widget.width,
       height: widget.height,

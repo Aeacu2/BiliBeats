@@ -225,19 +225,25 @@ class AudioDownloadService {
     final result = <String, int>{};
     try {
       final dir = await _dir();
+      // One listing answers every "is it ready"; a stat per song made the
+      // management sheet slow to open on a large library.
+      final names = <String>{};
+      final audio = <String, File>{};
       await for (final entity in Directory(dir).list()) {
         if (entity is! File) continue;
         // URI segments always use `/`, unlike platform paths.
         final segments = entity.uri.pathSegments;
         if (segments.isEmpty) continue;
         final name = segments.last;
+        names.add(name);
         if (!name.startsWith('audio_') || !name.endsWith('.m4a')) continue;
         final id = name.substring('audio_'.length, name.length - '.m4a'.length);
-        if (id.isEmpty) continue;
-        final ready = File('$dir/audio_$id.ready');
-        if (!await ready.exists()) continue;
+        if (id.isNotEmpty) audio[id] = entity;
+      }
+      for (final MapEntry(key: id, value: file) in audio.entries) {
+        if (!names.contains('audio_$id.ready')) continue;
         try {
-          result[id] = await entity.length();
+          result[id] = await file.length();
         } catch (_) {}
       }
     } catch (e) {

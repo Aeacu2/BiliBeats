@@ -277,11 +277,12 @@ class LibraryTransfer {
           ? payload['completed'] as int
           : 0;
       final items = payload is Map ? payload['items'] : payload;
+      final queued = {for (final p in _pending) p.track.id};
       for (final raw in items as List? ?? const []) {
         if (raw is! Map) continue;
         final track =
             Track.fromMap(Map<String, dynamic>.from(raw['track'] as Map));
-        if (_pending.any((p) => p.track.id == track.id)) continue;
+        if (!queued.add(track.id)) continue;
         _pending.add((
           track: track,
           attempts: (raw['attempts'] as num?)?.toInt() ?? 0,
@@ -314,12 +315,12 @@ class LibraryTransfer {
       for (final t in await DatabaseService.getDownloadedTracks()) t.id
     };
     if (_pending.isEmpty) _completed = 0;
+    final queued = {for (final p in _pending) p.track.id};
     var added = 0;
     for (final track in tracks) {
       if (here.contains(track.id)) continue;
-      final at = _pending.indexWhere((p) => p.track.id == track.id);
       // Do not reorder or reset work that is already queued or running.
-      if (at != -1) continue;
+      if (!queued.add(track.id)) continue;
       added++;
       _failedThisRun.remove(track.id);
       _pending.add((track: track, attempts: 0));
