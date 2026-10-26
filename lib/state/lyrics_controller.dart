@@ -11,6 +11,7 @@ import '../services/bili_account.dart';
 import '../services/lyrics_engine.dart';
 import '../services/lyrics_store.dart';
 import '../services/subtitle_match.dart';
+import '../services/accompaniment.dart';
 
 enum LyricsStatus { loading, ready, empty }
 
@@ -84,14 +85,16 @@ class LyricsController {
   static String _nameKeyOf(Track track) => '${track.title}\n${track.uploader}';
 
   /// The song named by the listener (edited title), if they named it.
+  /// A backing track follows its song's lyrics: looked up without the
+  /// （伴奏） mark.
   static ({String? song, String? artist}) _namedBy(Track track) => track.isNamed
-      ? (song: track.title, artist: track.uploader)
+      ? (song: Accompaniment.songOf(track.title), artist: track.uploader)
       : (song: track.partTitle, artist: null);
 
   /// The search a person would type for [track].
   static String defaultQuery(Track track) {
     if (track.isNamed) {
-      return '${track.uploader} ${track.title}'.trim();
+      return '${track.uploader} ${Accompaniment.songOf(track.title)}'.trim();
     }
     final parsed = LyricsEngine.cleanTitle(track.rawTitle);
     // A part of a multi-part video is the song its own name says.
@@ -197,7 +200,8 @@ class LyricsController {
     // Judged the way the lookup accepted it (subtitle stripped: "问 (Live)"
     // is 问), and against the song's name once it has one.
     if (track.isNamed) {
-      return LyricsEngine.matchesSongQuery(storedTitle, track.title);
+      return LyricsEngine.matchesSongQuery(
+          storedTitle, Accompaniment.songOf(track.title));
     }
     final parsed = track.partTitle ??
         LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ??
@@ -214,7 +218,7 @@ class LyricsController {
     return Lyrics(
       source: 'bilibili',
       title: track.isNamed
-          ? track.title
+          ? Accompaniment.songOf(track.title)
           : track.partTitle ??
               LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ??
               track.title,

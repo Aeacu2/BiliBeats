@@ -6,6 +6,7 @@ import '../models/lyrics.dart';
 import '../models/subtitles.dart';
 import '../models/track.dart';
 import '../models/video_hints.dart';
+import 'accompaniment.dart';
 import 'audio_player_handler.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
@@ -96,6 +97,7 @@ class TrackNaming {
     _handler = handler;
     readWith ??= SongReaderService.read;
     enabled = await Prefs.get('autoName') != false;
+    unawaited(markAccompaniments());
     // Older downloads are named the first time they play, one at a time —
     // never as a sweep of the whole library.
     // Deleted and downloaded again is a new download: name it afresh.
@@ -334,6 +336,22 @@ class TrackNaming {
     await Prefs.set(_gaveUpPref, map);
   }
 
+  /// Backing tracks this matcher named before their names said so get the
+  /// mark now (「大鱼」 → 「大鱼（伴奏）」): no lookup, just the name. The
+  /// listener's own names are theirs and stay as they are.
+  @visibleForTesting
+  static Future<void> markAccompaniments() async {
+    for (final track in await DatabaseService.getDownloadedTracks()) {
+      final automatic = track.isNamed && (track.matcher ?? 0) != 0;
+      if (!automatic ||
+          !Accompaniment.isVideo(track) ||
+          Accompaniment.isTrack(track)) {
+        continue;
+      }
+      await _save(track.copyWith(title: Accompaniment.titled(track.title)));
+    }
+  }
+
   static Future<Track?> _stored(String id) =>
       DatabaseService.downloadedTrack(id);
 
@@ -422,10 +440,16 @@ class TrackNaming {
       return;
     }
 
+    // A backing track is named as one: 「大鱼（伴奏）」.
+    final title = found == null
+        ? null
+        : Accompaniment.isVideo(stored)
+            ? Accompaniment.titled(found.title)
+            : found.title;
     // Nothing better to offer: a named song keeps its name, and is not
     // asked about again until the matcher improves.
     final same = found != null &&
-        found.title == stored.title &&
+        title == stored.title &&
         found.artist == stored.uploader;
     final noBetter =
         found == null || same || (legacy && found.artist.trim() == uploader);
@@ -442,7 +466,7 @@ class TrackNaming {
     }
 
     await _save(stored.copyWith(
-      title: found.title,
+      title: title,
       uploader: found.artist,
       // The original release's artwork replaces a video thumbnail.
       // …and when a re-check finds it is not that recording after all,
