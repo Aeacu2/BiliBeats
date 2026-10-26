@@ -85,18 +85,32 @@ class LyricsController {
   static String _nameKeyOf(Track track) => '${track.title}\n${track.uploader}';
 
   /// The song named by the listener (edited title), if they named it.
-  /// A backing track follows its song's lyrics: looked up without the
-  /// （伴奏） mark.
+  /// A backing track (credited to 伴奏) follows its song's lyrics: the
+  /// singer is then read from the video's title, as for an unnamed one.
   static ({String? song, String? artist}) _namedBy(Track track) => track.isNamed
-      ? (song: Accompaniment.songOf(track.title), artist: track.uploader)
+      ? (
+          song: track.title,
+          artist: Accompaniment.isCredit(track.uploader)
+              ? Accompaniment.singerIn(track)
+              : track.uploader,
+        )
       : (song: track.partTitle, artist: null);
+
+  /// [track]'s video title as the title parser should read it: a backing
+  /// track's 【伴奏】 is not its singer.
+  static String _readable(Track track) => Accompaniment.isVideo(track)
+      ? Accompaniment.readable(track.rawTitle)
+      : track.rawTitle;
 
   /// The search a person would type for [track].
   static String defaultQuery(Track track) {
-    if (track.isNamed) {
-      return '${track.uploader} ${Accompaniment.songOf(track.title)}'.trim();
+    if (track.isNamed && !Accompaniment.isCredit(track.uploader)) {
+      return '${track.uploader} ${track.title}'.trim();
     }
-    final parsed = LyricsEngine.cleanTitle(track.rawTitle);
+    if (track.isNamed) {
+      return '${Accompaniment.singerIn(track) ?? ''} ${track.title}'.trim();
+    }
+    final parsed = LyricsEngine.cleanTitle(_readable(track));
     // A part of a multi-part video is the song its own name says.
     final song = track.partTitle ?? parsed['songTitle'] ?? '';
     return '${parsed['artist'] ?? ''} $song'.trim();
@@ -200,11 +214,10 @@ class LyricsController {
     // Judged the way the lookup accepted it (subtitle stripped: "问 (Live)"
     // is 问), and against the song's name once it has one.
     if (track.isNamed) {
-      return LyricsEngine.matchesSongQuery(
-          storedTitle, Accompaniment.songOf(track.title));
+      return LyricsEngine.matchesSongQuery(storedTitle, track.title);
     }
     final parsed = track.partTitle ??
-        LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ??
+        LyricsEngine.cleanTitle(_readable(track))['songTitle'] ??
         '';
     return LyricsEngine.matchesSongQuery(storedTitle, parsed) ||
         LyricsEngine.matchesSongQuery(storedTitle, track.title);
@@ -218,9 +231,9 @@ class LyricsController {
     return Lyrics(
       source: 'bilibili',
       title: track.isNamed
-          ? Accompaniment.songOf(track.title)
+          ? track.title
           : track.partTitle ??
-              LyricsEngine.cleanTitle(track.rawTitle)['songTitle'] ??
+              LyricsEngine.cleanTitle(_readable(track))['songTitle'] ??
               track.title,
       artist: 'B站字幕',
       lines: SubtitleMatcher.asLyrics(subtitles),
@@ -289,7 +302,7 @@ class LyricsController {
       final named = _namedBy(track);
       final failuresBefore = LyricsEngine.httpFailures;
       var fresh = await LyricsEngine.autoFetchLyrics(
-        track.rawTitle,
+        _readable(track),
         song: named.song,
         artist: named.artist,
         durationSeconds: track.duration,

@@ -11,6 +11,7 @@ import 'database_service.dart';
 import 'lyrics_engine.dart';
 import 'track_credit.dart';
 import 'search_history.dart';
+import 'accompaniment.dart';
 
 /// What the listener seems to like, derived entirely from local data:
 /// favourites, play history, the downloaded library and search history.
@@ -78,7 +79,10 @@ class TasteProfile {
       byId.putIfAbsent(t.id, () => t);
       weights[t.id] = (weights[t.id] ?? 0) + weight;
       final artist = TrackCredit.artistOf(t).toLowerCase();
-      if (artist.isNotEmpty) artists[artist] = (artists[artist] ?? 0) + weight;
+      // 伴奏 is what a song is, not who sings it: nobody to search for.
+      if (artist.isNotEmpty && !Accompaniment.isCredit(artist)) {
+        artists[artist] = (artists[artist] ?? 0) + weight;
+      }
     }
 
     for (final t in favourites) {

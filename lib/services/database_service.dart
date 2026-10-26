@@ -7,9 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../models/play_stat.dart';
 import '../models/playlist.dart';
 import '../models/track.dart';
-import 'accompaniment.dart';
 import 'audio_download_service.dart';
-import 'prefs.dart';
 import 'store_files.dart';
 
 /// Parse helpers run inside a background isolate (via [StoreFiles.load]): a
@@ -210,12 +208,6 @@ class DatabaseService {
           ..addAll(plays);
       }
       _rebaseCovers(docs);
-      // Backing tracks downloaded before there was a 伴奏 playlist (once
-      // there is one, or was, each is filed as it comes).
-      if (await Prefs.get(_accompanimentsPref) == null &&
-          await _fileAccompaniments(_downloadedTracks)) {
-        await _persistPlaylists();
-      }
       // With a store set aside, what it referenced is unknown: keep it all.
       if (!StoreFiles.setAsideThisLaunch && !everSetAside) {
         unawaited(_sweepCovers(docs));
@@ -585,19 +577,13 @@ class DatabaseService {
   /// beside the audio.
   static Future<void> updateTrackMetadata(Track updated) async {
     await _ensureLoaded();
-    final before = _knownCopy(updated);
     final changed = _changeCopies(updated.id, (_) => updated);
     if (changed.downloaded) await _persistDownloaded();
     // Deliberate edit: this one does overwrite the on-disk copy.
     await AudioDownloadService.saveTrackMetadata(updated, force: true);
-    // Named as a backing track just now (by the matcher, or the listener).
-    final filed = changed.downloaded &&
-        before != null &&
-        !Accompaniment.isTrack(before) &&
-        await _fileAccompaniments([updated]);
     // The playlists file holds a copy of every song in every playlist:
     // not rewritten for a song that is in none.
-    if (changed.playlists || filed) {
+    if (changed.playlists) {
       await _persistPlaylists();
     } else {
       _libraryChanged();
@@ -667,9 +653,6 @@ class DatabaseService {
           : kept.copyWith(loudness: track.loudness ?? kept.loudness),
     );
     await _persistDownloaded();
-    if (await _fileAccompaniments([_downloadedTracks.first])) {
-      await _persistPlaylists();
-    }
     _libraryChanged();
   }
 
@@ -803,64 +786,6 @@ class DatabaseService {
     if (playlistId == Playlist.favoritesId) return;
     _playlists.removeWhere((p) => p.id == playlistId);
     await _persistPlaylists();
-    // The listener does not want one: none is made again.
-    if (await Prefs.get(_accompanimentsPref) == playlistId) {
-      await Prefs.set(_accompanimentsPref, false);
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // The 伴奏 playlist
-  // ---------------------------------------------------------------------------
-
-  /// The id of the playlist backing tracks are filed in, or false once the
-  /// listener deleted it.
-  static const String _accompanimentsPref = 'accompanimentPlaylist';
-
-  /// The 伴奏 playlist, made the first time it is needed (or one of that
-  /// name the listener made already); null once they deleted it.
-  static Future<Playlist?> _accompaniments() async {
-    final saved = await Prefs.get(_accompanimentsPref);
-    if (saved == false) return null;
-    if (saved is String) {
-      final playlist = _playlist(saved);
-      if (playlist != null) return playlist;
-    }
-    var playlist = _playlists
-        .where((p) => p.name == '伴奏' && p.id != Playlist.favoritesId)
-        .firstOrNull;
-    if (playlist == null) {
-      playlist = Playlist(
-        id: 'pl_accompaniments_${DateTime.now().millisecondsSinceEpoch}',
-        name: '伴奏',
-        tracks: [],
-      );
-      _playlists.add(playlist);
-    }
-    await Prefs.set(_accompanimentsPref, playlist.id);
-    return playlist;
-  }
-
-  /// Adds those of [tracks] that are backing tracks to the 伴奏 playlist,
-  /// at its top. Each is filed when it is downloaded or named as one: one
-  /// the listener took out stays out. True when the playlists changed (the
-  /// caller saves them).
-  static Future<bool> _fileAccompaniments(Iterable<Track> tracks) async {
-    final backing = [
-      for (final t in tracks)
-        if (Accompaniment.isTrack(t)) t,
-    ];
-    if (backing.isEmpty) return false;
-    final before = _playlists.length;
-    final playlist = await _accompaniments();
-    if (playlist == null) return false;
-    final have = {for (final t in playlist.tracks) t.id};
-    final toAdd = [
-      for (final t in backing)
-        if (have.add(t.id)) t,
-    ];
-    playlist.tracks.insertAll(0, toAdd);
-    return toAdd.isNotEmpty || _playlists.length != before;
   }
 
   /// Moves a track within a playlist. Both indices are final positions —

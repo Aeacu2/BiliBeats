@@ -11,6 +11,7 @@ import '../services/lyrics_engine.dart';
 import '../services/track_credit.dart';
 import '../services/track_naming.dart';
 import '../services/prefs.dart';
+import '../services/accompaniment.dart';
 
 /// How the song list is ordered.
 enum LibrarySort { recent, played, mostPlayed, forgotten, title, artist }
@@ -287,7 +288,7 @@ class LibraryController extends ChangeNotifier {
     final names = {
       for (final track in _downloaded)
         if (track.isNamed) ...artistNamesOf(track),
-    };
+    }..removeWhere(Accompaniment.isCredit);
     if (setEquals(names, _taught)) return;
     _taught = names;
     LyricsEngine.knownArtists = names;

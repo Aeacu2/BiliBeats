@@ -1,10 +1,16 @@
 import '../models/track.dart';
+import 'lyrics_engine.dart';
 
-/// Backing tracks (伴奏): how a video says it is one, and how a song's name
-/// says so once it is named — 「大鱼（伴奏）」. The mark is part of the
-/// title, so the listener can edit it away like any other part of a name.
+/// Backing tracks (伴奏): how a video says it is one, and how the library
+/// holds one — credited to 伴奏 instead of a singer. They then gather under
+/// 伴奏 among the artists (where they can be played on their own) and stay
+/// out of the singers' own lists. The credit is an ordinary artist name: the
+/// listener can edit it away like any other.
 class Accompaniment {
   Accompaniment._();
+
+  /// The artist a backing track is credited to.
+  static const String artist = '伴奏';
 
   /// What a title says to mark a backing track: the music without the
   /// voice (去人声, 消音). The opposite — the voice without the music (无伴奏
@@ -15,8 +21,13 @@ class Accompaniment {
     caseSensitive: false,
   );
 
-  static const String _suffix = '（伴奏）';
-  static final RegExp _trailingSuffix = RegExp(r'\s*[（(]伴奏[）)]\s*$');
+  /// A bracketed backing-track mark at the end of a name: 「大鱼 (伴奏版)」,
+  /// 「Lemon (Off Vocal)」.
+  static final RegExp _trailingMark = RegExp(
+    r'\s*[（(\[【][^（()）\[\]【】]*(?:伴奏|off[ -]?vocal|karaoke|instrumental)'
+    r'[^（()）\[\]【】]*[)）\]】]\s*$',
+    caseSensitive: false,
+  );
 
   /// Whether [title] says it is a backing track.
   static bool marks(String title) => _mark.hasMatch(title);
@@ -26,14 +37,26 @@ class Accompaniment {
   static bool isVideo(Track track) =>
       marks(track.rawTitle) || marks(track.partTitle ?? '');
 
-  /// Whether [track] is held as a backing track: its name says so (the
-  /// video's title, until the song is named).
-  static bool isTrack(Track track) => marks(track.title);
+  /// The singer [track]'s video title names (「【伴奏】周深《大鱼》」: 周深), read
+  /// with the backing-track words left out — the parser would otherwise
+  /// take 【伴奏】 for the artist. Null when it names none.
+  static String? singerIn(Track track) {
+    final singer =
+        LyricsEngine.cleanTitle(readable(track.rawTitle))['artist']?.trim() ??
+            '';
+    return singer.isEmpty || isCredit(singer) ? null : singer;
+  }
 
-  /// [song] as the name of its backing track, unless it already says so.
-  static String titled(String song) => marks(song) ? song : '$song$_suffix';
+  /// [title] with its backing-track words left out, for the title parser.
+  static String readable(String title) => title.replaceAll(_mark, ' ');
 
-  /// The song a name is of, without the backing-track mark: what lyrics
-  /// are looked up by (a backing track follows the song's lyrics).
-  static String songOf(String title) => title.replaceFirst(_trailingSuffix, '');
+  /// Whether [name] is the backing-track credit rather than a singer.
+  static bool isCredit(String name) => name.trim() == artist;
+
+  /// [title] without a bracketed backing-track mark at its end: the song's
+  /// name, the credit already saying what it is.
+  static String songOf(String title) {
+    final song = title.replaceFirst(_trailingMark, '').trim();
+    return song.isEmpty ? title : song;
+  }
 }

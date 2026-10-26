@@ -9,6 +9,7 @@ import '../models/track.dart';
 import 'audio_download_service.dart';
 import 'audio_player_handler.dart';
 import 'database_service.dart';
+import 'accompaniment.dart';
 
 /// What one import added.
 class LocalImport {
@@ -155,14 +156,20 @@ class LocalSongs {
 
     final fromName = nameOf(text('name') ?? '');
     final durationMs = copy['durationMs'];
-    final title = text('title') ?? fromName.title;
+    var title = text('title') ?? fromName.title;
+    var artist = text('artist') ?? fromName.artist ?? '未知歌手';
+    // A backing track is credited to 伴奏, like one from Bilibili.
+    if (Accompaniment.marks(title) || Accompaniment.marks(fromName.stem)) {
+      title = Accompaniment.songOf(title);
+      artist = Accompaniment.artist;
+    }
     return Track(
       id: id,
       bvid: '',
       cid: 0,
       title: title,
       rawTitle: fromName.stem.isEmpty ? title : fromName.stem,
-      uploader: text('artist') ?? fromName.artist ?? '未知歌手',
+      uploader: artist,
       coverUrl: coverUrl,
       duration: durationMs is num ? (durationMs / 1000).round() : 0,
       named: true,

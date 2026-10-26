@@ -80,8 +80,11 @@ class _TrimSheetState extends State<TrimSheet> {
         await BilibiliSdk.fetchSubtitles(track.bvid, cid: track.cid);
     if (subtitles == null || subtitles.isEmpty || !mounted) return;
     final recording = await LyricsEngine.recordingSeconds(
-      lyrics.title ?? Accompaniment.songOf(track.title),
-      artist: lyrics.artist ?? (track.isNamed ? track.uploader : null),
+      lyrics.title ?? track.title,
+      artist: lyrics.artist ??
+          (track.isNamed && !Accompaniment.isCredit(track.uploader)
+              ? track.uploader
+              : null),
       near: _length.inSeconds,
     );
     if (!mounted) return;

@@ -115,11 +115,12 @@ docs/archive/               old review notes and a superseded feature list — h
   music and hand-checked answers, replayed by `recognition_live_test.dart`. Check a
   matching change against it before believing it.
 - **Backing tracks (伴奏).** `Accompaniment` reads a video title (伴奏, 消音, 去人声,
-  off vocal… but not 无伴奏/去伴奏/消伴奏, which are the voice alone). The matcher names
-  one 「歌名（伴奏）」 — the mark is part of the title, so 编辑信息 can remove it — and
-  lyrics are looked up without it. Each is filed in a 伴奏 playlist when downloaded or
-  named as one (made on first need, or the listener's own 伴奏; once deleted, not made
-  again: pref `accompanimentPlaylist`).
+  off vocal… but not 无伴奏/去伴奏/消伴奏, which are the voice alone). A backing track
+  is credited to the artist 伴奏 (`TrackCredit.artistOf` already, before naming; the
+  matcher names it the song, credited 伴奏), so it gathers under 伴奏 among the artists
+  and stays out of the singers' lists. 伴奏 is not a singer: lyrics read the singer
+  from the video title instead, and it is neither taught to the title parser nor a
+  recommendation artist. The listener can edit the credit away like any other.
 - **Downloads** retry for about three minutes (`AudioDownloadService.retryDelays`,
   fresh link each time, resuming the `.part`); tests run with no retries
   (`test/flutter_test_config.dart`). Naming starts when a download does
