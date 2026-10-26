@@ -66,7 +66,11 @@ docs/archive/               old review notes and a superseded feature list — h
   `DatabaseService` is the library (downloads, history, play counts, playlists);
   `Prefs`, `SearchHistory`, `LyricsStore`, `TrimStore`, `BiliAccountStore` are their
   own stores. Screens do not read `DatabaseService` directly; they listen to
-  `LibraryController`.
+  `LibraryController`. Playlists live in `bilibeat_playlists2.json`, a song written as
+  its id where it is exactly the download list's copy, else in full (a deleted
+  download is rewritten in full into its playlists *before* the list drops it). The
+  older `bilibeat_playlists.json` is never written: it is what an older build reads,
+  and if one changes it, it is newer and moved over again.
 - **`Track` identity is `bvid_p<page>`**; equality is by id, so use `TrackNotifier`
   (not `ValueNotifier<Track>`) where an edited copy must notify.
 - **Song vs. video.** `rawTitle` is the video title and never changes. `title`/`uploader`

@@ -56,7 +56,7 @@ void main() {
     // … and a save writes a file this build understands …
     await DatabaseService.toggleFavorite(track);
     final current = jsonDecode(
-        await File('${docs.path}/bilibeat_playlists.json').readAsString());
+        await File('${docs.path}/bilibeat_playlists2.json').readAsString());
     expect(current['schema_version'], StoreFiles.schemaVersion);
 
     // … while what could not be read is still there, byte for byte.

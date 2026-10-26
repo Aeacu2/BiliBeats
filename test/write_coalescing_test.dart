@@ -25,7 +25,7 @@ void main() {
       for (var i = 0; i < 20; i++) DatabaseService.createPlaylist('list $i'),
     ]);
 
-    final file = File('${docs.path}/bilibeat_playlists.json');
+    final file = File('${docs.path}/bilibeat_playlists2.json');
     final saved = (jsonDecode(await file.readAsString())['data'] as List)
         .map((p) => (p as Map)['id'])
         .toSet();
@@ -55,7 +55,7 @@ void main() {
 
     Future<dynamic> data(String name) async =>
         jsonDecode(await File('${docs.path}/$name').readAsString())['data'];
-    final playlists = await data('bilibeat_playlists.json') as List;
+    final playlists = await data('bilibeat_playlists2.json') as List;
     expect(playlists.firstWhere((p) => p['id'] == list.id), {
       ...Playlist(
           id: list.id,

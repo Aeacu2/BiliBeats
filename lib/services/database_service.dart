@@ -31,6 +31,7 @@ List<Track> _tracksIn(List<dynamic> list) {
   return out;
 }
 
+/// The playlists file before songs were stored by id: each song in full.
 List<Playlist> _parsePlaylistList(String json) {
   final list = StoreFiles.unwrap(jsonDecode(json)) as List<dynamic>? ?? [];
   final out = <Playlist>[];
@@ -39,6 +40,32 @@ List<Playlist> _parsePlaylistList(String json) {
       final map = Map<String, dynamic>.from(item as Map);
       final tracks = _tracksIn(map['tracks'] as List<dynamic>? ?? []);
       out.add(Playlist.fromMap(map, tracks: tracks));
+    } catch (e) {
+      debugPrint('Library: skipped a bad playlist: $e');
+    }
+  }
+  return out;
+}
+
+/// A playlist as stored: its songs are ids (of the download list's copies)
+/// or songs in full.
+typedef _StoredPlaylist = ({Playlist playlist, List<Object> entries});
+
+List<_StoredPlaylist> _parseStoredPlaylists(String json) {
+  final list = StoreFiles.unwrap(jsonDecode(json)) as List<dynamic>? ?? [];
+  final out = <_StoredPlaylist>[];
+  for (final item in list) {
+    try {
+      final map = Map<String, dynamic>.from(item as Map);
+      final entries = <Object>[];
+      for (final entry in map['tracks'] as List<dynamic>? ?? []) {
+        if (entry is String) {
+          if (entry.isNotEmpty) entries.add(entry);
+        } else {
+          entries.addAll(_tracksIn([entry]));
+        }
+      }
+      out.add((playlist: Playlist.fromMap(map), entries: entries));
     } catch (e) {
       debugPrint('Library: skipped a bad playlist: $e');
     }
@@ -66,7 +93,17 @@ class DatabaseService {
 
   static const String _downloadedFile = 'bilibeat_downloaded.json';
   static const String _historyFile = 'bilibeat_recently_played.json';
-  static const String _playlistsFile = 'bilibeat_playlists.json';
+
+  /// Playlists, each song stored as the id of its downloaded copy where the
+  /// two are the same, else in full.
+  static const String _playlistsFile = 'bilibeat_playlists2.json';
+
+  /// Playlists as earlier builds kept them, every song in full. Read once,
+  /// to move to [_playlistsFile], and never written again: an older build
+  /// installed over this one still finds every playlist as it was then,
+  /// and cannot touch the newer file. Should an older build change it, it
+  /// becomes the newer of the two and is moved over again.
+  static const String _legacyPlaylistsFile = 'bilibeat_playlists.json';
   static const String _playsFile = 'bilibeat_plays.json';
 
   static final List<Track> _downloadedTracks = [];
@@ -146,19 +183,24 @@ class DatabaseService {
       final downloaded = await StoreFiles.load(_downloadedFile, _parseTrackList,
           offThread: true);
       if (downloaded != null) _replace(_downloadedTracks, downloaded);
-      await _discoverAudioFiles(docs);
+      // Before discovery drops songs whose files are gone: a playlist may
+      // name them by id.
+      final listed = {for (final t in _downloadedTracks) t.id: t};
+      final downloadsChanged = await _discoverAudioFiles(docs);
       final history =
           await StoreFiles.load(_historyFile, _parseTrackList, offThread: true);
       if (history != null) _replace(_recentlyPlayed, history);
-      final playlists = await StoreFiles.load(
-          _playlistsFile, _parsePlaylistList,
-          offThread: true);
-      if (playlists != null) {
-        if (!playlists.any((p) => p.id == Playlist.favoritesId)) {
-          playlists.insert(0, _emptyFavorites());
-        }
-        _replace(_playlists, playlists);
+      final playlistsChanged = await _loadPlaylists(listed);
+      if (!_playlists.any((p) => p.id == Playlist.favoritesId)) {
+        _playlists.insert(0, _emptyFavorites());
       }
+      // Playlists first: a song the download list has lost is then written
+      // into them in full before the list stops holding it.
+      if (playlistsChanged) await _persistPlaylists();
+      // Pruned, or found on disk but missing from the list (a download that
+      // completed while the list's file was truncated): saved, so the next
+      // launch does not depend on discovery.
+      if (downloadsChanged) unawaited(_persistDownloaded());
       final plays = await StoreFiles.load(_playsFile, _parsePlays);
       if (plays != null) {
         _plays
@@ -179,10 +221,90 @@ class DatabaseService {
     ..clear()
     ..addAll(loaded);
 
+  /// Reads the playlists, from the older file when it is the newer of the
+  /// two (see [_legacyPlaylistsFile]). True when they are to be saved
+  /// again: moved from the older file, or holding by id a song the
+  /// download list no longer has ([listed]: the list as it was read).
+  static Future<bool> _loadPlaylists(Map<String, Track> listed) async {
+    if (await _legacyIsNewer()) {
+      final legacy = await StoreFiles.load(
+          _legacyPlaylistsFile, _parsePlaylistList,
+          offThread: true);
+      if (legacy != null) {
+        _replace(_playlists, legacy);
+        return true;
+      }
+    }
+    final stored = await StoreFiles.load(_playlistsFile, _parseStoredPlaylists,
+        offThread: true);
+    if (stored == null) return false;
+    final downloads = {for (final t in _downloadedTracks) t.id: t};
+    Map<String, Track>? legacyCopies;
+    var changed = false;
+    final playlists = <Playlist>[];
+    for (final (:playlist, :entries) in stored) {
+      final tracks = <Track>[];
+      for (final entry in entries) {
+        if (entry is Track) {
+          tracks.add(entry);
+          continue;
+        }
+        final id = entry as String;
+        var track = downloads[id];
+        if (track == null) {
+          // Its file is gone (or the list was unreadable): the copy the list
+          // had, else the one the older file kept.
+          changed = true;
+          legacyCopies ??= await _legacyCopies();
+          track = listed[id] ?? legacyCopies[id];
+        }
+        if (track != null) {
+          tracks.add(track);
+        } else {
+          debugPrint('Library: playlist ${playlist.id} lost song $id');
+        }
+      }
+      playlists.add(Playlist(
+          id: playlist.id,
+          name: playlist.name,
+          coverUrl: playlist.coverUrl,
+          tracks: tracks));
+    }
+    _replace(_playlists, playlists);
+    return changed;
+  }
+
+  static Future<bool> _legacyIsNewer() async {
+    try {
+      final legacy = File(await StoreFiles.pathOf(_legacyPlaylistsFile));
+      if (!await legacy.exists()) return false;
+      final current = File(await StoreFiles.pathOf(_playlistsFile));
+      if (!await current.exists()) return true;
+      return (await legacy.lastModified())
+          .isAfter(await current.lastModified());
+    } catch (e) {
+      debugPrint('Library: playlist files not compared: $e');
+      return false;
+    }
+  }
+
+  /// Every song the older playlists file kept, by id.
+  static Future<Map<String, Track>> _legacyCopies() async {
+    final legacy = await StoreFiles.load(
+            _legacyPlaylistsFile, _parsePlaylistList,
+            offThread: true) ??
+        const <Playlist>[];
+    return {
+      for (final p in legacy)
+        for (final t in p.tracks) t.id: t,
+    };
+  }
+
   /// Squares the download list with the audio folder: songs whose files are
   /// there but which the list lost are added back (from the metadata kept
   /// beside each file), and entries whose files are gone are dropped.
-  static Future<void> _discoverAudioFiles(String docs) async {
+  /// True when the list changed (and is to be saved).
+  static Future<bool> _discoverAudioFiles(String docs) async {
     try {
       final audioDir = Directory('$docs/bilibeat_audio');
       // One listing answers every "is it there" below; a stat per file per
@@ -260,14 +382,10 @@ class DatabaseService {
         }
         return !there;
       });
-      // Pruned, or found on disk but missing from the list (a download that
-      // completed while the list's file was truncated): saved, so the next
-      // launch does not depend on discovery. Fire-and-forget is fine here.
-      if (_downloadedTracks.length != beforePrune || added > 0) {
-        unawaited(_persistDownloaded());
-      }
+      return _downloadedTracks.length != beforePrune || added > 0;
     } catch (e) {
       debugPrint('DatabaseService audio discovery skipped: $e');
+      return false;
     }
   }
 
@@ -340,9 +458,8 @@ class DatabaseService {
   /// of the cost of saving.
   static final Expando<String> _trackJson = Expando('track json');
 
-  static String _tracksJson(List<Track> tracks) => '[${[
-        for (final t in tracks) _trackJson[t] ??= jsonEncode(t.toMap()),
-      ].join(',')}]';
+  static String _tracksJson(List<Track> tracks) =>
+      '[${[for (final t in tracks) _json(t)].join(',')}]';
 
   /// [objectJson] (an encoded map) with a `tracks` entry added.
   static String _withTracks(String objectJson, String tracksJson) {
@@ -356,11 +473,25 @@ class DatabaseService {
   static Future<void> _persistRecentlyPlayed() =>
       StoreFiles.save(_historyFile, EncodedJson(_tracksJson(_recentlyPlayed)));
 
-  /// Saves the playlists and tells the library they changed.
+  static String _json(Track t) => _trackJson[t] ??= jsonEncode(t.toMap());
+
+  /// Saves the playlists and tells the library they changed. A song is
+  /// written as its id where it is exactly the download list's copy — most
+  /// of them, and a twentieth of the size — else in full, so nothing is
+  /// lost whatever becomes of the download.
   static Future<void> _persistPlaylists() async {
+    final downloads = {for (final t in _downloadedTracks) t.id: t};
+    String entry(Track t) {
+      final download = downloads[t.id];
+      final same = download != null &&
+          (identical(download, t) || _json(download) == _json(t));
+      return same ? jsonEncode(t.id) : _json(t);
+    }
+
     final list = [
       for (final p in _playlists)
-        _withTracks(jsonEncode(p.toMap()), _tracksJson(p.tracks)),
+        _withTracks(jsonEncode(p.toMap()),
+            '[${[for (final t in p.tracks) entry(t)].join(',')}]'),
     ];
     await StoreFiles.save(_playlistsFile, EncodedJson('[${list.join(',')}]'));
     _libraryChanged();
@@ -503,6 +634,11 @@ class DatabaseService {
     await AudioDownloadService.delete(track);
     _downloadedTracks.removeWhere((t) => t.id == track.id);
     _downloadRemovedController.add({track.id});
+    // Playlists holding the song by id now write it in full — before the
+    // list that id pointed into stops holding it.
+    if (_playlists.any((p) => p.tracks.any((t) => t.id == track.id))) {
+      await _persistPlaylists();
+    }
     await _persistDownloaded();
     _libraryChanged();
   }
