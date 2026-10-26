@@ -3,77 +3,97 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 
-import '../models/track.dart';
-import '../models/playlist.dart';
 import '../models/play_stat.dart';
-import '../models/playback_state.dart';
+import '../models/playlist.dart';
+import '../models/track.dart';
 import 'audio_download_service.dart';
+import 'store_files.dart';
 
-/// Parse helpers run inside a background isolate (via [compute]): a large
-/// library means several files of jsonDecode + object construction, and doing
-/// that on the UI isolate blocked the first frame after startup. They are
-/// top-level because isolate entry points must be top-level or static, and
-/// they only touch pure model constructors — never the service's static state.
-List<Track> _parseTrackList(String json) {
-  final list =
-      DatabaseService._readPayload(jsonDecode(json)) as List<dynamic>? ?? [];
+/// Parse helpers run inside a background isolate (via [StoreFiles.load]): a
+/// large library means several files of jsonDecode + object construction,
+/// and doing that on the UI isolate blocked the first frame after startup.
+/// They are top-level because isolate entry points must be top-level or
+/// static, and they only touch pure model constructors — never the
+/// service's static state.
+List<Track> _parseTrackList(String json) =>
+    _tracksIn(StoreFiles.unwrap(jsonDecode(json)) as List<dynamic>? ?? []);
+
+List<Track> _tracksIn(List<dynamic> list) {
   final out = <Track>[];
   for (final item in list) {
     try {
       out.add(Track.fromMap(Map<String, dynamic>.from(item as Map)));
     } catch (e) {
-      debugPrint('_parseTrackList skip bad track: $e');
+      debugPrint('Library: skipped a bad track: $e');
     }
   }
   return out;
 }
 
 List<Playlist> _parsePlaylistList(String json) {
-  final list =
-      DatabaseService._readPayload(jsonDecode(json)) as List<dynamic>? ?? [];
+  final list = StoreFiles.unwrap(jsonDecode(json)) as List<dynamic>? ?? [];
   final out = <Playlist>[];
   for (final item in list) {
     try {
       final map = Map<String, dynamic>.from(item as Map);
-      final rawTracks = map['tracks'] as List<dynamic>? ?? [];
-      final tracks = <Track>[];
-      for (final t in rawTracks) {
-        try {
-          tracks.add(Track.fromMap(Map<String, dynamic>.from(t as Map)));
-        } catch (e) {
-          debugPrint('_parsePlaylistList skip bad track: $e');
-        }
-      }
+      final tracks = _tracksIn(map['tracks'] as List<dynamic>? ?? []);
       out.add(Playlist.fromMap(map, tracks: tracks));
     } catch (e) {
-      debugPrint('_parsePlaylistList skip bad playlist: $e');
+      debugPrint('Library: skipped a bad playlist: $e');
     }
   }
   return out;
 }
 
-/// JSON a store has already encoded (see [DatabaseService.writeStoreFile]):
-/// written as it is, so a large store can encode only what changed.
-@immutable
-class EncodedJson {
-  final String text;
-  const EncodedJson(this.text);
+Map<String, PlayStat> _parsePlays(String json) {
+  final map = StoreFiles.unwrap(jsonDecode(json));
+  if (map is! Map) return {};
+  return {
+    for (final e in map.entries)
+      if (PlayStat.fromMap(e.value) case final stat?) '${e.key}': stat,
+  };
 }
 
+/// The library: downloaded songs, play history and counts, and playlists
+/// (收藏 among them), each a whole-file store written through [StoreFiles].
+///
+/// A song can be held in several of these at once, each as its own copy of
+/// the [Track]; an edit or a measured loudness is applied to every copy.
+/// Screens do not read this directly; they listen to `LibraryController`.
 class DatabaseService {
-  static final List<Track> _recentlyPlayed = [];
+  DatabaseService._();
+
+  static const String _downloadedFile = 'bilibeat_downloaded.json';
+  static const String _historyFile = 'bilibeat_recently_played.json';
+  static const String _playlistsFile = 'bilibeat_playlists.json';
+  static const String _playsFile = 'bilibeat_plays.json';
+
   static final List<Track> _downloadedTracks = [];
-  static final List<String> _searchHistory = [];
+  static final List<Track> _recentlyPlayed = [];
 
   /// Track id -> how often and when it was last really listened to.
   static final Map<String, PlayStat> _plays = {};
+
+  static final List<Playlist> _playlists = [_emptyFavorites()];
+
+  static Playlist _emptyFavorites() =>
+      Playlist(id: Playlist.favoritesId, name: '收藏', tracks: []);
+
+  static int _playlistSeq = 0;
+
+  /// Plays remembered: long enough to order a library by (排序 → 最近播放).
+  static const int _historyLimit = 1000;
+
   static final StreamController<void> _libraryUpdateController =
       StreamController<void>.broadcast();
   static final StreamController<void> _historyUpdateController =
       StreamController<void>.broadcast();
-  static Future<void>? _loadFuture;
+
+  /// Ids whose local audio was just deleted. The player drops them from its
+  /// queue so it never tries to open a file that is gone.
+  static final StreamController<Set<String>> _downloadRemovedController =
+      StreamController<Set<String>>.broadcast();
 
   /// Emitted when the library changes: downloads, playlists or favourites.
   /// Screens subscribe to this instead of relying on whichever call site
@@ -86,30 +106,22 @@ class DatabaseService {
   static Stream<void> get historyUpdateStream =>
       _historyUpdateController.stream;
 
-  static final List<Playlist> _playlists = [
-    Playlist(id: Playlist.favoritesId, name: '收藏', tracks: [])
-  ];
+  static Stream<Set<String>> get downloadRemovedStream =>
+      _downloadRemovedController.stream;
 
-  static int _playlistSeq = 0;
-
-  /// Plays remembered: long enough to order a library by (排序 → 最近播放).
-  static const int _historyLimit = 1000;
-
-  /// Cached documents directory. The path is fixed for the lifetime of the
-  /// app, yet every persist used to re-fetch it across the platform channel.
-  static String? _docsPath;
-  static Future<String> _docs() async {
-    final cached = _docsPath;
-    if (cached != null) return cached;
-    final docs = await getApplicationDocumentsDirectory();
-    return _docsPath = docs.path;
+  static void _libraryChanged() {
+    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
   }
 
-  // Write serialization: whole-file rewrites must not interleave. Each
-  // persist is small but concurrent calls (e.g. addRecentlyPlayed + toggleFavorite)
-  // shared the same `$path.tmp` and truncated each other. A simple async mutex
-  // plus per-call unique tmp file fixes lost-update + Windows rename semantics.
-  static Future<void> _writeLock = Future.value();
+  static void _historyChanged() {
+    if (!_historyUpdateController.isClosed) _historyUpdateController.add(null);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Loading
+  // ---------------------------------------------------------------------------
+
+  static Future<void>? _loadFuture;
 
   static Future<void> _ensureLoaded() {
     final existing = _loadFuture;
@@ -125,113 +137,54 @@ class DatabaseService {
 
   static Future<void> _load() async {
     try {
-      final dir = await _docs();
-      final everSetAside = await _tidyDocuments(dir);
+      final docs = await StoreFiles.documents();
+      final everSetAside = await StoreFiles.tidy();
 
       // Each file is parsed into a local list first, then swapped into the
       // store: one corrupt file must not wipe the whole in-memory library
       // (a truncated write is easy with whole-file rewrites).
-      await _loadTracks('$dir/bilibeat_downloaded.json', _downloadedTracks);
-      await _discoverAudioFiles(dir);
-      await _loadTracks('$dir/bilibeat_recently_played.json', _recentlyPlayed);
-      await _loadPlaylists('$dir/bilibeat_playlists.json');
-      await _loadSearchHistory('$dir/bilibeat_search_history.json');
-      await _loadPlays('$dir/bilibeat_plays.json');
-      _rebaseCovers(dir);
+      final downloaded = await StoreFiles.load(_downloadedFile, _parseTrackList,
+          offThread: true);
+      if (downloaded != null) _replace(_downloadedTracks, downloaded);
+      await _discoverAudioFiles(docs);
+      final history =
+          await StoreFiles.load(_historyFile, _parseTrackList, offThread: true);
+      if (history != null) _replace(_recentlyPlayed, history);
+      final playlists = await StoreFiles.load(
+          _playlistsFile, _parsePlaylistList,
+          offThread: true);
+      if (playlists != null) {
+        if (!playlists.any((p) => p.id == Playlist.favoritesId)) {
+          playlists.insert(0, _emptyFavorites());
+        }
+        _replace(_playlists, playlists);
+      }
+      final plays = await StoreFiles.load(_playsFile, _parsePlays);
+      if (plays != null) {
+        _plays
+          ..clear()
+          ..addAll(plays);
+      }
+      _rebaseCovers(docs);
       // With a store set aside, what it referenced is unknown: keep it all.
-      if (!_setAsideAny && !everSetAside) unawaited(_sweepCovers(dir));
+      if (!StoreFiles.setAsideThisLaunch && !everSetAside) {
+        unawaited(_sweepCovers(docs));
+      }
     } catch (e) {
       debugPrint('DatabaseService _ensureLoaded error: $e');
     }
   }
 
-  static const String _coverFolder = '/bilibeat_covers/';
+  static void _replace<T>(List<T> store, List<T> loaded) => store
+    ..clear()
+    ..addAll(loaded);
 
-  /// A cover the listener picked is stored by its full path, and on iOS the
-  /// app's container moves when the app is reinstalled or re-signed. Paths
-  /// into the cover folder are re-pointed at where that folder is now.
-  @visibleForTesting
-  static String rebaseCover(String url, String docs) {
-    if (!url.startsWith('/') && !url.startsWith('file://')) return url;
-    final at = url.lastIndexOf(_coverFolder);
-    if (at < 0) return url;
-    return '$docs$_coverFolder${url.substring(at + _coverFolder.length)}';
-  }
-
-  static void _rebaseCovers(String docs) {
-    void rebase(List<Track> tracks) {
-      for (var i = 0; i < tracks.length; i++) {
-        final cover = rebaseCover(tracks[i].coverUrl, docs);
-        if (cover != tracks[i].coverUrl) {
-          tracks[i] = tracks[i].copyWith(coverUrl: cover);
-        }
-      }
-    }
-
-    rebase(_downloadedTracks);
-    rebase(_recentlyPlayed);
-    for (var i = 0; i < _playlists.length; i++) {
-      final playlist = _playlists[i];
-      rebase(playlist.tracks);
-      final cover = playlist.coverUrl;
-      if (cover != null && rebaseCover(cover, docs) != cover) {
-        _playlists[i] = Playlist(
-          id: playlist.id,
-          name: playlist.name,
-          coverUrl: rebaseCover(cover, docs),
-          tracks: playlist.tracks,
-        );
-      }
-    }
-  }
-
-  /// Deletes picked covers nothing shows any more (a cover that was
-  /// replaced, or picked and then not saved). Recent files are left alone.
-  static Future<void> _sweepCovers(String docs) async {
+  /// Squares the download list with the audio folder: songs whose files are
+  /// there but which the list lost are added back (from the metadata kept
+  /// beside each file), and entries whose files are gone are dropped.
+  static Future<void> _discoverAudioFiles(String docs) async {
     try {
-      final folder = Directory('$docs/bilibeat_covers');
-      if (!await folder.exists()) return;
-      String local(String url) =>
-          url.startsWith('file://') ? url.substring('file://'.length) : url;
-      final used = <String>{
-        for (final t in _downloadedTracks) local(t.coverUrl),
-        for (final t in _recentlyPlayed) local(t.coverUrl),
-        for (final p in _playlists) ...[
-          if (p.coverUrl != null) local(p.coverUrl!),
-          for (final t in p.tracks) local(t.coverUrl),
-        ],
-      };
-      final cutoff = DateTime.now().subtract(const Duration(days: 1));
-      await for (final entity in folder.list()) {
-        if (entity is! File || used.contains(entity.path)) continue;
-        if ((await entity.lastModified()).isAfter(cutoff)) continue;
-        await entity.delete();
-      }
-    } catch (e) {
-      debugPrint('DatabaseService cover sweep skipped: $e');
-    }
-  }
-
-  static Future<void> _loadTracks(String path, List<Track> store) async {
-    try {
-      final file = File(path);
-      if (!await file.exists()) return;
-      // Parse (jsonDecode + Track construction) in a background isolate so a
-      // large library does not stall the first frame after startup.
-      final tracks =
-          await _parseOffThread(_parseTrackList, await file.readAsString());
-      store
-        ..clear()
-        ..addAll(tracks);
-    } catch (e) {
-      debugPrint('DatabaseService load $path skipped: $e');
-      await _setAside(path);
-    }
-  }
-
-  static Future<void> _discoverAudioFiles(String dir) async {
-    try {
-      final audioDir = Directory('$dir/bilibeat_audio');
+      final audioDir = Directory('$docs/bilibeat_audio');
       // One listing answers every "is it there" below; a stat per file per
       // song made a large library slow to open.
       final names = <String>{};
@@ -242,14 +195,15 @@ class DatabaseService {
           final name = entity.uri.pathSegments.last;
           // Left by a write the process did not survive.
           if (name.endsWith('.tmp')) {
-            await _deleteQuietly(entity);
+            await StoreFiles.deleteQuietly(entity);
             continue;
           }
-          // A download given up on: kept a week in case it is resumed.
+          // A download given up on (or a file being imported): kept a week
+          // in case it is resumed.
           if (name.endsWith('.part') || name.endsWith('.part.json')) {
             try {
               if ((await entity.lastModified()).isBefore(stale)) {
-                await _deleteQuietly(entity);
+                await StoreFiles.deleteQuietly(entity);
               }
             } catch (_) {}
             continue;
@@ -295,29 +249,21 @@ class DatabaseService {
       // Prune entries whose files vanished externally (e.g. user cleared
       // cache) — including all of them when the folder itself is gone.
       final beforePrune = _downloadedTracks.length;
-      final toKeep = <Track>[];
-      for (final t in _downloadedTracks) {
-        // Keep if id empty (should not happen) to avoid data loss.
-        if (t.id.isEmpty ||
+      _downloadedTracks.removeWhere((t) {
+        // Kept if id empty (should not happen) to avoid data loss.
+        final there = t.id.isEmpty ||
             (names.contains('audio_${t.id}.ready') &&
-                names.contains('audio_${t.id}.m4a'))) {
-          toKeep.add(t);
-        } else {
+                names.contains('audio_${t.id}.m4a'));
+        if (!there) {
           debugPrint('Pruning stale downloaded entry ${t.id} (file missing)');
           AudioDownloadService.invalidateMemo(t.id);
         }
-      }
-      if (toKeep.length != beforePrune) {
-        _downloadedTracks
-          ..clear()
-          ..addAll(toKeep);
-        // Persist pruned list so stale entries don't resurrect.
-        // Fire-and-forget is fine at startup; discovery is inside _load.
-        unawaited(_persistDownloaded());
-      } else if (added > 0) {
-        // Newly discovered tracks were added from disk but not yet persisted
-        // in downloaded.json (e.g. download completed while persisted file was
-        // truncated). Persist so next load doesn't rely on discovery.
+        return !there;
+      });
+      // Pruned, or found on disk but missing from the list (a download that
+      // completed while the list's file was truncated): saved, so the next
+      // launch does not depend on discovery. Fire-and-forget is fine here.
+      if (_downloadedTracks.length != beforePrune || added > 0) {
         unawaited(_persistDownloaded());
       }
     } catch (e) {
@@ -325,252 +271,68 @@ class DatabaseService {
     }
   }
 
-  static Future<void> _deleteQuietly(File file) async {
-    try {
-      await file.delete();
-    } catch (_) {}
+  static const String _coverFolder = '/bilibeat_covers/';
+
+  /// A cover the listener picked is stored by its full path, and on iOS the
+  /// app's container moves when the app is reinstalled or re-signed. Paths
+  /// into the cover folder are re-pointed at where that folder is now.
+  @visibleForTesting
+  static String rebaseCover(String url, String docs) {
+    if (!url.startsWith('/') && !url.startsWith('file://')) return url;
+    final at = url.lastIndexOf(_coverFolder);
+    if (at < 0) return url;
+    return '$docs$_coverFolder${url.substring(at + _coverFolder.length)}';
   }
 
-  /// Clears temp files of writes the process did not survive, and says
-  /// whether a store was ever set aside ([_setAside]) and is still there.
-  static Future<bool> _tidyDocuments(String dir) async {
-    var unreadable = false;
-    try {
-      await for (final entity in Directory(dir).list()) {
-        if (entity is! File) continue;
-        final name = entity.uri.pathSegments.last;
-        if (!name.startsWith('bilibeat_')) continue;
-        if (name.endsWith('.unreadable')) unreadable = true;
-        if (name.endsWith('.tmp')) await _deleteQuietly(entity);
-      }
-    } catch (e) {
-      debugPrint('DatabaseService tidy skipped: $e');
-    }
-    return unreadable;
-  }
-
-  /// Parses off the UI isolate; when no isolate can be had (memory
-  /// pressure) parses here instead. Only a file that cannot be *read* is
-  /// ever set aside, not one that could not be handed to an isolate.
-  static Future<R> _parseOffThread<R>(
-      R Function(String) parse, String text) async {
-    try {
-      return await compute(parse, text);
-    } on FormatException {
-      rethrow;
-    } on TypeError {
-      rethrow;
-    } catch (e) {
-      debugPrint('DatabaseService isolate parse failed, parsing inline: $e');
-      return parse(text);
-    }
-  }
-
-  static Future<void> _loadPlaylists(String path) async {
-    try {
-      final file = File(path);
-      if (!await file.exists()) return;
-      final playlists =
-          await _parseOffThread(_parsePlaylistList, await file.readAsString());
-      if (!playlists.any((p) => p.id == Playlist.favoritesId)) {
-        playlists.insert(
-            0, Playlist(id: Playlist.favoritesId, name: '收藏', tracks: []));
-      }
-      _playlists
-        ..clear()
-        ..addAll(playlists);
-    } catch (e) {
-      debugPrint('DatabaseService load $path skipped: $e');
-      await _setAside(path);
-    }
-  }
-
-  static Future<void> _loadPlays(String path) async {
-    try {
-      final file = File(path);
-      if (!await file.exists()) return;
-      final map = _readPayload(jsonDecode(await file.readAsString()));
-      if (map is! Map) return;
-      _plays
-        ..clear()
-        ..addAll({
-          for (final e in map.entries)
-            if (PlayStat.fromMap(e.value) case final stat?) '${e.key}': stat,
-        });
-    } catch (e) {
-      debugPrint('DatabaseService load $path skipped: $e');
-      await _setAside(path);
-    }
-  }
-
-  static Future<void> _loadSearchHistory(String path) async {
-    try {
-      final file = File(path);
-      if (!await file.exists()) return;
-      final list = _readPayload(jsonDecode(await file.readAsString()))
-              as List<dynamic>? ??
-          [];
-      _searchHistory
-        ..clear()
-        ..addAll(list.map((e) => e.toString()));
-    } catch (e) {
-      debugPrint('DatabaseService load $path skipped: $e');
-      await _setAside(path);
-    }
-  }
-
-  /// Whole-file rewrites are truncated-then-written by default; a crash in the
-  /// middle corrupts the file. Writing to a temp file and renaming keeps the
-  /// previous snapshot intact instead.
-  ///
-  /// Every caller hands over a snapshot of the whole file, so a write still
-  /// waiting for the lock when a newer one for the same file is queued is
-  /// skipped: the newer one carries its changes too, and its outcome is
-  /// this one's. A burst (naming a library, dragging a playlist) then
-  /// rewrites each file once, not once per change.
-  static Future<void> _writeJsonAtomically(String path, Object data) {
-    final ticket = _writeTickets[path] = (_writeTickets[path] ?? 0) + 1;
-    return _newestWrites[path] = _writeQueued(path, data, ticket);
-  }
-
-  static final Map<String, int> _writeTickets = {};
-  static final Map<String, Future<void>> _newestWrites = {};
-
-  static Future<void> _writeQueued(String path, Object data, int ticket) async {
-    // Serialize all whole-file writes through a single async mutex so two
-    // concurrent persists never share the same tmp file.
-    final previous = _writeLock;
-    final completer = Completer<void>();
-    _writeLock = completer.future;
-    await previous;
-    if (_writeTickets[path] != ticket) {
-      completer.complete();
-      await _newestWrites[path];
-      return;
-    }
-    File? tmp;
-    try {
-      final payload =
-          utf8.encode(data is EncodedJson ? data.text : jsonEncode(data));
-      for (var attempt = 0; attempt < 2; attempt++) {
-        final unique = DateTime.now().microsecondsSinceEpoch;
-        tmp = File('$path.$unique.tmp');
-        await tmp.writeAsBytes(payload, flush: true);
-        final target = File(path);
-        // rename() replaces the target atomically everywhere but Windows,
-        // where it fails if the target exists. Only there is the old file
-        // removed first — elsewhere that would open a window in which a
-        // crash leaves no file at all.
-        if (Platform.isWindows && await target.exists()) {
-          try {
-            await target.delete();
-          } catch (e) {
-            debugPrint(
-                'DatabaseService _writeJsonAtomically delete failed: $e');
-          }
+  static void _rebaseCovers(String docs) {
+    void rebase(List<Track> tracks) {
+      for (var i = 0; i < tracks.length; i++) {
+        final cover = rebaseCover(tracks[i].coverUrl, docs);
+        if (cover != tracks[i].coverUrl) {
+          tracks[i] = tracks[i].copyWith(coverUrl: cover);
         }
-        await tmp.rename(path);
-        tmp = null;
-        // Verify what landed: a torn write must not silently become the
-        // library. One retry, then propagate the failure to the caller.
-        // A torn write is a short one, so the length is the check: reading
-        // the whole file back doubled the work of every save.
-        try {
-          if (await File(path).length() == payload.length) return;
-          debugPrint(
-              'DatabaseService _writeJsonAtomically verify mismatch: $path');
-        } catch (e) {
-          debugPrint('DatabaseService _writeJsonAtomically verify failed: $e');
-          if (attempt == 0) continue;
-          rethrow;
-        }
-        if (attempt == 0) continue;
-        throw StateError('persist verification failed: $path');
       }
-    } catch (e) {
-      debugPrint('DatabaseService _writeJsonAtomically error: $e');
-      rethrow;
-    } finally {
-      // Best-effort cleanup of stray tmp (e.g. rename threw).
-      if (tmp != null) {
-        try {
-          if (await tmp.exists()) await tmp.delete();
-        } catch (_) {}
+    }
+
+    rebase(_downloadedTracks);
+    rebase(_recentlyPlayed);
+    for (var i = 0; i < _playlists.length; i++) {
+      final playlist = _playlists[i];
+      rebase(playlist.tracks);
+      final cover = playlist.coverUrl;
+      if (cover != null && rebaseCover(cover, docs) != cover) {
+        _playlists[i] = playlist.withCover(rebaseCover(cover, docs));
       }
-      completer.complete();
     }
   }
 
-  /// Envelope version for every file this service writes. Bump when a payload
-  /// shape changes incompatibly and teach the matching loader to migrate the
-  /// old version. Files written before versioning existed hold bare payloads
-  /// (no envelope); every loader accepts both, so the first write after an
-  /// upgrade migrates each file in place.
-  static const int schemaVersion = 1;
-
-  static Object _envelope(Object payload) => payload is EncodedJson
-      ? EncodedJson('{"schema_version":$schemaVersion,"data":${payload.text}}')
-      : {'schema_version': schemaVersion, 'data': payload};
-
-  /// Unwraps a persisted payload, accepting both the versioned envelope and
-  /// the bare legacy shape. Throws for envelopes written by a NEWER schema
-  /// than this build understands: guessing at unknown future data and then
-  /// re-persisting the guess would destroy it. Every loader treats that like
-  /// a file it cannot parse — see [_setAside].
-  static dynamic _readPayload(dynamic decoded) {
-    if (decoded is Map && decoded.containsKey('schema_version')) {
-      final version = decoded['schema_version'];
-      if (version is int && version > schemaVersion) {
-        throw FormatException('schema_version $version is newer than '
-            '$schemaVersion; written by a newer build');
-      }
-      return decoded['data'];
-    }
-    return decoded;
-  }
-
-  /// Whether a file was set aside in this launch (see [_setAside]).
-  static bool _setAsideAny = false;
-
-  /// Moves a file this build cannot read (damaged, or written by a newer
-  /// build) out of the way, to `<name>.unreadable`. The store then starts
-  /// empty, and the next save writes a fresh file instead of overwriting
-  /// the only copy of whatever was in the old one.
-  static Future<void> _setAside(String path) async {
-    _setAsideAny = true;
+  /// Deletes picked covers nothing shows any more (a cover that was
+  /// replaced, or picked and then not saved). Recent files are left alone.
+  static Future<void> _sweepCovers(String docs) async {
     try {
-      final file = File(path);
-      if (!await file.exists()) return;
-      var target = '$path.unreadable';
-      if (await File(target).exists()) {
-        target = '$path.${DateTime.now().millisecondsSinceEpoch}.unreadable';
+      final folder = Directory('$docs/bilibeat_covers');
+      if (!await folder.exists()) return;
+      String local(String url) =>
+          url.startsWith('file://') ? url.substring('file://'.length) : url;
+      final used = <String>{
+        for (final t in _everyCopy()) local(t.coverUrl),
+        for (final p in _playlists)
+          if (p.coverUrl != null) local(p.coverUrl!),
+      };
+      final cutoff = DateTime.now().subtract(const Duration(days: 1));
+      await for (final entity in folder.list()) {
+        if (entity is! File || used.contains(entity.path)) continue;
+        if ((await entity.lastModified()).isAfter(cutoff)) continue;
+        await entity.delete();
       }
-      await file.rename(target);
-      debugPrint('DatabaseService: kept unreadable file as $target');
     } catch (e) {
-      debugPrint('DatabaseService: could not set aside $path: $e');
+      debugPrint('DatabaseService cover sweep skipped: $e');
     }
   }
 
-  static final StreamController<void> _saveFailureController =
-      StreamController<void>.broadcast();
-  static DateTime? _lastSaveFailure;
-
-  /// Fires when a library file could not be written (typically a full
-  /// disk): what is on screen is then not what the next launch will load,
-  /// and the listener has to be told. At most once every ten seconds.
-  static Stream<void> get saveFailures => _saveFailureController.stream;
-
-  static void _reportSaveFailure() {
-    final now = DateTime.now();
-    final last = _lastSaveFailure;
-    if (last != null &&
-        now.difference(last).abs() < const Duration(seconds: 10)) {
-      return;
-    }
-    _lastSaveFailure = now;
-    if (!_saveFailureController.isClosed) _saveFailureController.add(null);
-  }
+  // ---------------------------------------------------------------------------
+  // Saving
+  // ---------------------------------------------------------------------------
 
   /// Each song as JSON, kept while that copy is unchanged ([Track] is
   /// immutable; an edit is a new copy). History alone is a thousand songs,
@@ -588,376 +350,125 @@ class DatabaseService {
     return '$body${body == '{' ? '' : ','}"tracks":$tracksJson}';
   }
 
-  static Future<void> _persistDownloaded() async {
-    try {
-      final dir = await _docs();
-      await _writeJsonAtomically('$dir/bilibeat_downloaded.json',
-          _envelope(EncodedJson(_tracksJson(_downloadedTracks))));
-    } catch (e) {
-      debugPrint('DatabaseService _persistDownloaded error: $e');
-      _reportSaveFailure();
-    }
-  }
+  static Future<void> _persistDownloaded() => StoreFiles.save(
+      _downloadedFile, EncodedJson(_tracksJson(_downloadedTracks)));
 
-  static Future<void> _persistRecentlyPlayed() async {
-    try {
-      final dir = await _docs();
-      await _writeJsonAtomically('$dir/bilibeat_recently_played.json',
-          _envelope(EncodedJson(_tracksJson(_recentlyPlayed))));
-    } catch (e) {
-      debugPrint('DatabaseService _persistRecentlyPlayed error: $e');
-      _reportSaveFailure();
-    }
-  }
+  static Future<void> _persistRecentlyPlayed() =>
+      StoreFiles.save(_historyFile, EncodedJson(_tracksJson(_recentlyPlayed)));
 
+  /// Saves the playlists and tells the library they changed.
   static Future<void> _persistPlaylists() async {
-    try {
-      final dir = await _docs();
-      final list = [
-        for (final p in _playlists)
-          _withTracks(jsonEncode(p.toMap()), _tracksJson(p.tracks)),
-      ];
-      await _writeJsonAtomically('$dir/bilibeat_playlists.json',
-          _envelope(EncodedJson('[${list.join(',')}]')));
-    } catch (e) {
-      debugPrint('DatabaseService _persistPlaylists error: $e');
-      _reportSaveFailure();
+    final list = [
+      for (final p in _playlists)
+        _withTracks(jsonEncode(p.toMap()), _tracksJson(p.tracks)),
+    ];
+    await StoreFiles.save(_playlistsFile, EncodedJson('[${list.join(',')}]'));
+    _libraryChanged();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Every copy of a song
+  // ---------------------------------------------------------------------------
+
+  static Iterable<Track> _everyCopy() sync* {
+    yield* _downloadedTracks;
+    for (final p in _playlists) {
+      yield* p.tracks;
     }
-    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
+    yield* _recentlyPlayed;
   }
 
-  static Future<void> _persistSearchHistory() async {
-    try {
-      final dir = await _docs();
-      await _writeJsonAtomically(
-          '$dir/bilibeat_search_history.json', _envelope(_searchHistory));
-    } catch (e) {
-      debugPrint('DatabaseService _persistSearchHistory error: $e');
-      _reportSaveFailure();
+  /// The copy of [track] the library already holds: the download, else one
+  /// kept in a playlist or in history.
+  static Track? _knownCopy(Track track) {
+    for (final t in _everyCopy()) {
+      if (t.id == track.id) return t;
     }
+    return null;
   }
 
-  static Future<List<String>> getSearchHistory() async {
-    await _ensureLoaded();
-    return List<String>.from(_searchHistory);
+  /// Replaces each copy of song [id] with what [change] makes of it (null:
+  /// left as it is); says which stores changed.
+  static ({bool downloaded, bool playlists, bool history}) _changeCopies(
+      String id, Track? Function(Track) change) {
+    bool patch(List<Track> list) {
+      final index = list.indexWhere((t) => t.id == id);
+      if (index == -1) return false;
+      final changed = change(list[index]);
+      if (changed == null) return false;
+      list[index] = changed;
+      return true;
+    }
+
+    var playlists = false;
+    for (final playlist in _playlists) {
+      if (patch(playlist.tracks)) playlists = true;
+    }
+    return (
+      downloaded: patch(_downloadedTracks),
+      playlists: playlists,
+      history: patch(_recentlyPlayed),
+    );
   }
 
-  static Future<List<String>> addSearchHistory(String query) async {
-    await _ensureLoaded();
-    final q = query.trim();
-    if (q.isEmpty) return List<String>.from(_searchHistory);
-    _searchHistory.remove(q);
-    _searchHistory.insert(0, q);
-    if (_searchHistory.length > 12) _searchHistory.removeLast();
-    await _persistSearchHistory();
-    return List<String>.from(_searchHistory);
-  }
-
-  static Future<void> clearSearchHistory() async {
-    await _ensureLoaded();
-    _searchHistory.clear();
-    await _persistSearchHistory();
-  }
-
+  /// The listener's edit (编辑信息), on every copy and on the metadata kept
+  /// beside the audio.
   static Future<void> updateTrackMetadata(Track updated) async {
     await _ensureLoaded();
-    final dlIdx = _downloadedTracks.indexWhere((t) => t.id == updated.id);
-    if (dlIdx != -1) {
-      _downloadedTracks[dlIdx] = updated;
-      await _persistDownloaded();
-    }
-
+    final changed = _changeCopies(updated.id, (_) => updated);
+    if (changed.downloaded) await _persistDownloaded();
     // Deliberate edit: this one does overwrite the on-disk copy.
     await AudioDownloadService.saveTrackMetadata(updated, force: true);
-
-    var inPlaylists = false;
-    for (final pl in _playlists) {
-      final idx = pl.tracks.indexWhere((t) => t.id == updated.id);
-      if (idx != -1) {
-        pl.tracks[idx] = updated;
-        inPlaylists = true;
-      }
-    }
     // The playlists file holds a copy of every song in every playlist:
     // not rewritten for a song that is in none.
-    if (inPlaylists) {
+    if (changed.playlists) {
       await _persistPlaylists();
-    } else if (!_libraryUpdateController.isClosed) {
-      _libraryUpdateController.add(null);
+    } else {
+      _libraryChanged();
     }
-
-    final recIdx = _recentlyPlayed.indexWhere((t) => t.id == updated.id);
-    if (recIdx != -1) {
-      _recentlyPlayed[recIdx] = updated;
-      await _persistRecentlyPlayed();
-    }
-
-    if (!_historyUpdateController.isClosed) _historyUpdateController.add(null);
+    if (changed.history) await _persistRecentlyPlayed();
+    _historyChanged();
   }
 
   /// Records a track's measured loudness on every stored copy, leaving the
   /// rest of its (possibly edited) metadata alone.
   static Future<void> setTrackLoudness(String trackId, double loudness) async {
     await _ensureLoaded();
-    Track? stored;
-    bool patch(List<Track> list) {
-      final index = list.indexWhere((t) => t.id == trackId);
-      if (index == -1 || list[index].loudness == loudness) return false;
-      stored = list[index] = list[index].copyWith(loudness: loudness);
-      return true;
-    }
-
-    if (patch(_downloadedTracks)) {
+    final changed = _changeCopies(trackId, (t) {
+      if (t.loudness == loudness) return null;
+      return t.copyWith(loudness: loudness);
+    });
+    if (changed.downloaded) {
       await _persistDownloaded();
-      await AudioDownloadService.saveTrackMetadata(stored!, force: true);
+      final download = await downloadedTrack(trackId);
+      if (download != null) {
+        await AudioDownloadService.saveTrackMetadata(download, force: true);
+      }
     }
-    var playlistsChanged = false;
-    for (final playlist in _playlists) {
-      if (patch(playlist.tracks)) playlistsChanged = true;
-    }
-    if (playlistsChanged) await _persistPlaylists();
-    if (patch(_recentlyPlayed)) await _persistRecentlyPlayed();
+    if (changed.playlists) await _persistPlaylists();
+    if (changed.history) await _persistRecentlyPlayed();
     // Other holders of the track (lists, sheets) pick up the new copy.
-    if (stored != null && !_libraryUpdateController.isClosed) {
-      _libraryUpdateController.add(null);
+    if (changed.downloaded || changed.playlists || changed.history) {
+      _libraryChanged();
     }
   }
 
-  static Future<List<Playlist>> getPlaylists() async {
+  // ---------------------------------------------------------------------------
+  // Downloads
+  // ---------------------------------------------------------------------------
+
+  static Future<List<Track>> getDownloadedTracks() async {
     await _ensureLoaded();
-    return List<Playlist>.from(_playlists);
+    return List<Track>.from(_downloadedTracks);
   }
 
-  static Future<Playlist> getFavoritesPlaylist() async {
+  /// The library's copy of the download [id], without copying the library.
+  static Future<Track?> downloadedTrack(String id) async {
     await _ensureLoaded();
-    return _playlists.firstWhere(
-      (p) => p.id == Playlist.favoritesId,
-      orElse: () => Playlist(id: Playlist.favoritesId, name: '收藏', tracks: []),
-    );
-  }
-
-  static Future<Playlist> createPlaylist(String name) async {
-    await _ensureLoaded();
-    // Use ms + seq + random to avoid collision within same ms across restarts
-    // (_playlistSeq resets to 0 on restart). Random 20 bits + seq gives <1e-9
-    // collision even at 1000 playlists/sec.
-    final rnd = DateTime.now().microsecondsSinceEpoch % (1 << 20);
-    final newPlaylist = Playlist(
-      id: 'pl_${DateTime.now().millisecondsSinceEpoch}_${_playlistSeq++}_$rnd',
-      name: name.trim().isEmpty ? '新建歌单' : name.trim(),
-      tracks: [],
-    );
-    _playlists.add(newPlaylist);
-    await _persistPlaylists();
-    return newPlaylist;
-  }
-
-  /// Renames a playlist.
-  static Future<void> renamePlaylist(String playlistId, String newName) async {
-    await _ensureLoaded();
-    final idx = _playlists.indexWhere((p) => p.id == playlistId);
-    if (idx == -1) return;
-    final old = _playlists[idx];
-    _playlists[idx] = Playlist(
-      id: old.id,
-      name: newName.trim().isEmpty ? old.name : newName.trim(),
-      coverUrl: old.coverUrl,
-      tracks: old.tracks,
-    );
-    await _persistPlaylists();
-  }
-
-  /// Sets (or clears, with null) a playlist's cover image.
-  static Future<void> setPlaylistCover(String playlistId, String? path) async {
-    await _ensureLoaded();
-    final idx = _playlists.indexWhere((p) => p.id == playlistId);
-    if (idx == -1) return;
-    final old = _playlists[idx];
-    _playlists[idx] = Playlist(
-      id: old.id,
-      name: old.name,
-      coverUrl: path,
-      tracks: old.tracks,
-    );
-    await _persistPlaylists();
-  }
-
-  /// Moves a track within a playlist. Both indices are final positions —
-  /// `onReorderItem` already accounts for the removal, unlike the deprecated
-  /// `onReorder`, whose newIndex needed adjusting by hand.
-  static Future<void> reorderPlaylist(
-      String playlistId, int oldIndex, int newIndex) async {
-    await _ensureLoaded();
-    final pl = _playlists.firstWhere((p) => p.id == playlistId,
-        orElse: () => Playlist(id: '', name: '', tracks: []));
-    if (pl.id.isEmpty) return;
-    _moveWithin(pl.tracks, oldIndex, newIndex);
-    await _persistPlaylists();
-  }
-
-  static void _moveWithin(List<Track> list, int oldIndex, int newIndex) {
-    if (oldIndex < 0 || oldIndex >= list.length) return;
-    final track = list.removeAt(oldIndex);
-    list.insert(newIndex.clamp(0, list.length), track);
-  }
-
-  static Future<void> deletePlaylist(String playlistId) async {
-    await _ensureLoaded();
-    if (playlistId == Playlist.favoritesId) return;
-    _playlists.removeWhere((p) => p.id == playlistId);
-    await _persistPlaylists();
-  }
-
-  static Future<void> addTrackToPlaylist(String playlistId, Track track) async {
-    await _ensureLoaded();
-    final idx = _playlists.indexWhere((p) => p.id == playlistId);
-    if (idx == -1) return;
-    final playlist = _playlists[idx];
-    if (!playlist.tracks.any((t) => t.id == track.id)) {
-      playlist.tracks.insert(0, track);
-      await _persistPlaylists();
-    }
-  }
-
-  static Future<void> removeTrackFromPlaylist(
-      String playlistId, String trackId) async {
-    await _ensureLoaded();
-    final idx = _playlists.indexWhere((p) => p.id == playlistId);
-    if (idx == -1) return;
-    final playlist = _playlists[idx];
-    playlist.tracks.removeWhere((t) => t.id == trackId);
-    await _persistPlaylists();
-  }
-
-  /// Puts [track] back into a playlist at [index] (an undone removal).
-  static Future<void> insertTrackInPlaylist(
-      String playlistId, Track track, int index) async {
-    await _ensureLoaded();
-    final idx = _playlists.indexWhere((p) => p.id == playlistId);
-    if (idx == -1) return;
-    final tracks = _playlists[idx].tracks;
-    if (tracks.any((t) => t.id == track.id)) return;
-    tracks.insert(index.clamp(0, tracks.length), track);
-    await _persistPlaylists();
-  }
-
-  /// Batch variant of [addTrackToPlaylist]: one persist for the whole batch
-  /// instead of a full-file rewrite per track. The batch goes to the front
-  /// in the order given.
-  static Future<void> addTracksToPlaylist(
-      String playlistId, List<Track> tracks) async {
-    await _ensureLoaded();
-    final idx = _playlists.indexWhere((p) => p.id == playlistId);
-    if (idx == -1 || tracks.isEmpty) return;
-    final playlist = _playlists[idx];
-    final existingIds = playlist.tracks.map((t) => t.id).toSet();
-    final toAdd = <Track>[];
-    for (final track in tracks) {
-      if (!existingIds.contains(track.id)) {
-        existingIds.add(track.id);
-        toAdd.add(track);
-      }
-    }
-    if (toAdd.isEmpty) return;
-    playlist.tracks.insertAll(0, toAdd);
-    await _persistPlaylists();
-  }
-
-  /// Batch variant of [removeTrackFromPlaylist] — one persist per operation.
-  static Future<void> removeTracksFromPlaylist(
-      String playlistId, List<String> trackIds) async {
-    await _ensureLoaded();
-    final idx = _playlists.indexWhere((p) => p.id == playlistId);
-    if (idx == -1 || trackIds.isEmpty) return;
-    final idSet = trackIds.toSet();
-    final playlist = _playlists[idx];
-    final before = playlist.tracks.length;
-    playlist.tracks.removeWhere((t) => idSet.contains(t.id));
-    if (playlist.tracks.length != before) await _persistPlaylists();
-  }
-
-  static Future<bool> isFavorite(String trackId) async {
-    await _ensureLoaded();
-    final favorites = await getFavoritesPlaylist();
-    return favorites.tracks.any((t) => t.id == trackId);
-  }
-
-  /// The copy of [track] the library already holds: the download, else one
-  /// kept in a playlist or in history.
-  static Track? _knownCopy(Track track) {
     for (final t in _downloadedTracks) {
-      if (t.id == track.id) return t;
-    }
-    for (final playlist in _playlists) {
-      for (final t in playlist.tracks) {
-        if (t.id == track.id) return t;
-      }
-    }
-    for (final t in _recentlyPlayed) {
-      if (t.id == track.id) return t;
+      if (t.id == id) return t;
     }
     return null;
-  }
-
-  static Future<bool> toggleFavorite(Track track) async {
-    await _ensureLoaded();
-    final favorites = await getFavoritesPlaylist();
-    final exists = favorites.tracks.any((t) => t.id == track.id);
-
-    if (exists) {
-      favorites.tracks.removeWhere((t) => t.id == track.id);
-      await _persistPlaylists();
-      return false;
-    } else {
-      // The caller may hold a search result's copy of a song the library
-      // has since named.
-      favorites.tracks.insert(0, _knownCopy(track) ?? track);
-      await _persistPlaylists();
-      return true;
-    }
-  }
-
-  /// Records a play. De-duplication is by track **id** (`bvid_cid`) only:
-  /// keying by `bvid` used to collapse the separate parts (P1/P2/…) of one
-  /// video into a single entry, silently dropping tracks from the list.
-  static Future<void> addRecentlyPlayed(Track track) async {
-    await _ensureLoaded();
-    final alreadyFirst =
-        _recentlyPlayed.isNotEmpty && _recentlyPlayed.first.id == track.id;
-    _recentlyPlayed.removeWhere((t) => t.id == track.id);
-    _recentlyPlayed.insert(0, track);
-    if (_recentlyPlayed.length > _historyLimit) _recentlyPlayed.removeLast();
-    await _persistRecentlyPlayed();
-    if (!alreadyFirst) _historyUpdateController.add(null);
-  }
-
-  /// Counts one listen of [track] — the player calls this once a play has
-  /// lasted long enough to mean it ([PlayStat.counts]).
-  static Future<void> recordPlay(Track track, {DateTime? at}) async {
-    await _ensureLoaded();
-    final before = _plays[track.id];
-    _plays[track.id] = PlayStat(
-      count: (before?.count ?? 0) + 1,
-      last: at ?? DateTime.now(),
-    );
-    try {
-      await _writeJsonAtomically('${await _docs()}/bilibeat_plays.json',
-          _envelope({for (final e in _plays.entries) e.key: e.value.toMap()}));
-    } catch (e) {
-      debugPrint('DatabaseService recordPlay error: $e');
-      _reportSaveFailure();
-    }
-    if (!_historyUpdateController.isClosed) _historyUpdateController.add(null);
-  }
-
-  static Future<Map<String, PlayStat>> getPlayStats() async {
-    await _ensureLoaded();
-    return Map.unmodifiable(_plays);
-  }
-
-  static Future<List<Track>> getRecentlyPlayed() async {
-    await _ensureLoaded();
-    return List<Track>.from(_recentlyPlayed);
   }
 
   /// Registers [track] as available offline.
@@ -980,7 +491,7 @@ class DatabaseService {
           : kept.copyWith(loudness: track.loudness ?? kept.loudness),
     );
     await _persistDownloaded();
-    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
+    _libraryChanged();
   }
 
   /// Deletes the local audio for [track] but preserves the user's
@@ -993,132 +504,191 @@ class DatabaseService {
     _downloadedTracks.removeWhere((t) => t.id == track.id);
     _downloadRemovedController.add({track.id});
     await _persistDownloaded();
-    if (!_libraryUpdateController.isClosed) _libraryUpdateController.add(null);
+    _libraryChanged();
   }
 
-  static Future<List<Track>> getDownloadedTracks() async {
+  // ---------------------------------------------------------------------------
+  // History and play counts
+  // ---------------------------------------------------------------------------
+
+  static Future<List<Track>> getRecentlyPlayed() async {
     await _ensureLoaded();
-    return List<Track>.from(_downloadedTracks);
+    return List<Track>.from(_recentlyPlayed);
   }
 
-  /// The library's copy of the download [id], without copying the library.
-  static Future<Track?> downloadedTrack(String id) async {
+  /// Records a play. De-duplication is by track **id** (`bvid_p<page>`)
+  /// only: keying by `bvid` used to collapse the separate parts (P1/P2/…)
+  /// of one video into a single entry, silently dropping tracks from the
+  /// list.
+  static Future<void> addRecentlyPlayed(Track track) async {
     await _ensureLoaded();
-    for (final t in _downloadedTracks) {
-      if (t.id == id) return t;
+    final alreadyFirst =
+        _recentlyPlayed.isNotEmpty && _recentlyPlayed.first.id == track.id;
+    _recentlyPlayed.removeWhere((t) => t.id == track.id);
+    _recentlyPlayed.insert(0, track);
+    if (_recentlyPlayed.length > _historyLimit) _recentlyPlayed.removeLast();
+    await _persistRecentlyPlayed();
+    if (!alreadyFirst) _historyChanged();
+  }
+
+  /// Counts one listen of [track] — the player calls this once a play has
+  /// lasted long enough to mean it ([PlayStat.counts]).
+  static Future<void> recordPlay(Track track, {DateTime? at}) async {
+    await _ensureLoaded();
+    final before = _plays[track.id];
+    _plays[track.id] = PlayStat(
+      count: (before?.count ?? 0) + 1,
+      last: at ?? DateTime.now(),
+    );
+    await StoreFiles.save(
+        _playsFile, {for (final e in _plays.entries) e.key: e.value.toMap()});
+    _historyChanged();
+  }
+
+  static Future<Map<String, PlayStat>> getPlayStats() async {
+    await _ensureLoaded();
+    return Map.unmodifiable(_plays);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Playlists
+  // ---------------------------------------------------------------------------
+
+  static Future<List<Playlist>> getPlaylists() async {
+    await _ensureLoaded();
+    return List<Playlist>.from(_playlists);
+  }
+
+  static Future<Playlist> getFavoritesPlaylist() async {
+    await _ensureLoaded();
+    return _playlist(Playlist.favoritesId) ?? _emptyFavorites();
+  }
+
+  static Playlist? _playlist(String id) {
+    for (final p in _playlists) {
+      if (p.id == id) return p;
     }
     return null;
   }
 
-  /// Ids whose local audio was just deleted. The player drops them from its
-  /// queue so it never tries to open a file that is gone.
-  static final StreamController<Set<String>> _downloadRemovedController =
-      StreamController<Set<String>>.broadcast();
+  /// Replaces the playlist [id] with what [change] makes of it.
+  static Future<void> _rebuildPlaylist(
+      String id, Playlist Function(Playlist) change) async {
+    await _ensureLoaded();
+    final index = _playlists.indexWhere((p) => p.id == id);
+    if (index == -1) return;
+    _playlists[index] = change(_playlists[index]);
+    await _persistPlaylists();
+  }
 
-  static Stream<Set<String>> get downloadRemovedStream =>
-      _downloadRemovedController.stream;
+  /// Changes the songs of playlist [id] in place; saved when [change] says
+  /// it changed them.
+  static Future<void> _editTracks(
+      String id, bool Function(List<Track> tracks) change) async {
+    await _ensureLoaded();
+    final playlist = _playlist(id);
+    if (playlist != null && change(playlist.tracks)) await _persistPlaylists();
+  }
 
-  // ---------------------------------------------------------------------------
-  // Small UI preferences (dismissed hints, sort order)
-  // ---------------------------------------------------------------------------
+  static Future<Playlist> createPlaylist(String name) async {
+    await _ensureLoaded();
+    // Use ms + seq + random to avoid collision within same ms across restarts
+    // (_playlistSeq resets to 0 on restart). Random 20 bits + seq gives <1e-9
+    // collision even at 1000 playlists/sec.
+    final rnd = DateTime.now().microsecondsSinceEpoch % (1 << 20);
+    final newPlaylist = Playlist(
+      id: 'pl_${DateTime.now().millisecondsSinceEpoch}_${_playlistSeq++}_$rnd',
+      name: name.trim().isEmpty ? '新建歌单' : name.trim(),
+      tracks: [],
+    );
+    _playlists.add(newPlaylist);
+    await _persistPlaylists();
+    return newPlaylist;
+  }
 
-  static Map<String, dynamic>? _prefs;
+  static Future<void> renamePlaylist(String playlistId, String newName) =>
+      _rebuildPlaylist(playlistId,
+          (p) => newName.trim().isEmpty ? p : p.withName(newName.trim()));
 
-  static Future<Map<String, dynamic>> _loadPrefs() async {
-    final cached = _prefs;
-    if (cached != null) return cached;
-    var loaded = <String, dynamic>{};
-    String? path;
-    try {
-      path = '${await _docs()}/bilibeat_prefs.json';
-      final file = File(path);
-      if (await file.exists()) {
-        final payload = _readPayload(jsonDecode(await file.readAsString()));
-        if (payload is Map) loaded = Map<String, dynamic>.from(payload);
-      }
-    } catch (e) {
-      debugPrint('DatabaseService load prefs skipped: $e');
-      // Another caller may have loaded (and since saved) them meanwhile.
-      if (path != null && _prefs == null) await _setAside(path);
+  /// Sets (or clears, with null) a playlist's cover image.
+  static Future<void> setPlaylistCover(String playlistId, String? path) =>
+      _rebuildPlaylist(playlistId, (p) => p.withCover(path));
+
+  static Future<void> deletePlaylist(String playlistId) async {
+    await _ensureLoaded();
+    if (playlistId == Playlist.favoritesId) return;
+    _playlists.removeWhere((p) => p.id == playlistId);
+    await _persistPlaylists();
+  }
+
+  /// Moves a track within a playlist. Both indices are final positions —
+  /// `onReorderItem` already accounts for the removal, unlike the deprecated
+  /// `onReorder`, whose newIndex needed adjusting by hand.
+  static Future<void> reorderPlaylist(
+          String playlistId, int oldIndex, int newIndex) =>
+      _editTracks(playlistId, (tracks) {
+        if (oldIndex < 0 || oldIndex >= tracks.length) return false;
+        final track = tracks.removeAt(oldIndex);
+        tracks.insert(newIndex.clamp(0, tracks.length), track);
+        return true;
+      });
+
+  static Future<void> addTrackToPlaylist(String playlistId, Track track) =>
+      addTracksToPlaylist(playlistId, [track]);
+
+  /// Adds the [tracks] the playlist does not have yet to its front, in the
+  /// order given; one save for the whole batch.
+  static Future<void> addTracksToPlaylist(
+          String playlistId, List<Track> tracks) =>
+      _editTracks(playlistId, (list) {
+        final have = {for (final t in list) t.id};
+        final toAdd = [
+          for (final t in tracks)
+            if (have.add(t.id)) t,
+        ];
+        list.insertAll(0, toAdd);
+        return toAdd.isNotEmpty;
+      });
+
+  /// Puts [track] back into a playlist at [index] (an undone removal).
+  static Future<void> insertTrackInPlaylist(
+          String playlistId, Track track, int index) =>
+      _editTracks(playlistId, (list) {
+        if (list.any((t) => t.id == track.id)) return false;
+        list.insert(index.clamp(0, list.length), track);
+        return true;
+      });
+
+  static Future<void> removeTrackFromPlaylist(
+          String playlistId, String trackId) =>
+      removeTracksFromPlaylist(playlistId, [trackId]);
+
+  static Future<void> removeTracksFromPlaylist(
+          String playlistId, List<String> trackIds) =>
+      _editTracks(playlistId, (list) {
+        final ids = trackIds.toSet();
+        final before = list.length;
+        list.removeWhere((t) => ids.contains(t.id));
+        return list.length != before;
+      });
+
+  static Future<bool> isFavorite(String trackId) async {
+    final favorites = await getFavoritesPlaylist();
+    return favorites.tracks.any((t) => t.id == trackId);
+  }
+
+  static Future<bool> toggleFavorite(Track track) async {
+    final favorites = await getFavoritesPlaylist();
+    final tracks = favorites.tracks;
+    if (tracks.any((t) => t.id == track.id)) {
+      tracks.removeWhere((t) => t.id == track.id);
+      await _persistPlaylists();
+      return false;
     }
-    return _prefs ??= loaded;
+    // The caller may hold a search result's copy of a song the library has
+    // since named.
+    tracks.insert(0, _knownCopy(track) ?? track);
+    await _persistPlaylists();
+    return true;
   }
-
-  static Future<Object?> getPref(String key) async => (await _loadPrefs())[key];
-
-  static Future<void> setPref(String key, Object? value) async {
-    final prefs = await _loadPrefs();
-    if (value == null) {
-      prefs.remove(key);
-    } else {
-      prefs[key] = value;
-    }
-    try {
-      await _writeJsonAtomically(
-        '${await _docs()}/bilibeat_prefs.json',
-        _envelope(prefs),
-      );
-    } catch (e) {
-      debugPrint('DatabaseService setPref error: $e');
-      _reportSaveFailure();
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Playback session (survives process death)
-  // ---------------------------------------------------------------------------
-
-  static Future<PlaybackSession?> loadPlaybackSession() async {
-    try {
-      final dir = await _docs();
-      final file = File('$dir/bilibeat_session.json');
-      if (!await file.exists()) return null;
-      return PlaybackSession.fromMap(
-        _readPayload(jsonDecode(await file.readAsString())),
-      );
-    } catch (e) {
-      debugPrint('DatabaseService loadPlaybackSession skipped: $e');
-      return null;
-    }
-  }
-
-  static Future<void> savePlaybackSession(PlaybackSession session) async {
-    try {
-      final dir = await _docs();
-      await _writeJsonAtomically(
-        '$dir/bilibeat_session.json',
-        _envelope(session.toMap()),
-      );
-    } catch (e) {
-      debugPrint('DatabaseService savePlaybackSession error: $e');
-      _reportSaveFailure();
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Shared file access for sibling stores (lyrics)
-  // ---------------------------------------------------------------------------
-
-  /// Reads `<documents>/[name]` as text, or null when it does not exist.
-  static Future<String?> readStoreFile(String name) async {
-    final file = File('${await _docs()}/$name');
-    if (!await file.exists()) return null;
-    return file.readAsString();
-  }
-
-  /// Atomically writes [payload] (wrapped in the versioned envelope) to
-  /// `<documents>/[name]`, through the same write lock as every other file.
-  /// [payload] may be [EncodedJson] already. Failures propagate to the
-  /// caller.
-  static Future<void> writeStoreFile(String name, Object payload) async {
-    final dir = await _docs();
-    await _writeJsonAtomically('$dir/$name', _envelope(payload));
-  }
-
-  /// Unwraps a decoded store file (see [_readPayload]).
-  static dynamic unwrapStorePayload(dynamic decoded) => _readPayload(decoded);
-
-  /// Sets `<documents>/[name]` aside as unreadable (see [_setAside]).
-  static Future<void> setAsideStoreFile(String name) async =>
-      _setAside('${await _docs()}/$name');
 }

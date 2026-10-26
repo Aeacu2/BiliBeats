@@ -6,7 +6,6 @@ import '../screens/home_page.dart';
 import '../screens/search_view.dart';
 import '../screens/settings_sheet.dart';
 import '../services/background_protection.dart';
-import '../services/database_service.dart';
 import '../services/download_manager.dart';
 import '../services/local_songs.dart';
 import '../theme/app_theme.dart';
@@ -15,6 +14,7 @@ import '../utils/snack.dart';
 import '../widgets/docked_player.dart';
 import '../widgets/download_management_sheet.dart';
 import 'app_services.dart';
+import '../services/store_files.dart';
 
 /// The app's frame.
 ///
@@ -59,7 +59,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _downloadErrorsSub = DownloadManager.instance.errors.listen(
       (failure) => _showMessage('「${failure.track.title}」下载失败'),
     );
-    _saveFailuresSub = DatabaseService.saveFailures.listen(
+    _saveFailuresSub = StoreFiles.saveFailures.listen(
       (_) => _showMessage('保存失败，请检查存储空间'),
     );
     _localSongsSub = LocalSongs.messages.listen(_showMessage);

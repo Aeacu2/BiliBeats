@@ -37,7 +37,8 @@ lib/
   widgets/                  song_tile (the one song row), mini_player, sheets, lyrics_view…
   state/                    LibraryController, LyricsController, search/recommendation controllers
   services/                 audio_player_handler (playback), audio_download_service,
-                            download_manager, database_service (JSON files), bilibili_sdk,
+                            download_manager, store_files (JSON files), database_service
+                            (the library), prefs, search_history, local_songs, bilibili_sdk,
                             lyrics_engine (title parsing, song matching, lyric providers),
                             song_reader (the on-device model), song_judge (rules + model),
                             lyric_library (Kugou and QQ Music: search, lyrics),
@@ -59,9 +60,13 @@ docs/archive/               old review notes and a superseded feature list — h
   "the current song" separately. Only downloaded tracks enter the queue; a track that
   needs downloading is fetched first while the current one keeps playing
   (`handler.preparing`).
-- **Persistence is whole-file JSON** in the documents directory, written through
-  `DatabaseService._writeJsonAtomically` (single write lock, temp file + rename).
-  Screens do not read `DatabaseService` directly; they listen to `LibraryController`.
+- **Persistence is whole-file JSON** in the documents directory, one file per store,
+  read and written only through `StoreFiles` (versioned envelope; one write queue,
+  temp file + rename; an unreadable file is set aside, never overwritten).
+  `DatabaseService` is the library (downloads, history, play counts, playlists);
+  `Prefs`, `SearchHistory`, `LyricsStore`, `TrimStore`, `BiliAccountStore` are their
+  own stores. Screens do not read `DatabaseService` directly; they listen to
+  `LibraryController`.
 - **`Track` identity is `bvid_p<page>`**; equality is by id, so use `TrackNotifier`
   (not `ValueNotifier<Track>`) where an edited copy must notify.
 - **Song vs. video.** `rawTitle` is the video title and never changes. `title`/`uploader`

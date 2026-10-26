@@ -6,6 +6,8 @@ import 'package:bilibeats/services/database_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
+import 'package:bilibeats/services/store_files.dart';
+import 'package:bilibeats/services/search_history.dart';
 
 /// What a launch makes of the files the last one left: the stores are read
 /// back, the download list is squared with the audio on disk, and covers
@@ -67,12 +69,12 @@ void main() {
 
     await File('${docs.path}/bilibeat_downloaded.json')
         .writeAsString(jsonEncode({
-      'schema_version': DatabaseService.schemaVersion,
+      'schema_version': StoreFiles.schemaVersion,
       'data': [a.toMap(), b.toMap()],
     }));
     await File('${docs.path}/bilibeat_playlists.json')
         .writeAsString(jsonEncode({
-      'schema_version': DatabaseService.schemaVersion,
+      'schema_version': StoreFiles.schemaVersion,
       'data': [
         {
           'id': 'favorites',
@@ -119,7 +121,7 @@ void main() {
 
     final history = await DatabaseService.getRecentlyPlayed();
     expect(history.map((t) => t.id), [track('B').id, track('A').id]);
-    expect(await DatabaseService.getSearchHistory(), ['周深', '大鱼']);
+    expect(await SearchHistory.get(), ['周深', '大鱼']);
   });
 
   test('covers in use are kept; old ones nothing shows are removed', () async {

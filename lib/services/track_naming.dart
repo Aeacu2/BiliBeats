@@ -14,6 +14,7 @@ import 'song_judge.dart';
 import 'song_reader.dart';
 import 'song_reader_service.dart';
 import 'subtitle_match.dart';
+import 'prefs.dart';
 
 /// Matches downloads to the songs they are (设置 → 自动匹配歌曲信息).
 ///
@@ -76,7 +77,7 @@ class TrackNaming {
   static Future<void> retryUnnamed() async {
     _attempted.clear();
     _early.clear();
-    await DatabaseService.setPref(_gaveUpPref, null);
+    await Prefs.set(_gaveUpPref, null);
     final track = _handler?.nowPlaying.value;
     if (track != null) autoName(track);
   }
@@ -94,7 +95,7 @@ class TrackNaming {
   static Future<void> init(BiliBeatsAudioHandler handler) async {
     _handler = handler;
     readWith ??= SongReaderService.read;
-    enabled = await DatabaseService.getPref('autoName') != false;
+    enabled = await Prefs.get('autoName') != false;
     // Older downloads are named the first time they play, one at a time —
     // never as a sweep of the whole library.
     // Deleted and downloaded again is a new download: name it afresh.
@@ -103,7 +104,7 @@ class TrackNaming {
       final map = await _gaveUp();
       if (ids.any(map.containsKey)) {
         ids.forEach(map.remove);
-        await DatabaseService.setPref(_gaveUpPref, map);
+        await Prefs.set(_gaveUpPref, map);
       }
     });
     handler.nowPlaying.addListener(() {
@@ -194,7 +195,7 @@ class TrackNaming {
 
   static Future<void> setEnabled(bool on) async {
     enabled = on;
-    await DatabaseService.setPref('autoName', on);
+    await Prefs.set('autoName', on);
   }
 
   /// What the music catalogues say [track] is, or null when they do not
@@ -316,7 +317,7 @@ class TrackNaming {
   static const String _gaveUpPref = 'unnamedBy';
 
   static Future<Map<String, dynamic>> _gaveUp() async {
-    final saved = await DatabaseService.getPref(_gaveUpPref);
+    final saved = await Prefs.get(_gaveUpPref);
     return saved is Map ? Map<String, dynamic>.from(saved) : {};
   }
 
@@ -330,7 +331,7 @@ class TrackNaming {
     if (map[id] == matcher) return;
     if (map.length >= 2000) map.remove(map.keys.first);
     map[id] = matcher;
-    await DatabaseService.setPref(_gaveUpPref, map);
+    await Prefs.set(_gaveUpPref, map);
   }
 
   static Future<Track?> _stored(String id) =>

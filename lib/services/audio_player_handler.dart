@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -16,9 +17,11 @@ import 'audio_download_service.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
 import 'download_manager.dart';
+import 'store_files.dart';
 import 'track_credit.dart';
 import 'track_naming.dart';
 import 'trim_store.dart';
+import 'prefs.dart';
 
 export '../models/playback_state.dart';
 
@@ -605,11 +608,11 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     if (normalizeVolume.value == on) return;
     normalizeVolume.value = on;
     _applyLoudness(nowPlaying.value);
-    await DatabaseService.setPref('normalizeVolume', on);
+    await Prefs.set('normalizeVolume', on);
   }
 
   Future<void> _loadNormalizationPref() async {
-    final saved = await DatabaseService.getPref('normalizeVolume');
+    final saved = await Prefs.get('normalizeVolume');
     if (saved == false) {
       normalizeVolume.value = false;
       _applyLoudness(nowPlaying.value);
@@ -872,7 +875,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     if (_player.audioSources.isNotEmpty) return;
 
     final token = _selection;
-    final session = await DatabaseService.loadPlaybackSession();
+    final session = await _savedSession();
     if (session == null) return;
 
     final library = await _library();
@@ -900,6 +903,20 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
+  static const String _sessionFile = 'bilibeat_session.json';
+
+  /// The session the last launch left; null when there is none it can read.
+  static Future<PlaybackSession?> _savedSession() async {
+    try {
+      final text = await StoreFiles.readText(_sessionFile);
+      if (text == null) return null;
+      return PlaybackSession.fromMap(StoreFiles.unwrap(jsonDecode(text)));
+    } catch (e) {
+      debugPrint('Saved session not restored: $e');
+      return null;
+    }
+  }
+
   /// Persists the current session now.
   Future<void> saveSession() async {
     _sessionSaveTimer?.cancel();
@@ -908,16 +925,18 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     // has not restored yet.
     if (sequence.isEmpty) return;
 
-    await DatabaseService.savePlaybackSession(PlaybackSession(
-      trackIds: [
-        for (final source in sequence)
-          if (_trackOf(source) != null) _trackOf(source)!.id,
-      ],
-      currentId: nowPlaying.value?.id,
-      position: _player.position,
-      shuffle: _player.shuffleModeEnabled,
-      loopMode: _loopMode,
-    ));
+    await StoreFiles.save(
+        _sessionFile,
+        PlaybackSession(
+          trackIds: [
+            for (final source in sequence)
+              if (_trackOf(source) != null) _trackOf(source)!.id,
+          ],
+          currentId: nowPlaying.value?.id,
+          position: _player.position,
+          shuffle: _player.shuffleModeEnabled,
+          loopMode: _loopMode,
+        ).toMap());
   }
 
   void _scheduleSessionSave() {

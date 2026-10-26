@@ -145,7 +145,7 @@ class AudioDownloadService {
     await tmp.writeAsString(content, flush: true);
     final target = File(path);
     // Only Windows needs the target gone before a rename (see
-    // DatabaseService._writeJsonAtomically).
+    // StoreFiles._writeAtomically).
     if (Platform.isWindows && await target.exists()) {
       try {
         await target.delete();

@@ -4,10 +4,10 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../models/lyrics.dart';
-import 'database_service.dart';
+import 'store_files.dart';
 
 Map<String, Lyrics> _parseLyricsFile(String json) {
-  final payload = DatabaseService.unwrapStorePayload(jsonDecode(json));
+  final payload = StoreFiles.unwrap(jsonDecode(json));
   final result = <String, Lyrics>{};
   if (payload is! Map) return result;
   payload.forEach((key, value) {
@@ -60,7 +60,7 @@ class LyricsStore {
 
   static Future<void> _load() async {
     try {
-      final text = await DatabaseService.readStoreFile(_file);
+      final text = await StoreFiles.readText(_file);
       if (text != null) {
         final parsed = await compute(_parseLyricsFile, text);
         // Anything registered while loading is newer than the file.
@@ -75,7 +75,7 @@ class LyricsStore {
       debugPrint('LyricsStore load skipped: $e');
       // Pinned lyrics are the listener's work: an unreadable file is kept,
       // not overwritten by the next save.
-      await DatabaseService.setAsideStoreFile(_file);
+      await StoreFiles.setAside(_file);
     }
     _loaded = true;
     _clearedBeforeLoad.clear();
@@ -171,6 +171,6 @@ class LyricsStore {
         ..write(_encoded[lyrics] ??= jsonEncode(lyrics.toMap()));
     });
     out.write('}');
-    return DatabaseService.writeStoreFile(_file, EncodedJson(out.toString()));
+    return StoreFiles.write(_file, EncodedJson(out.toString()));
   }
 }

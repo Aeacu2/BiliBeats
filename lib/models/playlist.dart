@@ -32,6 +32,13 @@ class Playlist {
     this.coverUrl,
   }) : tracks = List<Track>.of(tracks);
 
+  Playlist withName(String name) =>
+      Playlist(id: id, name: name, coverUrl: coverUrl, tracks: tracks);
+
+  /// This playlist with [cover] as its picture (null for the default).
+  Playlist withCover(String? cover) =>
+      Playlist(id: id, name: name, coverUrl: cover, tracks: tracks);
+
   Map<String, dynamic> toMap() {
     return {
       'id': id,

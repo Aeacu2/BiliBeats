@@ -7,6 +7,7 @@ import 'package:bilibeats/services/database_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
+import 'package:bilibeats/services/prefs.dart';
 
 /// Writes queued for the same file are coalesced: whatever is skipped must
 /// still be on disk when its caller is told the save is done.
@@ -70,8 +71,8 @@ void main() {
   test('each caller sees its own change on disk once it returns', () async {
     for (var i = 0; i < 5; i++) {
       final saves = [
-        DatabaseService.setPref('a', i),
-        DatabaseService.setPref('b', i),
+        Prefs.set('a', i),
+        Prefs.set('b', i),
       ];
       await saves.first;
       final prefs = jsonDecode(

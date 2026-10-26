@@ -8,6 +8,7 @@ import 'package:bilibeats/services/lyrics_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
+import 'package:bilibeats/services/store_files.dart';
 
 /// A file this build cannot read — written by a newer build, or damaged —
 /// must survive the next save: it holds the only copy of the listener's
@@ -27,14 +28,14 @@ void main() {
   );
 
   final newerPlaylists = jsonEncode({
-    'schema_version': DatabaseService.schemaVersion + 98,
+    'schema_version': StoreFiles.schemaVersion + 98,
     'data': [
       {'id': 'pl_future', 'name': 'from a newer build', 'tracks': []},
     ],
   });
   const tornHistory = '{"schema_version":1,"data":[{"id":"a_p1","ti';
   final newerLyrics = jsonEncode({
-    'schema_version': DatabaseService.schemaVersion + 98,
+    'schema_version': StoreFiles.schemaVersion + 98,
     'data': {'x_p1': <String, dynamic>{}},
   });
 
@@ -56,7 +57,7 @@ void main() {
     await DatabaseService.toggleFavorite(track);
     final current = jsonDecode(
         await File('${docs.path}/bilibeat_playlists.json').readAsString());
-    expect(current['schema_version'], DatabaseService.schemaVersion);
+    expect(current['schema_version'], StoreFiles.schemaVersion);
 
     // … while what could not be read is still there, byte for byte.
     final aside = File('${docs.path}/bilibeat_playlists.json.unreadable');

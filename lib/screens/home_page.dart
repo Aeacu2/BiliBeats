@@ -7,7 +7,6 @@ import '../app/playback_actions.dart';
 import '../models/playlist.dart';
 import '../models/track.dart';
 import '../services/background_protection.dart';
-import '../services/database_service.dart';
 import '../state/library_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
@@ -18,6 +17,7 @@ import '../widgets/sheet.dart';
 import '../widgets/song_tile.dart';
 import 'artist_page.dart';
 import 'playlist_page.dart';
+import '../services/prefs.dart';
 
 /// Home: your music.
 ///
@@ -55,7 +55,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _checkProtection() async {
     if (!BackgroundProtection.supported) return;
-    if (await DatabaseService.getPref('protectionHintDismissed') == true) {
+    if (await Prefs.get('protectionHintDismissed') == true) {
       return;
     }
     final enabled = await BackgroundProtection.isEnabled();
@@ -85,7 +85,7 @@ class _HomePageState extends State<HomePage> {
                   },
                   onDismiss: () {
                     setState(() => _showProtectionHint = false);
-                    DatabaseService.setPref('protectionHintDismissed', true);
+                    Prefs.set('protectionHintDismissed', true);
                   },
                 ),
               ),

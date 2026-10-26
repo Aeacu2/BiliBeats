@@ -10,6 +10,7 @@ import 'bili_favorites.dart';
 import 'database_service.dart';
 import 'lyrics_engine.dart';
 import 'track_credit.dart';
+import 'search_history.dart';
 
 /// What the listener seems to like, derived entirely from local data:
 /// favourites, play history, the downloaded library and search history.
@@ -351,7 +352,7 @@ class RecommendationEngine {
       downloaded: await DatabaseService.getDownloadedTracks(),
       plays: await DatabaseService.getPlayStats(),
       watched: await accountHistory(),
-      searches: await DatabaseService.getSearchHistory(),
+      searches: await SearchHistory.get(),
     );
     if (profile.isEmpty) return const [];
 

@@ -3,7 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-import 'database_service.dart';
+import 'store_files.dart';
 
 /// Where a song really starts and ends inside its video: the talk before
 /// it and the 求三连 after it left out.
@@ -66,7 +66,7 @@ class TrimStore {
   static Future<void> _load() async {
     final String? text;
     try {
-      text = await DatabaseService.readStoreFile(_file);
+      text = await StoreFiles.readText(_file);
     } catch (e) {
       // No documents directory (yet): nothing to read, nothing to set aside.
       debugPrint('TrimStore load skipped: $e');
@@ -76,7 +76,7 @@ class TrimStore {
     _loaded = true;
     if (text == null) return;
     try {
-      final payload = DatabaseService.unwrapStorePayload(jsonDecode(text));
+      final payload = StoreFiles.unwrap(jsonDecode(text));
       if (payload is! Map) return;
       final loaded = {
         for (final e in payload.entries)
@@ -87,7 +87,7 @@ class TrimStore {
       changes.value++;
     } catch (e) {
       debugPrint('TrimStore load skipped: $e');
-      await DatabaseService.setAsideStoreFile(_file);
+      await StoreFiles.setAside(_file);
     }
   }
 
@@ -104,7 +104,7 @@ class TrimStore {
     changes.value++;
     await ensureLoaded();
     if (!_loaded) throw StateError('trims not loaded');
-    await DatabaseService.writeStoreFile(
+    await StoreFiles.write(
         _file, {for (final e in _trims.entries) e.key: e.value.toMap()});
   }
 

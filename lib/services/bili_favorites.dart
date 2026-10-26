@@ -3,6 +3,7 @@ import 'bili_account.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
 import 'library_transfer.dart';
+import 'prefs.dart';
 
 /// A folder scan can resume the failed page, without presenting partial data
 /// as a complete import. Closing the preview stops further page requests.
@@ -51,7 +52,7 @@ class BiliFavorites {
   static const _pref = 'biliFavoriteSources';
 
   static Future<Map<String, dynamic>> _sources() async {
-    final stored = await DatabaseService.getPref(_pref);
+    final stored = await Prefs.get(_pref);
     return stored is Map ? Map<String, dynamic>.from(stored) : {};
   }
 
@@ -108,7 +109,7 @@ class BiliFavorites {
       'name': folderName,
       'recommend': recommend,
     };
-    await DatabaseService.setPref(_pref, sources);
+    await Prefs.set(_pref, sources);
     BiliAccountStore.notifyChanged();
     final queued =
         download ? await LibraryTransfer.enqueueDownloads(tracks) : 0;

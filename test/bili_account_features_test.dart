@@ -11,6 +11,7 @@ import 'package:bilibeats/services/recommendation_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
+import 'package:bilibeats/services/prefs.dart';
 
 const a = BiliAccount(cookies: 'SESSDATA=testA', mid: 10, name: 'A');
 const b = BiliAccount(cookies: 'SESSDATA=testB', mid: 20, name: 'B');
@@ -41,7 +42,7 @@ void main() {
   setUp(() async {
     await BiliAccountStore.save(a);
     await BiliAccountStore.setHistoryEnabled(a, false);
-    await DatabaseService.setPref('biliFavoriteSources', {});
+    await Prefs.set('biliFavoriteSources', {});
     RecommendationEngine.clearAccountData();
   });
   tearDown(() {

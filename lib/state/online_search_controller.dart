@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/track.dart';
 import '../services/bilibili_sdk.dart';
-import '../services/database_service.dart';
+import '../services/search_history.dart';
 
 /// Bilibili search results with pagination and search history.
 ///
@@ -42,7 +42,7 @@ class OnlineSearchController extends ChangeNotifier {
 
   Future<void> _loadHistory() async {
     final token = _historyToken;
-    final history = await DatabaseService.getSearchHistory();
+    final history = await SearchHistory.get();
     if (token != _historyToken) return;
     _history = history;
     notifyListeners();
@@ -66,7 +66,7 @@ class OnlineSearchController extends ChangeNotifier {
 
     final historyToken = _historyToken;
     try {
-      final history = await DatabaseService.addSearchHistory(query);
+      final history = await SearchHistory.add(query);
       if (historyToken == _historyToken) _history = history;
     } catch (e) {
       debugPrint('Search history write failed: $e');
@@ -147,6 +147,6 @@ class OnlineSearchController extends ChangeNotifier {
     ++_historyToken;
     _history = const [];
     notifyListeners();
-    await DatabaseService.clearSearchHistory();
+    await SearchHistory.clear();
   }
 }

@@ -10,6 +10,7 @@ import '../services/download_manager.dart';
 import '../services/lyrics_engine.dart';
 import '../services/track_credit.dart';
 import '../services/track_naming.dart';
+import '../services/prefs.dart';
 
 /// How the song list is ordered.
 enum LibrarySort { recent, played, mostPlayed, forgotten, title, artist }
@@ -231,11 +232,11 @@ class LibraryController extends ChangeNotifier {
     if (sort == _sort) return;
     _sort = sort;
     notifyListeners();
-    await DatabaseService.setPref('librarySort', sort.name);
+    await Prefs.set('librarySort', sort.name);
   }
 
   Future<void> _loadSort() async {
-    final saved = await DatabaseService.getPref('librarySort');
+    final saved = await Prefs.get('librarySort');
     final match = LibrarySort.values.where((s) => s.name == saved);
     if (match.isNotEmpty && match.first != _sort) {
       _sort = match.first;

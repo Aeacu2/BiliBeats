@@ -12,6 +12,7 @@ import '../models/track.dart';
 import 'audio_download_service.dart';
 import 'database_service.dart';
 import 'download_manager.dart';
+import 'store_files.dart';
 
 @immutable
 class ImportQueueState {
@@ -291,9 +292,9 @@ class LibraryTransfer {
     if (_loaded) return;
     _loaded = true;
     try {
-      final text = await DatabaseService.readStoreFile(_file);
+      final text = await StoreFiles.readText(_file);
       if (text == null) return;
-      final payload = DatabaseService.unwrapStorePayload(jsonDecode(text));
+      final payload = StoreFiles.unwrap(jsonDecode(text));
       _paused = payload is Map && payload['paused'] == true;
       _completed = payload is Map && payload['completed'] is int
           ? payload['completed'] as int
@@ -317,7 +318,7 @@ class LibraryTransfer {
 
   static Future<void> _save() async {
     try {
-      await DatabaseService.writeStoreFile(_file, {
+      await StoreFiles.write(_file, {
         'paused': _paused,
         'completed': _completed,
         'items': [

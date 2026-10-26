@@ -3,7 +3,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-import 'database_service.dart';
+import 'store_files.dart';
+import 'prefs.dart';
 
 /// The listener's Bilibili account, when they have logged in.
 @immutable
@@ -85,15 +86,12 @@ class BiliAccountStore {
   static Future<bool> historyEnabled() async {
     final account = current.value;
     if (account == null) return false;
-    return await DatabaseService.getPref(
-            'biliHistoryRecommendations:${account.mid}') ==
-        true;
+    return await Prefs.get('biliHistoryRecommendations:${account.mid}') == true;
   }
 
   static Future<void> setHistoryEnabled(BiliAccount account, bool value) async {
     if (!identical(current.value, account)) return;
-    await DatabaseService.setPref(
-        'biliHistoryRecommendations:${account.mid}', value);
+    await Prefs.set('biliHistoryRecommendations:${account.mid}', value);
     notifyChanged();
   }
 
@@ -101,9 +99,9 @@ class BiliAccountStore {
 
   static Future<void> _load() async {
     try {
-      final text = await DatabaseService.readStoreFile(_file);
+      final text = await StoreFiles.readText(_file);
       if (text == null) return;
-      final payload = DatabaseService.unwrapStorePayload(jsonDecode(text));
+      final payload = StoreFiles.unwrap(jsonDecode(text));
       expired = payload is Map && payload['expired'] == true;
       current.value = BiliAccount.fromMap(payload);
       notifyChanged();
@@ -121,7 +119,7 @@ class BiliAccountStore {
 
   static Future<void> save(BiliAccount account) async {
     await ensureLoaded();
-    await DatabaseService.writeStoreFile(_file, account.toMap());
+    await StoreFiles.write(_file, account.toMap());
     expired = false;
     current.value = account;
     notifyChanged();
@@ -129,7 +127,7 @@ class BiliAccountStore {
 
   static Future<void> logOut() async {
     await ensureLoaded();
-    await DatabaseService.writeStoreFile(_file, const <String, dynamic>{});
+    await StoreFiles.write(_file, const <String, dynamic>{});
     expired = false;
     current.value = null;
     notifyChanged();
@@ -141,6 +139,6 @@ class BiliAccountStore {
     expired = true;
     current.value = null;
     notifyChanged();
-    await DatabaseService.writeStoreFile(_file, const {'expired': true});
+    await StoreFiles.write(_file, const {'expired': true});
   }
 }
