@@ -15,13 +15,15 @@ void main() {
   final gone = song('B_p1'); // listed as downloaded, but its file is gone
   final saved = song('C_p1'); // in a playlist, never downloaded
   final renamed = song('D_p1'); // downloaded, renamed in the playlist only
+  final drifted = song('E_p1'); // downloaded; the playlist's copy drifted
 
   setUpAll(() async {
     docs = await stubDocs('playlist_storage');
     await downloaded(docs, kept);
     await downloaded(docs, renamed);
+    await downloaded(docs, drifted);
     await store(docs, 'bilibeat_downloaded.json',
-        [kept.toMap(), gone.toMap(), renamed.toMap()]);
+        [kept.toMap(), gone.toMap(), renamed.toMap(), drifted.toMap()]);
     await store(docs, 'bilibeat_playlists.json', [
       playlist('favorites', [kept.toMap()]),
       playlist('pl_1', [
@@ -29,6 +31,7 @@ void main() {
         gone.toMap(),
         saved.toMap(),
         renamed.copyWith(title: 'my name').toMap(),
+        drifted.copyWith(loudness: -7.5, matcher: 3, rawUploader: 'UP').toMap(),
       ]),
     ]);
     legacy = await File('${docs.path}/bilibeat_playlists.json').readAsString();
@@ -38,7 +41,7 @@ void main() {
     final lists = await DatabaseService.getPlaylists();
     final list = lists.firstWhere((p) => p.id == 'pl_1');
     expect([for (final t in list.tracks) t.title],
-        ['song A_p1', 'song B_p1', 'song C_p1', 'my name']);
+        ['song A_p1', 'song B_p1', 'song C_p1', 'my name', 'song E_p1']);
 
     final written = await stored(docs, 'bilibeat_playlists2.json') as List;
     final entries = written.firstWhere((p) => p['id'] == 'pl_1')['tracks'];
@@ -47,6 +50,8 @@ void main() {
       gone.toMap(),
       saved.toMap(),
       renamed.copyWith(title: 'my name').toMap(),
+      // Differed only in what is worked out: now the download's copy.
+      drifted.id,
     ]);
   });
 
@@ -70,6 +75,6 @@ void main() {
     await DatabaseService.updateTrackMetadata(edited);
     final written = await stored(docs, 'bilibeat_playlists2.json') as List;
     final entries = written.firstWhere((p) => p['id'] == 'pl_1')['tracks'];
-    expect((entries as List).last, renamed.id);
+    expect((entries as List)[3], renamed.id);
   });
 }

@@ -190,7 +190,7 @@ class DatabaseService {
       final history =
           await StoreFiles.load(_historyFile, _parseTrackList, offThread: true);
       if (history != null) _replace(_recentlyPlayed, history);
-      final playlistsChanged = await _loadPlaylists(listed);
+      final playlistsChanged = await _loadPlaylists(listed, docs);
       if (!_playlists.any((p) => p.id == Playlist.favoritesId)) {
         _playlists.insert(0, _emptyFavorites());
       }
@@ -225,12 +225,17 @@ class DatabaseService {
   /// two (see [_legacyPlaylistsFile]). True when they are to be saved
   /// again: moved from the older file, or holding by id a song the
   /// download list no longer has ([listed]: the list as it was read).
-  static Future<bool> _loadPlaylists(Map<String, Track> listed) async {
+  static Future<bool> _loadPlaylists(
+      Map<String, Track> listed, String docs) async {
+    final downloads = {for (final t in _downloadedTracks) t.id: t};
     if (await _legacyIsNewer()) {
       final legacy = await StoreFiles.load(
           _legacyPlaylistsFile, _parsePlaylistList,
           offThread: true);
       if (legacy != null) {
+        for (final playlist in legacy) {
+          _alignWithDownloads(playlist.tracks, downloads, docs);
+        }
         _replace(_playlists, legacy);
         return true;
       }
@@ -238,7 +243,6 @@ class DatabaseService {
     final stored = await StoreFiles.load(_playlistsFile, _parseStoredPlaylists,
         offThread: true);
     if (stored == null) return false;
-    final downloads = {for (final t in _downloadedTracks) t.id: t};
     Map<String, Track>? legacyCopies;
     var changed = false;
     final playlists = <Playlist>[];
@@ -264,6 +268,7 @@ class DatabaseService {
           debugPrint('Library: playlist ${playlist.id} lost song $id');
         }
       }
+      if (_alignWithDownloads(tracks, downloads, docs)) changed = true;
       playlists.add(Playlist(
           id: playlist.id,
           name: playlist.name,
@@ -273,6 +278,32 @@ class DatabaseService {
     _replace(_playlists, playlists);
     return changed;
   }
+
+  /// Replaces each song in [tracks] that differs from its download only in
+  /// what is worked out rather than chosen (loudness, matcher generation,
+  /// UP主, part name, length, a cover's moved folder) with the download's
+  /// copy, which is then written by id. Copies drifted apart that way under
+  /// older builds. A different name, artist or cover may be the
+  /// listener's, and is kept. True when any was replaced.
+  static bool _alignWithDownloads(
+      List<Track> tracks, Map<String, Track> downloads, String docs) {
+    var changed = false;
+    for (var i = 0; i < tracks.length; i++) {
+      final t = tracks[i];
+      final d = downloads[t.id];
+      if (d == null || identical(d, t) || !_sameChoices(t, d, docs)) continue;
+      tracks[i] = d;
+      changed = true;
+    }
+    return changed;
+  }
+
+  static bool _sameChoices(Track a, Track b, String docs) =>
+      a.title == b.title &&
+      a.uploader == b.uploader &&
+      a.rawTitle == b.rawTitle &&
+      a.named == b.named &&
+      rebaseCover(a.coverUrl, docs) == rebaseCover(b.coverUrl, docs);
 
   static Future<bool> _legacyIsNewer() async {
     try {
