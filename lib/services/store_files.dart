@@ -152,8 +152,21 @@ class StoreFiles {
 
   /// Atomically writes [payload] (wrapped in the versioned envelope; it may
   /// be [EncodedJson] already) to `<documents>/[name]`. Failures propagate.
-  static Future<void> write(String name, Object payload) async =>
-      _writeAtomically(await pathOf(name), _envelope(payload));
+  static Future<void> write(String name, Object payload) async {
+    final path = await pathOf(name);
+    final slash = name.lastIndexOf('/');
+    if (slash > 0) {
+      await Directory('${await documents()}/${name.substring(0, slash)}')
+          .create(recursive: true);
+    }
+    await _writeAtomically(path, _envelope(payload));
+  }
+
+  /// Deletes `<documents>/[name]`, if it is there.
+  static Future<void> delete(String name) async {
+    final file = File(await pathOf(name));
+    if (await file.exists()) await file.delete();
+  }
 
   /// [write], with a failure reported to the listener ([saveFailures])
   /// instead of thrown.

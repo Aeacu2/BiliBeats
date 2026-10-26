@@ -17,11 +17,13 @@ import UIKit
 
   /// Downloaded audio and cached covers can be fetched again; they do not
   /// belong in an iCloud or computer backup (Android excludes all app data).
+  /// Nor does the Bilibili login (bilibeat_private).
   private func excludeDownloadsFromBackup() {
     let files = FileManager.default
     let folders: [(FileManager.SearchPathDirectory, String)] = [
       (.documentDirectory, "bilibeat_audio"),
       (.applicationSupportDirectory, "bilibeat_covers"),
+      (.documentDirectory, "bilibeat_private"),
     ]
     for (base, name) in folders {
       guard let root = files.urls(for: base, in: .userDomainMask).first else { continue }

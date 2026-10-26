@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app/app_services.dart';
 import '../models/track.dart';
+import '../services/bilibili_sdk.dart';
 import '../services/database_service.dart';
 import '../services/lyrics_engine.dart';
 import '../services/track_credit.dart';
@@ -53,6 +54,56 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
   Future<void> _pickCover() async {
     final path = await pickCoverImage('cover');
     if (path != null && mounted) setState(() => _cover = path);
+  }
+
+  /// Whether [url] is a Bilibili image: the video's own cover.
+  static bool _fromBilibili(String url) {
+    final host = Uri.tryParse(url)?.host ?? '';
+    return host.contains('hdslb.com') || host.contains('biliimg.com');
+  }
+
+  /// A cover that is not the video's own (release artwork, a picked image)
+  /// can also be put back to the video's.
+  Future<void> _changeCover() async {
+    if (_fromBilibili(_cover)) return _pickCover();
+    Haptics.selection();
+    final useVideo = await showAppSheet<bool>(
+      context,
+      builder: (sheet) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SheetAction(
+            icon: Icons.photo_library_outlined,
+            label: '从相册选择',
+            onTap: () => Navigator.pop(sheet, false),
+          ),
+          SheetAction(
+            icon: Icons.smart_display_outlined,
+            label: '使用视频封面',
+            onTap: () => Navigator.pop(sheet, true),
+          ),
+        ],
+      ),
+    );
+    if (useVideo == null || !mounted) return;
+    if (!useVideo) return _pickCover();
+    final track = widget.track;
+    String cover = '';
+    try {
+      cover =
+          (await BilibiliSdk.fetchVideoHints(track.bvid, cid: track.cid)).cover;
+    } catch (error) {
+      debugPrint('Video cover lookup failed: $error');
+    }
+    if (!mounted) return;
+    if (cover.isEmpty) {
+      setState(() => _notice = '没有取到视频封面');
+      return;
+    }
+    setState(() {
+      _cover = cover;
+      _notice = null;
+    });
   }
 
   /// Always works from the original video title, so tapping again after an
@@ -147,7 +198,7 @@ class _TrackInfoSheetState extends State<TrackInfoSheet> {
                 button: true,
                 label: '更换封面',
                 child: GestureDetector(
-                  onTap: _pickCover,
+                  onTap: _changeCover,
                   child: Stack(
                     alignment: Alignment.bottomRight,
                     children: [

@@ -10,6 +10,10 @@ import '../utils/format.dart';
 ///
 /// While the thumb is held the bar shows the dragged value rather than the
 /// live position, and seeks once on release.
+///
+/// A trimmed song ([start], [end]) is shown as the part that plays: the bar
+/// and both times span the trim, while [position] and [onSeek] stay in the
+/// file's time.
 class PlayerSeekBar extends StatefulWidget {
   final ValueListenable<Duration> position;
   final ValueListenable<Duration> duration;
@@ -18,12 +22,20 @@ class PlayerSeekBar extends StatefulWidget {
   final Duration fallback;
   final ValueChanged<Duration> onSeek;
 
+  /// Where the song starts in the file.
+  final Duration start;
+
+  /// Where it ends; null for the end of the file.
+  final Duration? end;
+
   const PlayerSeekBar({
     super.key,
     required this.position,
     required this.duration,
     required this.fallback,
     required this.onSeek,
+    this.start = Duration.zero,
+    this.end,
   });
 
   @override
@@ -46,11 +58,15 @@ class _PlayerSeekBarState extends State<PlayerSeekBar> {
       listenable: Listenable.merge([widget.duration, widget.position]),
       builder: (context, _) {
         final known = widget.duration.value;
-        final total =
-            (known > Duration.zero ? known : widget.fallback).inMilliseconds /
-                1000.0;
+        final span = trimmedSpan(
+          known > Duration.zero ? known : widget.fallback,
+          start: widget.start,
+          end: widget.end,
+        );
+        final total = (span.end - span.start).inMilliseconds / 1000.0;
         final max = total > 0 ? total : 1.0;
-        final at = (_drag ?? widget.position.value.inMilliseconds / 1000.0)
+        final at = (_drag ??
+                (widget.position.value - span.start).inMilliseconds / 1000.0)
             .clamp(0.0, max);
         Duration seconds(double s) =>
             Duration(milliseconds: (s * 1000).round());
@@ -83,7 +99,7 @@ class _PlayerSeekBarState extends State<PlayerSeekBar> {
                   onChanged: (v) => setState(() => _drag = v),
                   onChangeEnd: (v) {
                     Haptics.light();
-                    widget.onSeek(seconds(v));
+                    widget.onSeek(span.start + seconds(v));
                     setState(() => _drag = null);
                   },
                 ),
@@ -101,6 +117,19 @@ class _PlayerSeekBarState extends State<PlayerSeekBar> {
       },
     );
   }
+}
+
+/// The part of a [length]-long file that plays, trimmed to [start] and
+/// [end]; the whole file where the trim leaves nothing (or the length is not
+/// known yet and the trim would run past it).
+({Duration start, Duration end}) trimmedSpan(Duration length,
+    {Duration start = Duration.zero, Duration? end}) {
+  var to = end ?? length;
+  if (length > Duration.zero && to > length) to = length;
+  if (start < Duration.zero || to - start <= Duration.zero) {
+    return (start: Duration.zero, end: length);
+  }
+  return (start: start, end: to);
 }
 
 /// A slider track that spans the whole width, so the bar lines up with the

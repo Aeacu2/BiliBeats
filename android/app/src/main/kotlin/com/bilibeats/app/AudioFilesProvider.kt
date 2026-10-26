@@ -40,6 +40,16 @@ class AudioFilesProvider : DocumentsProvider() {
             )
         }
 
+        /// The document standing for the song [id].
+        fun documentIdOf(id: String) = FILE_PREFIX + id
+
+        /// Whether [id] is a downloaded song, with a file to open.
+        fun isSong(context: Context, id: String): Boolean {
+            if (!SAFE_ID.matches(id)) return false
+            val dir = File(context.getDir("flutter", Context.MODE_PRIVATE), "bilibeat_audio")
+            return File(dir, "audio_$id.m4a").exists() && File(dir, "audio_$id.ready").exists()
+        }
+
         private val ROOT_COLUMNS = arrayOf(
             Root.COLUMN_ROOT_ID,
             Root.COLUMN_FLAGS,
@@ -211,7 +221,7 @@ class AudioFilesProvider : DocumentsProvider() {
 
     private fun addSong(cursor: MatrixCursor, id: String, file: File, name: String) {
         cursor.newRow()
-            .add(Document.COLUMN_DOCUMENT_ID, FILE_PREFIX + id)
+            .add(Document.COLUMN_DOCUMENT_ID, documentIdOf(id))
             .add(Document.COLUMN_DISPLAY_NAME, name)
             .add(Document.COLUMN_MIME_TYPE, kindOf(id, file).second)
             .add(Document.COLUMN_SIZE, file.length())

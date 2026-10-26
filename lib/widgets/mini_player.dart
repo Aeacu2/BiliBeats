@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 
 import '../models/track.dart';
 import '../services/audio_player_handler.dart';
+import '../services/trim_store.dart';
 import '../state/library_controller.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
 import '../theme/motion.dart';
 import 'cached_cover_image.dart';
+import 'player_seek_bar.dart';
 
 /// The docked player.
 ///
@@ -275,11 +277,16 @@ class _Progress extends StatelessWidget {
       stream: handler.positionStream,
       initialData: handler.position,
       builder: (context, snapshot) {
-        return ValueListenableBuilder<Duration>(
-          valueListenable: handler.durationNotifier,
-          builder: (context, duration, _) {
-            final total = duration.inMilliseconds;
-            final position = snapshot.data ?? Duration.zero;
+        return ListenableBuilder(
+          listenable:
+              Listenable.merge([handler.durationNotifier, TrimStore.changes]),
+          builder: (context, _) {
+            final id = handler.nowPlaying.value?.id;
+            final trim = id == null ? null : TrimStore.of(id);
+            final span = trimmedSpan(handler.durationNotifier.value,
+                start: trim?.start ?? Duration.zero, end: trim?.end);
+            final total = (span.end - span.start).inMilliseconds;
+            final position = (snapshot.data ?? Duration.zero) - span.start;
             final fraction = total <= 0
                 ? 0.0
                 : (position.inMilliseconds / total).clamp(0.0, 1.0);

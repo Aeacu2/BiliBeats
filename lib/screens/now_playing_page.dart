@@ -6,6 +6,7 @@ import '../app/app_services.dart';
 import '../models/track.dart';
 import '../services/audio_player_handler.dart';
 import '../services/database_service.dart';
+import '../services/trim_store.dart';
 import '../state/library_controller.dart';
 import '../state/lyrics_controller.dart';
 import '../theme/app_theme.dart';
@@ -284,13 +285,22 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
                   SizedBox(height: space.aboveSeek),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: _reach),
-                    child: PlayerSeekBar(
-                      // A drag held across a track change is dropped with it.
-                      key: ValueKey(track.id),
-                      position: _position,
-                      duration: _handler.durationNotifier,
-                      fallback: Duration(seconds: track.duration),
-                      onSeek: _handler.seek,
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: TrimStore.changes,
+                      builder: (context, _, __) {
+                        final trim = TrimStore.of(track.id);
+                        return PlayerSeekBar(
+                          // A drag held across a track change is dropped
+                          // with it.
+                          key: ValueKey(track.id),
+                          position: _position,
+                          duration: _handler.durationNotifier,
+                          fallback: Duration(seconds: track.duration),
+                          onSeek: _handler.seek,
+                          start: trim?.start ?? Duration.zero,
+                          end: trim?.end,
+                        );
+                      },
                     ),
                   ),
                   SizedBox(height: space.aboveTransport),

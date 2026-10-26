@@ -6,6 +6,7 @@ import '../app/app_services.dart';
 import '../models/playlist.dart';
 import '../models/track.dart';
 import '../screens/artist_page.dart';
+import '../services/audio_folder.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
 import '../services/trim_store.dart';
@@ -241,6 +242,21 @@ class _TrackSheetState extends State<TrackSheet> {
                       TrimSheet.show(parent, track);
                     },
                   );
+                },
+              ),
+            if (downloaded && AudioFolder.supported)
+              SheetAction(
+                icon: Icons.folder_open_rounded,
+                label: '打开文件',
+                onTap: () async {
+                  final parent = _dismiss();
+                  final messenger = ScaffoldMessenger.of(parent);
+                  if (await AudioFolder.openSong(track.id)) return;
+                  // No app opens the file itself: its folder, then.
+                  if (!await AudioFolder.open()) {
+                    showAppSnackBar(messenger,
+                        message: '在系统「文件」App 的侧栏中打开 BiliBeats');
+                  }
                 },
               ),
             if (widget.forPlayer)

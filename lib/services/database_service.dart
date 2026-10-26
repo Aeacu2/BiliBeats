@@ -812,13 +812,17 @@ class DatabaseService {
 
   /// Adds the [tracks] the playlist does not have yet to its front, in the
   /// order given; one save for the whole batch.
+  ///
+  /// A song the library already holds goes in as the library has it: a
+  /// favourites import or a search result describes the video, and a song
+  /// named since would show in the playlist under the video's title.
   static Future<void> addTracksToPlaylist(
           String playlistId, List<Track> tracks) =>
       _editTracks(playlistId, (list) {
         final have = {for (final t in list) t.id};
         final toAdd = [
           for (final t in tracks)
-            if (have.add(t.id)) t,
+            if (have.add(t.id)) _knownCopy(t) ?? t,
         ];
         list.insertAll(0, toAdd);
         return toAdd.isNotEmpty;
@@ -829,7 +833,7 @@ class DatabaseService {
           String playlistId, Track track, int index) =>
       _editTracks(playlistId, (list) {
         if (list.any((t) => t.id == track.id)) return false;
-        list.insert(index.clamp(0, list.length), track);
+        list.insert(index.clamp(0, list.length), _knownCopy(track) ?? track);
         return true;
       });
 

@@ -114,6 +114,27 @@ class LibraryController extends ChangeNotifier {
     ];
   }
 
+  /// The songs gone longest unheard. A song counts as heard once a listen
+  /// counted ([PlayStat]): one only started, or skipped, was not. Never
+  /// heard first, then the longest ago; songs alike in that, the oldest
+  /// download first.
+  List<Track> _byLongestUnheard() {
+    // [_downloaded] is newest first.
+    final age = {
+      for (var i = 0; i < _downloaded.length; i++) _downloaded[i].id: i
+    };
+    return List.of(_downloaded)
+      ..sort((a, b) {
+        final heardA = _plays[a.id]?.last, heardB = _plays[b.id]?.last;
+        if (heardA != heardB) {
+          if (heardA == null) return -1;
+          if (heardB == null) return 1;
+          return heardA.compareTo(heardB);
+        }
+        return age[b.id]!.compareTo(age[a.id]!);
+      });
+  }
+
   /// Most listened to first; songs heard equally often, latest first.
   List<Track> _byPlayCount() {
     final byLast = _byLastPlayed();
@@ -156,9 +177,7 @@ class LibraryController extends ChangeNotifier {
       LibrarySort.recent => _downloaded,
       LibrarySort.played => _byLastPlayed(),
       LibrarySort.mostPlayed => _byPlayCount(),
-      // The songs gone longest unheard: never played first, oldest
-      // downloads first among those, then the least recently played.
-      LibrarySort.forgotten => _byLastPlayed().reversed.toList(),
+      LibrarySort.forgotten => _byLongestUnheard(),
       LibrarySort.title => List.of(_downloaded)..sort(byTitle),
       LibrarySort.artist => List.of(_downloaded)
         ..sort((a, b) {

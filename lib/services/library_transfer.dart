@@ -52,7 +52,9 @@ typedef ImportSummary = ({int queued, int present, int playlists});
 ///
 /// Importing only adds: songs already here are left alone, playlists of the
 /// same name are merged. Downloads run a few at a time and survive a
-/// restart ([resume]); pasting the same text again picks up what is missing.
+/// restart ([resume]); pasting the same text again adds what is missing,
+/// but leaves a song that failed as it is — 重试 in download management
+/// tries it again.
 class LibraryTransfer {
   LibraryTransfer._();
 
@@ -144,7 +146,18 @@ class LibraryTransfer {
         final raw = rawTracks[i];
         if (raw is! Map) continue;
         try {
-          final track = Track.fromMap(Map<String, dynamic>.from(raw));
+          // Only what export writes: no download address (a pasted one
+          // would be fetched as the song), no artwork path of another
+          // device.
+          final map = Map<String, dynamic>.from(raw)
+            ..remove('audioUrl')
+            ..remove('loudness');
+          if (map['coverUrl'] case final String cover
+              when !cover.startsWith('https://') &&
+                  !cover.startsWith('http://')) {
+            map.remove('coverUrl');
+          }
+          final track = Track.fromMap(map);
           if (track.bvid.isEmpty) continue;
           byIndex[i] = track;
           if (seen.add(track.id)) tracks.add(track);

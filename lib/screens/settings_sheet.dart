@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../app/app_services.dart';
 import '../services/audio_folder.dart';
+import '../services/audio_player_handler.dart';
 import '../services/bili_account.dart';
 import '../services/background_protection.dart';
 import '../services/error_log.dart';
@@ -137,6 +138,7 @@ class _SettingsSheetState extends State<SettingsSheet>
             onChanged: handler.setNormalizeVolume,
           ),
         ),
+        _AppVolume(handler: handler),
         _Toggle(
           icon: Icons.auto_awesome_outlined,
           label: '自动匹配歌曲信息',
@@ -281,6 +283,83 @@ class _ImportConfirm extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// The app's own volume, over the level 音量均衡 brings songs to: set once,
+/// it holds while other apps move the phone's media volume. Above 0 dB
+/// where the platform can boost (Android).
+class _AppVolume extends StatelessWidget {
+  final BiliBeatsAudioHandler handler;
+
+  const _AppVolume({required this.handler});
+
+  static String _label(double db) {
+    if (db == 0) return '标准';
+    final size = db.abs().round();
+    return db > 0 ? '+$size dB' : '−$size dB';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const min = BiliBeatsAudioHandler.minAppGainDb;
+    final max = handler.maxAppGainDb;
+    return ValueListenableBuilder<double>(
+      valueListenable: handler.appGain,
+      builder: (context, db, _) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: SizedBox(
+          height: 52,
+          child: Row(
+            children: [
+              const Icon(Icons.volume_up_rounded,
+                  size: 23, color: AppColors.textSecondary),
+              Expanded(
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 3,
+                    activeTrackColor: AppColors.textPrimary,
+                    inactiveTrackColor: AppColors.white24,
+                    thumbColor: AppColors.textPrimary,
+                    overlayColor: AppColors.white12,
+                    tickMarkShape: SliderTickMarkShape.noTickMark,
+                    showValueIndicator: ShowValueIndicator.never,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 7,
+                      elevation: 0,
+                      pressedElevation: 0,
+                    ),
+                    overlayShape:
+                        const RoundSliderOverlayShape(overlayRadius: 16),
+                  ),
+                  child: Slider(
+                    value: db,
+                    min: min,
+                    max: max,
+                    // Whole decibels: 标准 is easy to land on again.
+                    divisions: (max - min).round(),
+                    semanticFormatterCallback: _label,
+                    onChanged: (v) =>
+                        unawaited(handler.setAppGain(v, save: false)),
+                    onChangeEnd: (v) => unawaited(handler.setAppGain(v)),
+                  ),
+                ),
+              ),
+              SizedBox(
+                width: 52,
+                child: Text(
+                  _label(db),
+                  textAlign: TextAlign.end,
+                  style: AppTypography.caption.copyWith(
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
