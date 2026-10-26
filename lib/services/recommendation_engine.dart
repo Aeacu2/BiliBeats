@@ -379,11 +379,12 @@ class RecommendationEngine {
       }
     }
 
+    final searching =
+        query == null ? null : attempt(() => BilibiliSdk.search(query));
     final neighbours = await Future.wait([
       for (final seed in seeds) attempt(() => BilibiliSdk.related(seed.bvid)),
     ]);
-    final found =
-        query == null ? null : await attempt(() => BilibiliSdk.search(query));
+    final found = await searching;
     if (asked > 0 && failed == asked) {
       throw firstError ?? const BiliApiException('recommendations failed');
     }

@@ -121,11 +121,16 @@ class DatabaseService {
       // store: one corrupt file must not wipe the whole in-memory library
       // (a truncated write is easy with whole-file rewrites).
       await _loadTracks('$dir/bilibeat_downloaded.json', _downloadedTracks);
-      await _discoverAudioFiles(dir);
-      await _loadTracks('$dir/bilibeat_recently_played.json', _recentlyPlayed);
-      await _loadPlaylists('$dir/bilibeat_playlists.json');
-      await _loadSearchHistory('$dir/bilibeat_search_history.json');
-      await _loadPlays('$dir/bilibeat_plays.json');
+      // The rest do not depend on each other: read (and parsed, each in its
+      // own isolate) side by side rather than one after another, so the
+      // first screen waits for the slowest file instead of their sum.
+      await Future.wait([
+        _discoverAudioFiles(dir),
+        _loadTracks('$dir/bilibeat_recently_played.json', _recentlyPlayed),
+        _loadPlaylists('$dir/bilibeat_playlists.json'),
+        _loadSearchHistory('$dir/bilibeat_search_history.json'),
+        _loadPlays('$dir/bilibeat_plays.json'),
+      ]);
       _rebaseCovers(dir);
       // With a store set aside, what it referenced is unknown: keep it all.
       if (!_setAsideAny && !everSetAside) unawaited(_sweepCovers(dir));
@@ -447,11 +452,11 @@ class DatabaseService {
   static Future<void> _writeNow(String path, Object data) async {
     File? tmp;
     try {
-      final payload = jsonEncode(data);
+      final payload = utf8.encode(jsonEncode(data));
       for (var attempt = 0; attempt < 2; attempt++) {
         final unique = DateTime.now().microsecondsSinceEpoch;
         tmp = File('$path.$unique.tmp');
-        await tmp.writeAsString(payload, flush: true);
+        await tmp.writeAsBytes(payload, flush: true);
         final target = File(path);
         // rename() replaces the target atomically everywhere but Windows,
         // where it fails if the target exists. Only there is the old file
@@ -469,8 +474,10 @@ class DatabaseService {
         tmp = null;
         // Verify what landed: a torn write must not silently become the
         // library. One retry, then propagate the failure to the caller.
+        // By length: a write cut short is a short file, and reading the
+        // whole library back after every change doubled each save's IO.
         try {
-          if (await File(path).readAsString() == payload) return;
+          if (await File(path).length() == payload.length) return;
           debugPrint(
               'DatabaseService _writeJsonAtomically verify mismatch: $path');
         } catch (e) {

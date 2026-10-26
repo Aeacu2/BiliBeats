@@ -59,7 +59,9 @@ docs/archive/               old review notes and a superseded feature list — h
   needs downloading is fetched first while the current one keeps playing
   (`handler.preparing`).
 - **Persistence is whole-file JSON** in the documents directory, written through
-  `DatabaseService._writeJsonAtomically` (single write lock, temp file + rename).
+  `DatabaseService._writeJsonAtomically` (single write lock, temp file + rename;
+  writes still waiting for one file are merged and save the state of the moment
+  they begin, so pass a snapshot of the whole file).
   Screens do not read `DatabaseService` directly; they listen to `LibraryController`.
 - **`Track` identity is `bvid_p<page>`**; equality is by id, so use `TrackNotifier`
   (not `ValueNotifier<Track>`) where an edited copy must notify.
