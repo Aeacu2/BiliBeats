@@ -8,6 +8,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.DocumentsContract
 import android.provider.Settings
@@ -16,10 +19,130 @@ import androidx.core.app.ActivityCompat
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
 
 class MainActivity : AudioServiceActivity() {
+    private val pickRequest = 2001
+    private var localChannel: MethodChannel? = null
+    private var pendingPick: MethodChannel.Result? = null
+
+    /// Audio files handed to the app (opened with or shared to BiliBeats)
+    /// and not yet asked for by Dart.
+    private val opened = mutableListOf<Uri>()
+    private val copying = Executors.newSingleThreadExecutor()
+    private val main = Handler(Looper.getMainLooper())
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // From the recents list the launching intent comes again: its file
+        // was already taken.
+        if (savedInstanceState == null &&
+            (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0
+        ) {
+            takeAudio(intent)
+        }
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (takeAudio(intent)) localChannel?.invokeMethod("opened", null)
+    }
+
+    /// Notes the audio files [intent] carries; true when it carries any.
+    private fun takeAudio(intent: Intent?): Boolean {
+        if (intent == null) return false
+        val uris = when (intent.action) {
+            Intent.ACTION_VIEW -> listOfNotNull(intent.data)
+            Intent.ACTION_SEND -> listOfNotNull(streamOf(intent))
+            else -> emptyList()
+        }
+        opened.addAll(uris)
+        return uris.isNotEmpty()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun streamOf(intent: Intent): Uri? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+        }
+
+    /// Copies [uris] off the main thread, then answers [result] with what
+    /// each became (see LocalAudio.copy).
+    private fun copyAll(uris: List<Uri>, result: MethodChannel.Result) {
+        if (uris.isEmpty()) {
+            result.success(emptyList<Map<String, Any?>>())
+            return
+        }
+        copying.execute {
+            val copies = uris.map { LocalAudio.copy(applicationContext, it) }
+            main.post { result.success(copies) }
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != pickRequest) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+        val result = pendingPick ?: return
+        pendingPick = null
+        val uris = mutableListOf<Uri>()
+        if (resultCode == RESULT_OK && data != null) {
+            val clip = data.clipData
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+            } else {
+                data.data?.let { uris.add(it) }
+            }
+        }
+        copyAll(uris, result)
+    }
+
+    /// The system's document picker, for audio, several at a time.
+    @Suppress("DEPRECATION")
+    private fun pickAudio(result: MethodChannel.Result) {
+        if (pendingPick != null) {
+            result.error("busy", "A pick is already open", null)
+            return
+        }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("audio/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        try {
+            pendingPick = result
+            startActivityForResult(intent, pickRequest)
+        } catch (_: ActivityNotFoundException) {
+            pendingPick = null
+            result.success(null)
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        localChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "bilibeats/local",
+        ).apply {
+            setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "pick" -> pickAudio(result)
+                    "takeOpened" -> {
+                        val uris = opened.toList()
+                        opened.clear()
+                        copyAll(uris, result)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+            // The engine outlives this activity (audio_service keeps it
+            // for playback): when it is already running, Dart's start-up
+            // does not come again to ask for the file that opened us.
+            if (opened.isNotEmpty()) invokeMethod("opened", null)
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "bilibeats/permissions",
@@ -52,6 +175,10 @@ class MainActivity : AudioServiceActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "openAudioFolder" -> result.success(openAudioFolder())
+                "notifyAudioFiles" -> {
+                    AudioFilesProvider.notifyChanged(this)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

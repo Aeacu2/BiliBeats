@@ -71,7 +71,10 @@ class BilibiliSdk {
     final body = await _request(rawUrl, cookies: cookies);
     if (body != null &&
         account != null &&
-        cookies?.contains(account.cookies) == true) {
+        cookies?.contains(account.cookies) == true &&
+        // Decoded here only when it can be the answer: callers decode the
+        // body again, and favourites or history pages are large.
+        body.contains('-101')) {
       try {
         final response = jsonDecode(body);
         if (response is Map && response['code'] == -101) {
@@ -97,7 +100,7 @@ class BilibiliSdk {
         req.headers.set('Cookie', cookies);
       }
       // A request given up on is aborted: left alone it keeps one of the
-      // four connections the pool allows this host.
+      // connections the pool allows this host.
       final res = await req.close().timeout(
         const Duration(seconds: 10),
         onTimeout: () {
@@ -145,21 +148,23 @@ class BilibiliSdk {
     return _avId.firstMatch(input)?.group(1);
   }
 
+  static final RegExp _shareLink = RegExp(
+      r'(?:https?://)?(?:www\.)?(?:b23\.tv|bili2233\.cn|acg\.tv)/[^\s]+',
+      caseSensitive: false);
+  static final RegExp _anyLink = RegExp(r'https?://[^\s]+');
+  static final RegExp _trailingPunctuation = RegExp(r'[\)\]】」』）.,;!]+$');
+
   /// Resolve Bilibili short links (b23.tv / bili2233.cn / acg.tv) that do not
   /// contain a BV directly. Returns the resolved URL or extracted id, or null.
   static Future<String?> _resolveShortLink(String input) async {
     // Find first URL in the input (share text often is `【标题】 https://b23.tv/xxx`)
     // Also handle bare domain without scheme: `b23.tv/xxx`
-    final urlMatch =
-        RegExp(r'(?:https?://)?(?:www\.)?(?:b23\.tv|bili2233\.cn|acg\.tv)/[^\s]+',
-                    caseSensitive: false)
-                .firstMatch(input) ??
-            RegExp(r'https?://[^\s]+').firstMatch(input);
+    final urlMatch = _shareLink.firstMatch(input) ?? _anyLink.firstMatch(input);
     if (urlMatch == null) return null;
     var urlStr = urlMatch.group(0)!;
     if (!urlStr.startsWith('http')) urlStr = 'https://$urlStr';
     // Strip trailing punctuation that is not part of URL
-    urlStr = urlStr.replaceAll(RegExp(r'[\)\]】」』）.,;!]+$'), '');
+    urlStr = urlStr.replaceAll(_trailingPunctuation, '');
     if (!urlStr.contains('b23.tv') &&
         !urlStr.contains('bili2233.cn') &&
         !urlStr.contains('acg.tv')) {
@@ -177,54 +182,46 @@ class BilibiliSdk {
         return null;
       }
       // The redirect itself names the video: read it rather than follow it
-      // to a whole page (and to wherever else it might point).
-      final first =
-          await _httpClient.getUrl(uri).timeout(const Duration(seconds: 5));
-      first.followRedirects = false;
-      first.headers.set('User-Agent', kBiliUserAgent);
-      first.headers.set('Referer', 'https://www.bilibili.com/');
-      final hop = await first.close().timeout(const Duration(seconds: 5));
-      final target = hop.headers.value(HttpHeaders.locationHeader);
-      await hop.listen((_) {}).cancel();
-      if (target != null) {
-        final bv = extractBvOrAvId(target);
-        if (bv != null) return bv;
-      }
-      if (hop.isRedirect && target != null) {
-        final next = uri.resolve(target);
-        if (next.scheme != 'https' ||
-            !(next.host == 'bilibili.com' ||
-                next.host.endsWith('.bilibili.com') ||
-                hosts
-                    .any((h) => next.host == h || next.host.endsWith('.$h')))) {
-          return null;
+      // to a whole page. Each hop is followed by hand, and only to the
+      // share hosts or bilibili.com: the link came from pasted text.
+      bool trusted(Uri u) =>
+          u.scheme == 'https' &&
+          (u.host == 'bilibili.com' ||
+              u.host.endsWith('.bilibili.com') ||
+              hosts.any((h) => u.host == h || u.host.endsWith('.$h')));
+      var at = uri;
+      for (var hop = 0; hop < 5; hop++) {
+        final req =
+            await _httpClient.getUrl(at).timeout(const Duration(seconds: 5));
+        req.followRedirects = false;
+        req.headers.set('User-Agent', kBiliUserAgent);
+        req.headers.set('Referer', 'https://www.bilibili.com/');
+        final res = await req.close().timeout(
+          const Duration(seconds: 5),
+          onTimeout: () {
+            req.abort();
+            throw TimeoutException('short link timed out');
+          },
+        );
+        final target = res.headers.value(HttpHeaders.locationHeader);
+        if (target != null) {
+          await res.listen((_) {}).cancel();
+          final id = extractBvOrAvId(target);
+          if (id != null) return id;
+          if (!res.isRedirect) return null;
+          final next = at.resolve(target);
+          if (!trusted(next)) return null;
+          at = next;
+          continue;
         }
-      }
-      final req =
-          await _httpClient.getUrl(uri).timeout(const Duration(seconds: 5));
-      req.headers.set('User-Agent', kBiliUserAgent);
-      req.headers.set('Referer', 'https://www.bilibili.com/');
-      // Let HttpClient follow redirects automatically; we inspect redirects
-      final res = await req.close().timeout(const Duration(seconds: 5));
-      // Drain body to reuse connection
-      final body = await res
-          .transform(utf8.decoder)
-          .join()
-          .timeout(const Duration(seconds: 5))
-          .catchError((_) => '');
-      // Check redirect history
-      if (res.redirects.isNotEmpty) {
-        final bv = extractBvOrAvId(res.redirects.last.location.toString());
-        if (bv != null) return bv;
-      }
-      // Some short links return 200 with HTML containing canonical BV
-      final bvInBody = _bvId.firstMatch(body);
-      if (bvInBody != null) return 'BV${bvInBody.group(1)}';
-      // Fallback: Location header even when not in redirects list
-      final loc = res.headers.value(HttpHeaders.locationHeader);
-      if (loc != null) {
-        final bv = extractBvOrAvId(loc);
-        if (bv != null) return bv;
+        // Some short links answer 200 with a page naming the video.
+        final body = await res
+            .transform(utf8.decoder)
+            .join()
+            .timeout(const Duration(seconds: 5))
+            .catchError((_) => '');
+        final bvInBody = _bvId.firstMatch(body);
+        return bvInBody == null ? null : 'BV${bvInBody.group(1)}';
       }
     } catch (e) {
       debugPrint('Resolve short link failed: $e');
@@ -295,8 +292,7 @@ class BilibiliSdk {
       final data = json['data'];
       final bvid = data['bvid'] as String;
       final title = data['title'] as String;
-      var pic = (data['pic'] as String? ?? '').replaceAll('http:', 'https:');
-      if (pic.startsWith('//')) pic = 'https:$pic';
+      final pic = secureUrl(data['pic'] as String? ?? '');
       final owner = data['owner'] ?? {};
       final uploader = owner['name'] as String? ?? '未知UP主';
       final totalDuration = data['duration'] as int? ?? 0;
@@ -387,7 +383,7 @@ class BilibiliSdk {
       musicTitle: music?.title ?? '',
       musicArtists: music?.artists ?? const [],
       cover: view is Map && view['pic'] is String
-          ? (view['pic'] as String).replaceFirst('http:', 'https:')
+          ? secureUrl(view['pic'] as String)
           : '',
       complete: view is Map && tags is List && music != null,
     );
@@ -438,8 +434,7 @@ class BilibiliSdk {
       Subtitles? found;
       if (chosen != null) {
         var url = '${chosen['subtitle_url']}';
-        if (url.startsWith('//')) url = 'https:$url';
-        url = url.replaceFirst('http:', 'https:');
+        url = secureUrl(url);
         final body = await _httpGet(url);
         if (body == null) return null;
         found = parseSubtitleBody(
@@ -570,7 +565,7 @@ class BilibiliSdk {
         cookies: cookies,
         mid: data['mid'] as int,
         name: '${data['uname'] ?? ''}',
-        face: '${data['face'] ?? ''}'.replaceFirst('http:', 'https:'),
+        face: secureUrl('${data['face'] ?? ''}'),
       );
     } catch (_) {
       return null;
@@ -696,7 +691,7 @@ class BilibiliSdk {
             title: unescapeHtml('${m['title'] ?? ''}'),
             rawTitle: unescapeHtml('${m['title'] ?? ''}'),
             uploader: m['upper'] is Map ? '${m['upper']['name'] ?? ''}' : '',
-            coverUrl: '${m['cover'] ?? ''}'.replaceFirst('http:', 'https:'),
+            coverUrl: secureUrl('${m['cover'] ?? ''}'),
             duration: m['duration'] is int ? m['duration'] as int : 0,
           ),
     ];
@@ -774,7 +769,7 @@ class BilibiliSdk {
             title: unescapeHtml('${item['title'] ?? ''}'),
             rawTitle: unescapeHtml('${item['title'] ?? ''}'),
             uploader: '${item['author_name'] ?? ''}',
-            coverUrl: '${item['cover'] ?? ''}'.replaceFirst('http:', 'https:'),
+            coverUrl: secureUrl('${item['cover'] ?? ''}'),
             duration: item['duration'] is int ? item['duration'] as int : 0,
           ),
     ];
@@ -967,7 +962,7 @@ class BilibiliSdk {
       final url = (durl.first as Map)['url'];
       if (url is String && url.isNotEmpty) {
         return {
-          'url': url.replaceAll('http:', 'https:'),
+          'url': secureUrl(url),
           'quality': '高品质 AAC/M4A',
           ...loudness,
         };
@@ -997,7 +992,7 @@ class BilibiliSdk {
         }
         if (url != null) {
           return {
-            'url': url.replaceAll('http:', 'https:'),
+            'url': secureUrl(url),
             'quality': '320k DASH',
             ...loudness,
           };
@@ -1174,8 +1169,7 @@ class BilibiliSdk {
         final rawTitle = item['title'] as String? ?? '';
         final cleanTitle = unescapeHtml(rawTitle.replaceAll(_htmlTagRegex, ''));
         final author = unescapeHtml(item['author'] as String? ?? 'UP主');
-        final pic =
-            (item['pic'] as String? ?? '').replaceAll('http:', 'https:');
+        final pic = secureUrl(item['pic'] as String? ?? '');
 
         int durationSec = 0;
         final durRaw = item['duration'];
@@ -1203,7 +1197,7 @@ class BilibiliSdk {
           title: cleanTitle,
           rawTitle: cleanTitle,
           uploader: author,
-          coverUrl: pic.startsWith('//') ? 'https:$pic' : pic,
+          coverUrl: pic,
           duration: durationSec,
         ));
       }
@@ -1245,7 +1239,7 @@ class BilibiliSdk {
       if (tid is int && tid != 0 && !songZones.contains(tid)) continue;
       final title = unescapeHtml('${item['title'] ?? ''}').trim();
       final owner = item['owner'];
-      final pic = '${item['pic'] ?? ''}'.replaceFirst('http:', 'https:');
+      final pic = secureUrl('${item['pic'] ?? ''}');
       final stat = item['stat'];
       out.add((
         track: Track(
@@ -1255,7 +1249,7 @@ class BilibiliSdk {
           title: title,
           rawTitle: title,
           uploader: owner is Map ? '${owner['name'] ?? ''}'.trim() : '',
-          coverUrl: pic.startsWith('//') ? 'https:$pic' : pic,
+          coverUrl: pic,
           duration: item['duration'] is int ? item['duration'] as int : 0,
         ),
         views: stat is Map && stat['view'] is int ? stat['view'] as int : 0,
@@ -1270,6 +1264,11 @@ class BilibiliSdk {
   @visibleForTesting
   static bool isRiskControlled(String? body) {
     if (body == null) return false;
+    // The usual answer, settled without decoding a large body that the
+    // caller decodes anyway.
+    if (body.startsWith('{"code":0,') && !body.contains('v_voucher')) {
+      return false;
+    }
     try {
       final decoded = jsonDecode(body);
       if (decoded is Map) {

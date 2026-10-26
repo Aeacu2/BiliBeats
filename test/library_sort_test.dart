@@ -68,8 +68,7 @@ void main() {
     expect(titles(), ['song d', 'song b', 'song a', 'song c']);
   });
 
-  test('a listen counts once half the song is heard, at most four minutes',
-      () {
+  test('a listen counts once half the song is heard, at most four minutes', () {
     expect(PlayStat.needed(const Duration(minutes: 3)),
         const Duration(seconds: 90));
     expect(PlayStat.needed(const Duration(minutes: 20)),

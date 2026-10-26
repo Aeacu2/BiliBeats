@@ -512,7 +512,8 @@ class _KaraokePainter extends CustomPainter {
           if (left <= 0) break;
           final w = (b.right - b.left).clamp(0.0, left);
           // A little taller than the line, so no stroke is cut.
-          clip.addRect(Rect.fromLTRB(b.left, b.top - 4, b.left + w, b.bottom + 4));
+          clip.addRect(
+              Rect.fromLTRB(b.left, b.top - 4, b.left + w, b.bottom + 4));
           left -= w;
         }
       }

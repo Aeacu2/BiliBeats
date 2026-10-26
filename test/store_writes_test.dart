@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/database_service.dart';
+import 'package:bilibeats/services/search_history.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
@@ -27,9 +28,9 @@ void main() {
         duration: 60,
       );
 
-  Future<List<dynamic>> playlistsOnDisk() async => jsonDecode(
-          await File('${docs.path}/bilibeat_playlists.json').readAsString())[
-      'data'] as List<dynamic>;
+  Future<List<dynamic>> playlistsOnDisk() async =>
+      jsonDecode(await File('${docs.path}/bilibeat_playlists2.json')
+          .readAsString())['data'] as List<dynamic>;
 
   test('a burst of changes all reach the file, each awaited one is on disk',
       () async {
@@ -57,13 +58,12 @@ void main() {
       DatabaseService.renamePlaylist(playlist.id, 'first'),
       DatabaseService.renamePlaylist(playlist.id, 'second'),
       DatabaseService.renamePlaylist(playlist.id, 'third'),
-      DatabaseService.addSearchHistory('another file meanwhile'),
+      SearchHistory.add('another file meanwhile'),
     ]);
     final saved =
         (await playlistsOnDisk()).firstWhere((p) => p['id'] == playlist.id);
     expect(saved['name'], 'third');
-    expect(await DatabaseService.getSearchHistory(),
-        contains('another file meanwhile'));
+    expect(await SearchHistory.get(), contains('another file meanwhile'));
     // Nothing left behind by the writes.
     final leftovers = docs
         .listSync()

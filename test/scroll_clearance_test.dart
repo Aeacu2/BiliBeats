@@ -53,8 +53,10 @@ void main() {
     playlist = Playlist(id: 'pl_test', name: '测试歌单', tracks: tracks);
     final plMap = playlist.toMap();
     plMap['tracks'] = tracks.map((t) => t.toMap()).toList();
-    File('${docs.path}/bilibeat_playlists.json').writeAsStringSync(
-        jsonEncode({'schema_version': 1, 'data': [plMap]}));
+    File('${docs.path}/bilibeat_playlists.json').writeAsStringSync(jsonEncode({
+      'schema_version': 1,
+      'data': [plMap]
+    }));
     await DatabaseService.getDownloadedTracks();
     await DatabaseService.getPlaylists();
   });
@@ -117,8 +119,7 @@ void main() {
   });
 
   testWidgets('playlist page list scrolls above docked player', (tester) async {
-    final handler = await boot(
-        tester, PlaylistPage(playlistId: playlist.id));
+    final handler = await boot(tester, PlaylistPage(playlistId: playlist.id));
     expect(find.byType(DockedPlayer), findsOneWidget);
 
     final scrollable = find
@@ -144,8 +145,7 @@ void main() {
   });
 
   testWidgets('artist page list scrolls above docked player', (tester) async {
-    final handler = await boot(
-        tester, const ArtistPage(name: 'singer_0'));
+    final handler = await boot(tester, const ArtistPage(name: 'singer_0'));
     expect(find.byType(DockedPlayer), findsOneWidget);
 
     final scrollable = find.byType(Scrollable).first;
@@ -157,10 +157,12 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final lastSongRect = tester.getRect(find.widgetWithText(SongTile, 'clear_song_9'));
+    final lastSongRect =
+        tester.getRect(find.widgetWithText(SongTile, 'clear_song_9'));
     final dockedRect = tester.getRect(find.byType(MiniPlayer));
     expect(lastSongRect.bottom, lessThanOrEqualTo(dockedRect.top),
-        reason: 'Last song in artist page must scroll above docked player card');
+        reason:
+            'Last song in artist page must scroll above docked player card');
 
     await finish(tester, handler);
   });

@@ -26,7 +26,6 @@ class PlayStat {
     final n = map['n'];
     final at = map['at'];
     if (n is! int || n <= 0 || at is! int) return null;
-    return PlayStat(
-        count: n, last: DateTime.fromMillisecondsSinceEpoch(at));
+    return PlayStat(count: n, last: DateTime.fromMillisecondsSinceEpoch(at));
   }
 }

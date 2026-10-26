@@ -1,5 +1,6 @@
 import '../models/track.dart';
 import 'lyrics_engine.dart';
+import 'accompaniment.dart';
 
 /// Who performs a track, as shown everywhere a song is listed.
 class TrackCredit {
@@ -14,8 +15,10 @@ class TrackCredit {
   /// A song that has been named carries its artist in [Track.uploader].
   /// For an untouched download that field is only the UP主, so the video
   /// title is consulted first (【周深】大鱼 → 周深), falling back to the UP主.
+  /// A backing track not yet named is credited to 伴奏 already.
   static String artistOf(Track track) {
     if (track.isNamed) return track.uploader.trim();
+    if (Accompaniment.isVideo(track)) return Accompaniment.artist;
     final key = '${track.rawTitle}\n${track.uploader}';
     final cached = _cache[key];
     if (cached != null) return cached;

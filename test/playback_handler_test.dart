@@ -239,8 +239,7 @@ void main() {
 
   test('a listen is counted once enough of the song is heard', () async {
     final t = await downloaded(['pb-count-a']);
-    final fake = FakeAudioPlayer()
-      ..durationValue = const Duration(seconds: 10);
+    final fake = FakeAudioPlayer()..durationValue = const Duration(seconds: 10);
     final handler = handlerFor(fake);
     await handler.playTrack(t[0], queue: t);
     Future<int> plays() async =>

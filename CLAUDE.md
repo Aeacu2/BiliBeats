@@ -15,6 +15,7 @@ Flutter is at `~/flutter/bin` and is not on PATH in non-interactive shells.
 ```bash
 export PATH="$HOME/flutter/bin:$PATH"
 flutter analyze                 # must stay at "No issues found"
+dart format lib test            # CI fails on unformatted code
 flutter test                    # ~1.5 min; tests tagged `live` query NetEase/Bilibili for real
 flutter test test/render_screens.dart test/render_account_screens.dart --update-goldens   # PNGs in build/screens/
 tool/build_release.sh [ios|all] # obfuscated release; needs JDK 21+
@@ -36,7 +37,8 @@ lib/
   widgets/                  song_tile (the one song row), mini_player, sheets, lyrics_view…
   state/                    LibraryController, LyricsController, search/recommendation controllers
   services/                 audio_player_handler (playback), audio_download_service,
-                            download_manager, database_service (JSON files), bilibili_sdk,
+                            download_manager, store_files (JSON files), database_service
+                            (the library), prefs, search_history, local_songs, bilibili_sdk,
                             lyrics_engine (title parsing, song matching, lyric providers),
                             song_reader (the on-device model), song_judge (rules + model),
                             lyric_library (Kugou and QQ Music: search, lyrics),
@@ -58,11 +60,18 @@ docs/archive/               old review notes and a superseded feature list — h
   "the current song" separately. Only downloaded tracks enter the queue; a track that
   needs downloading is fetched first while the current one keeps playing
   (`handler.preparing`).
-- **Persistence is whole-file JSON** in the documents directory, written through
-  `DatabaseService._writeJsonAtomically` (single write lock, temp file + rename;
-  writes still waiting for one file are merged and save the state of the moment
-  they begin, so pass a snapshot of the whole file).
-  Screens do not read `DatabaseService` directly; they listen to `LibraryController`.
+- **Persistence is whole-file JSON** in the documents directory, one file per store,
+  read and written only through `StoreFiles` (versioned envelope; one write queue,
+  temp file + rename; an unreadable file is set aside, never overwritten; a write
+  still waiting is replaced by a newer one for the same file, so pass the whole file).
+  `DatabaseService` is the library (downloads, history, play counts, playlists);
+  `Prefs`, `SearchHistory`, `LyricsStore`, `TrimStore`, `BiliAccountStore` are their
+  own stores. Screens do not read `DatabaseService` directly; they listen to
+  `LibraryController`. Playlists live in `bilibeat_playlists2.json`, a song written as
+  its id where it is exactly the download list's copy, else in full (a deleted
+  download is rewritten in full into its playlists *before* the list drops it). The
+  older `bilibeat_playlists.json` is never written: it is what an older build reads,
+  and if one changes it, it is newer and moved over again.
 - **`Track` identity is `bvid_p<page>`**; equality is by id, so use `TrackNotifier`
   (not `ValueNotifier<Track>`) where an edited copy must notify.
 - **Song vs. video.** `rawTitle` is the video title and never changes. `title`/`uploader`
@@ -106,6 +115,13 @@ docs/archive/               old review notes and a superseded feature list — h
   `test/fixtures/zhoushen_videos.json` is 126 surveyed videos with their tags, recognised
   music and hand-checked answers, replayed by `recognition_live_test.dart`. Check a
   matching change against it before believing it.
+- **Backing tracks (伴奏).** `Accompaniment` reads a video title (伴奏, 消音, 去人声,
+  off vocal… but not 无伴奏/去伴奏/消伴奏, which are the voice alone). A backing track
+  is credited to the artist 伴奏 (`TrackCredit.artistOf` already, before naming; the
+  matcher names it the song, credited 伴奏), so it gathers under 伴奏 among the artists
+  and stays out of the singers' lists. 伴奏 is not a singer: lyrics read the singer
+  from the video title instead, and it is neither taught to the title parser nor a
+  recommendation artist. The listener can edit the credit away like any other.
 - **Downloads** retry for about three minutes (`AudioDownloadService.retryDelays`,
   fresh link each time, resuming the `.part`); tests run with no retries
   (`test/flutter_test_config.dart`). Naming starts when a download does
@@ -152,6 +168,14 @@ docs/archive/               old review notes and a superseded feature list — h
   (`TrackNaming._heardIn`), shifting automatic lyrics onto the video's clock, lyrics
   of last resort (source `bilibili`), and a suggested trim. The thresholds in
   `SubtitleMatch` are guesses until `tool/song_model/subtitles.py` has measured them.
+- **Songs from the phone.** 设置 → 导入本地歌曲 (Android), or any audio file opened
+  with / shared to BiliBeats (`MainActivity` is `singleTask` so it reaches the running
+  player). `LocalAudio.kt` copies the file into the audio folder as `incoming_*.part`
+  and reads its tags; `LocalSongs` keeps it as a download named `local_<sha1>`
+  (`Track.isLocal`, empty `bvid`), named from its tags or `歌手 - 歌名` file name and
+  never re-matched. Its file is its only copy: nothing can download it again, it is
+  not exported by 导出资料库, and it seeds no recommendations. It is stored as
+  `audio_<id>.m4a` whatever its format — ExoPlayer and the Files provider go by content.
 - **Audio files.** On Android, `AudioFilesProvider` (Kotlin) shows the downloaded
   songs read-only in the system Files app as "BiliBeats", named after the songs;
   设置 → 音频文件 opens it. The files themselves stay in private storage.

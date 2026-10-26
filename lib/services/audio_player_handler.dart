@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -16,9 +17,11 @@ import 'audio_download_service.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
 import 'download_manager.dart';
+import 'store_files.dart';
 import 'track_credit.dart';
 import 'track_naming.dart';
 import 'trim_store.dart';
+import 'prefs.dart';
 
 export '../models/playback_state.dart';
 
@@ -460,7 +463,14 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     final playing = _player.playing;
     final state = _player.sequenceState;
     final current = state.currentIndex;
-    final queueIndex = current == null ? null : _order(state).indexOf(current);
+    // Runs on every playback event: in order, the play position is the index.
+    final queueIndex = current == null
+        ? null
+        : state.shuffleModeEnabled
+            ? state.shuffleIndices.indexOf(current)
+            : current < state.sequence.length
+                ? current
+                : -1;
 
     // An unplayable file leaves the player idle for a moment while it moves
     // on. Reported as idle, that moment makes the system end the media
@@ -612,11 +622,11 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     if (normalizeVolume.value == on) return;
     normalizeVolume.value = on;
     _applyLoudness(nowPlaying.value);
-    await DatabaseService.setPref('normalizeVolume', on);
+    await Prefs.set('normalizeVolume', on);
   }
 
   Future<void> _loadNormalizationPref() async {
-    final saved = await DatabaseService.getPref('normalizeVolume');
+    final saved = await Prefs.get('normalizeVolume');
     if (saved == false) {
       normalizeVolume.value = false;
       _applyLoudness(nowPlaying.value);
@@ -681,10 +691,12 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
   }) async {
     if (tracks.isEmpty) return false;
 
+    // The folder is looked up once, not once per song in the queue.
+    final folder = await AudioDownloadService.audioFolder();
     final sources = <ja.AudioSource>[
       for (final track in tracks)
         ja.AudioSource.file(
-          await AudioDownloadService.audioPathForId(track.id),
+          AudioDownloadService.audioPathIn(folder, track.id),
           tag: track,
         ),
     ];
@@ -877,7 +889,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     if (_player.audioSources.isNotEmpty) return;
 
     final token = _selection;
-    final session = await DatabaseService.loadPlaybackSession();
+    final session = await _savedSession();
     if (session == null) return;
 
     final library = await _library();
@@ -905,6 +917,20 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
+  static const String _sessionFile = 'bilibeat_session.json';
+
+  /// The session the last launch left; null when there is none it can read.
+  static Future<PlaybackSession?> _savedSession() async {
+    try {
+      final text = await StoreFiles.readText(_sessionFile);
+      if (text == null) return null;
+      return PlaybackSession.fromMap(StoreFiles.unwrap(jsonDecode(text)));
+    } catch (e) {
+      debugPrint('Saved session not restored: $e');
+      return null;
+    }
+  }
+
   /// Persists the current session now.
   Future<void> saveSession() async {
     _sessionSaveTimer?.cancel();
@@ -913,16 +939,18 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     // has not restored yet.
     if (sequence.isEmpty) return;
 
-    await DatabaseService.savePlaybackSession(PlaybackSession(
-      trackIds: [
-        for (final source in sequence)
-          if (_trackOf(source) != null) _trackOf(source)!.id,
-      ],
-      currentId: nowPlaying.value?.id,
-      position: _player.position,
-      shuffle: _player.shuffleModeEnabled,
-      loopMode: _loopMode,
-    ));
+    await StoreFiles.save(
+        _sessionFile,
+        PlaybackSession(
+          trackIds: [
+            for (final source in sequence)
+              if (_trackOf(source) != null) _trackOf(source)!.id,
+          ],
+          currentId: nowPlaying.value?.id,
+          position: _player.position,
+          shuffle: _player.shuffleModeEnabled,
+          loopMode: _loopMode,
+        ).toMap());
   }
 
   void _scheduleSessionSave() {

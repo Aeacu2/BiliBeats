@@ -80,15 +80,15 @@ class SongTile extends StatelessWidget {
                   ),
                   const SizedBox(width: 14),
                   Expanded(
-                    child: ListenableBuilder(
-                      listenable: Listenable.merge(
-                          [handler.nowPlaying, services.library]),
-                      builder: (context, _) {
-                        final current =
-                            handler.nowPlaying.value?.id == track.id;
-                        final downloaded =
-                            services.library.isDownloaded(track.id);
-                        final artist = LibraryController.artistOf(track);
+                    child: _Selected(
+                      listenables: [handler.nowPlaying, services.library],
+                      select: () => (
+                        current: handler.nowPlaying.value?.id == track.id,
+                        downloaded: services.library.isDownloaded(track.id),
+                        artist: LibraryController.artistOf(track),
+                      ),
+                      builder: (context, state) {
+                        final (:current, :downloaded, :artist) = state;
                         final second = detail ??
                             (!downloaded && track.duration > 0
                                 ? '$artist · ${formatDuration(Duration(seconds: track.duration))}'
@@ -123,12 +123,12 @@ class SongTile extends StatelessWidget {
                     ),
                   ),
                   trailing ??
-                      ListenableBuilder(
-                        listenable: services.library,
-                        builder: (context, _) =>
-                            services.library.isDownloaded(track.id)
-                                ? _MoreButton(track: track, queue: queue)
-                                : TrackDownloadButton(track: track, size: 22),
+                      _Selected(
+                        listenables: [services.library],
+                        select: () => services.library.isDownloaded(track.id),
+                        builder: (context, downloaded) => downloaded
+                            ? _MoreButton(track: track, queue: queue)
+                            : TrackDownloadButton(track: track, size: 22),
                       ),
                 ],
               ),
@@ -163,4 +163,64 @@ class _MoreButton extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Rebuilds [builder] only when what [select] reads from [listenables]
+/// changes. A row listens to the whole library and to the player, yet
+/// almost every change there (another song starting, a playlist edit)
+/// leaves the row as it was.
+class _Selected<T> extends StatefulWidget {
+  final List<Listenable> listenables;
+  final T Function() select;
+  final Widget Function(BuildContext context, T value) builder;
+
+  const _Selected({
+    required this.listenables,
+    required this.select,
+    required this.builder,
+  });
+
+  @override
+  State<_Selected<T>> createState() => _SelectedState<T>();
+}
+
+class _SelectedState<T> extends State<_Selected<T>> {
+  late T _value = widget.select();
+
+  @override
+  void initState() {
+    super.initState();
+    for (final l in widget.listenables) {
+      l.addListener(_changed);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _Selected<T> old) {
+    super.didUpdateWidget(old);
+    for (final l in old.listenables) {
+      l.removeListener(_changed);
+    }
+    for (final l in widget.listenables) {
+      l.addListener(_changed);
+    }
+    // A recycled row may now show another song.
+    _value = widget.select();
+  }
+
+  @override
+  void dispose() {
+    for (final l in widget.listenables) {
+      l.removeListener(_changed);
+    }
+    super.dispose();
+  }
+
+  void _changed() {
+    final next = widget.select();
+    if (next != _value) setState(() => _value = next);
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _value);
 }

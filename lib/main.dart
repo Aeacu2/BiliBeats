@@ -8,9 +8,12 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'app/app_services.dart';
 import 'app/app_shell.dart';
+import 'services/audio_folder.dart';
 import 'services/audio_player_handler.dart';
 import 'services/background_protection.dart';
+import 'services/error_log.dart';
 import 'services/library_transfer.dart';
+import 'services/local_songs.dart';
 import 'services/track_naming.dart';
 import 'theme/app_theme.dart';
 
@@ -20,6 +23,8 @@ Future<void> main() async {
   // debugPrint is not compiled out of release builds: titles and file paths
   // would go to the system log, readable by anything with log access.
   if (kReleaseMode) debugPrint = (String? message, {int? wrapWidth}) {};
+  // What nothing caught is kept on the device instead (设置 → 复制错误日志).
+  ErrorLog.install();
 
   // Covers are decoded at display size, so many small entries fit in a
   // modest budget. A large cache is what gets a backgrounded app killed
@@ -64,8 +69,13 @@ Future<void> main() async {
   unawaited(TrackNaming.init(handler));
   // Bring back the last queue, song and position (paused), so a process
   // killed in the background resumes exactly where it was.
-  unawaited(handler.restoreSession());
+  final restored = handler.restoreSession();
+  unawaited(restored);
+  // A file opened with BiliBeats plays once the last session is back, not
+  // to be replaced by it.
+  LocalSongs.followOpened(handler, after: restored);
   unawaited(LibraryTransfer.resume());
+  AudioFolder.followLibrary();
 
   // Android 13+ gates notifications behind a runtime grant on stricter OEM
   // builds. Fire-and-forget.

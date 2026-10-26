@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:bilibeats/services/bili_http.dart';
 import 'package:bilibeats/services/bilibili_sdk.dart';
 import 'package:bilibeats/services/wbi_signer.dart';
 import 'package:crypto/crypto.dart';
@@ -10,6 +11,17 @@ import 'audio_test_harness.dart';
 /// How requests to Bilibili are formed and how its answers are read —
 /// offline: the signer falls back to its built-in keys.
 void main() {
+  test('only the scheme of an address is made secure', () {
+    expect(
+        secureUrl('http://i0.hdslb.com/a.jpg'), 'https://i0.hdslb.com/a.jpg');
+    expect(secureUrl('//i0.hdslb.com/a.jpg'), 'https://i0.hdslb.com/a.jpg');
+    expect(secureUrl('https://cdn/x?from=http://y'),
+        'https://cdn/x?from=http://y');
+    expect(
+        secureUrl('http://cdn/x?from=http://y'), 'https://cdn/x?from=http://y');
+    expect(secureUrl(''), '');
+  });
+
   setUpAll(useHermeticHttp);
 
   group('video ids in a search', () {

@@ -6,6 +6,7 @@ import '../models/lyrics.dart';
 import '../models/subtitles.dart';
 import '../models/track.dart';
 import '../models/video_hints.dart';
+import 'accompaniment.dart';
 import 'audio_player_handler.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
@@ -14,6 +15,7 @@ import 'song_judge.dart';
 import 'song_reader.dart';
 import 'song_reader_service.dart';
 import 'subtitle_match.dart';
+import 'prefs.dart';
 
 /// Matches downloads to the songs they are (设置 → 自动匹配歌曲信息).
 ///
@@ -76,7 +78,7 @@ class TrackNaming {
   static Future<void> retryUnnamed() async {
     _attempted.clear();
     _early.clear();
-    await DatabaseService.setPref(_gaveUpPref, null);
+    await Prefs.set(_gaveUpPref, null);
     final track = _handler?.nowPlaying.value;
     if (track != null) autoName(track);
   }
@@ -94,7 +96,8 @@ class TrackNaming {
   static Future<void> init(BiliBeatsAudioHandler handler) async {
     _handler = handler;
     readWith ??= SongReaderService.read;
-    enabled = await DatabaseService.getPref('autoName') != false;
+    enabled = await Prefs.get('autoName') != false;
+    unawaited(markAccompaniments());
     // Older downloads are named the first time they play, one at a time —
     // never as a sweep of the whole library.
     // Deleted and downloaded again is a new download: name it afresh.
@@ -103,7 +106,7 @@ class TrackNaming {
       final map = await _gaveUp();
       if (ids.any(map.containsKey)) {
         ids.forEach(map.remove);
-        await DatabaseService.setPref(_gaveUpPref, map);
+        await Prefs.set(_gaveUpPref, map);
       }
     });
     handler.nowPlaying.addListener(() {
@@ -194,7 +197,7 @@ class TrackNaming {
 
   static Future<void> setEnabled(bool on) async {
     enabled = on;
-    await DatabaseService.setPref('autoName', on);
+    await Prefs.set('autoName', on);
   }
 
   /// What the music catalogues say [track] is, or null when they do not
@@ -316,7 +319,7 @@ class TrackNaming {
   static const String _gaveUpPref = 'unnamedBy';
 
   static Future<Map<String, dynamic>> _gaveUp() async {
-    final saved = await DatabaseService.getPref(_gaveUpPref);
+    final saved = await Prefs.get(_gaveUpPref);
     return saved is Map ? Map<String, dynamic>.from(saved) : {};
   }
 
@@ -330,13 +333,30 @@ class TrackNaming {
     if (map[id] == matcher) return;
     if (map.length >= 2000) map.remove(map.keys.first);
     map[id] = matcher;
-    await DatabaseService.setPref(_gaveUpPref, map);
+    await Prefs.set(_gaveUpPref, map);
   }
 
-  static Future<Track?> _stored(String id) async =>
-      (await DatabaseService.getDownloadedTracks())
-          .where((t) => t.id == id)
-          .firstOrNull;
+  /// Backing tracks this matcher named before they were credited to 伴奏
+  /// are credited now: no lookup, just the credit. The listener's own names
+  /// are theirs and stay as they are.
+  @visibleForTesting
+  static Future<void> markAccompaniments() async {
+    for (final track in await DatabaseService.getDownloadedTracks()) {
+      final automatic = track.isNamed && (track.matcher ?? 0) != 0;
+      if (!automatic ||
+          !Accompaniment.isVideo(track) ||
+          Accompaniment.isCredit(track.uploader)) {
+        continue;
+      }
+      await _save(track.copyWith(
+        title: Accompaniment.songOf(track.title),
+        uploader: Accompaniment.artist,
+      ));
+    }
+  }
+
+  static Future<Track?> _stored(String id) =>
+      DatabaseService.downloadedTrack(id);
 
   static Future<void> _save(Track track) async {
     await DatabaseService.updateTrackMetadata(track);
@@ -423,11 +443,22 @@ class TrackNaming {
       return;
     }
 
+    // A backing track is the song's name, credited to 伴奏.
+    final backing = Accompaniment.isVideo(stored);
+    final title = found == null
+        ? null
+        : backing
+            ? Accompaniment.songOf(found.title)
+            : found.title;
+    final artist = found == null
+        ? null
+        : backing
+            ? Accompaniment.artist
+            : found.artist;
     // Nothing better to offer: a named song keeps its name, and is not
     // asked about again until the matcher improves.
-    final same = found != null &&
-        found.title == stored.title &&
-        found.artist == stored.uploader;
+    final same =
+        found != null && title == stored.title && artist == stored.uploader;
     final noBetter =
         found == null || same || (legacy && found.artist.trim() == uploader);
     if (noBetter) {
@@ -443,8 +474,8 @@ class TrackNaming {
     }
 
     await _save(stored.copyWith(
-      title: found.title,
-      uploader: found.artist,
+      title: title,
+      uploader: artist,
       // The original release's artwork replaces a video thumbnail.
       // …and when a re-check finds it is not that recording after all,
       // the release artwork an earlier matcher gave it goes back.

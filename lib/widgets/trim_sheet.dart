@@ -16,6 +16,7 @@ import '../theme/haptics.dart';
 import '../utils/format.dart';
 import '../utils/snack.dart';
 import 'sheet.dart';
+import '../services/accompaniment.dart';
 
 /// 裁剪: where the song starts and ends inside its video.
 ///
@@ -80,7 +81,10 @@ class _TrimSheetState extends State<TrimSheet> {
     if (subtitles == null || subtitles.isEmpty || !mounted) return;
     final recording = await LyricsEngine.recordingSeconds(
       lyrics.title ?? track.title,
-      artist: lyrics.artist ?? (track.isNamed ? track.uploader : null),
+      artist: lyrics.artist ??
+          (track.isNamed && !Accompaniment.isCredit(track.uploader)
+              ? track.uploader
+              : null),
       near: _length.inSeconds,
     );
     if (!mounted) return;

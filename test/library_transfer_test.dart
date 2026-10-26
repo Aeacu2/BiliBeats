@@ -1,4 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:bilibeats/models/playlist.dart';
 import 'package:bilibeats/models/track.dart';
@@ -73,6 +77,14 @@ void main() {
     expect(back.tracks.single.coverUrl, isEmpty);
   });
 
+  test('text that expands without end is not read', () {
+    // A sealed, well-formed paste of 70 MB of spaces: a few kB of text.
+    final body = base64Url.encode(gzip.encode(List.filled(70 << 20, 0x20)));
+    final seal = sha256.convert(ascii.encode(body)).toString().substring(0, 8);
+    expect(
+        LibraryTransfer.decode('${LibraryTransfer.prefix}$body.$seal'), isNull);
+  });
+
   test('text that is not a library is not one', () {
     expect(LibraryTransfer.decode(''), isNull);
     expect(LibraryTransfer.decode('https://b23.tv/abc'), isNull);
@@ -135,6 +147,23 @@ void main() {
             .tracks
             .map((t) => t.id),
         contains(incoming[0].id));
+  });
+
+  test('two incoming playlists of one name become one here', () async {
+    LibraryTransfer.downloadWith = (_) async => true;
+    final a = song('J'), b = song('K');
+    await LibraryTransfer.import(LibrarySnapshot(
+      tracks: [a, b],
+      playlists: [
+        (name: '通勤', favorites: false, tracks: [a]),
+        (name: '通勤 ', favorites: false, tracks: [b]),
+      ],
+    ));
+    final lists = await DatabaseService.getPlaylists();
+    final same = lists.where((p) => p.name == '通勤');
+    expect(same, hasLength(1));
+    expect(same.single.tracks.map((t) => t.id).toSet(), {a.id, b.id});
+    await until(() => LibraryTransfer.remaining.value == 0);
   });
 
   test('an unfinished import carries on after a restart', () async {

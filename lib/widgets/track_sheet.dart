@@ -255,7 +255,8 @@ class _TrackSheetState extends State<TrackSheet> {
             if (downloaded)
               SheetAction(
                 icon: Icons.delete_outline_rounded,
-                label: '删除下载',
+                // An imported song's file is its only copy.
+                label: track.isLocal ? '删除歌曲文件' : '删除下载',
                 color: AppColors.danger,
                 onTap: _deleteDownload,
               ),
@@ -282,6 +283,9 @@ class _TrackSheetState extends State<TrackSheet> {
         label: '播放',
         onPressed: _play,
       );
+    }
+    if (track.isLocal) {
+      return const PrimaryButton(label: '文件已删除', onPressed: null);
     }
     final task = DownloadManager.instance.taskFor(track.id);
     if (task != null) {

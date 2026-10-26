@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -130,6 +131,12 @@ class AudioDownloadService {
   /// callers pair it with [isDownloadedById] or the downloaded library.
   static Future<String> audioPathForId(String id) async =>
       _audioPath(await _dir(), id);
+
+  /// Where downloaded audio lives.
+  static Future<String> audioFolder() => _dir();
+
+  /// [audioPathForId] in the [audioFolder] already looked up.
+  static String audioPathIn(String dir, String id) => _audioPath(dir, id);
   static String _readyPath(String dir, String key) => '$dir/audio_$key.ready';
   static String _metaPath(String dir, String key) => '$dir/audio_$key.json';
 
@@ -138,7 +145,7 @@ class AudioDownloadService {
     await tmp.writeAsString(content, flush: true);
     final target = File(path);
     // Only Windows needs the target gone before a rename (see
-    // DatabaseService._writeJsonAtomically).
+    // StoreFiles._writeAtomically).
     if (Platform.isWindows && await target.exists()) {
       try {
         await target.delete();
@@ -174,6 +181,17 @@ class AudioDownloadService {
     } catch (e) {
       debugPrint('saveTrackMetadata error: $e');
     }
+  }
+
+  /// Keeps [copy] (a file already in the [audioFolder]) as [track]'s audio:
+  /// a song imported from the phone, from then on held like a download.
+  static Future<void> adopt(Track track, File copy) async {
+    final dir = await _dir();
+    final key = _key(track);
+    await copy.rename(_audioPath(dir, key));
+    await saveTrackMetadata(track, force: true);
+    await File(_readyPath(dir, key)).create(recursive: true);
+    _downloadedMemo[key] = true;
   }
 
   /// Memoised answers for [isDownloadedById].
@@ -402,6 +420,11 @@ class AudioDownloadService {
   }
 
   static Future<String> _download(Track track, String dir, String path) async {
+    if (track.isLocal) {
+      const reason = '本地文件已删除';
+      _emit(DownloadProgress(track.id, 0, null, false, reason));
+      throw const VideoUnavailable(reason);
+    }
     var url = track.audioUrl;
     var isPart = false;
     if (url == null || url.isEmpty) {
@@ -667,6 +690,9 @@ class AudioDownloadService {
     // a failed write (a full disk) and its flush() then never completes.
     final file = await part.open(mode: mode);
     var lastEmitted = received;
+    // TLS hands over a record (~16 KiB) at a time: gathered here, the file
+    // sees a few hundred writes for a song instead of a few thousand.
+    final pending = BytesBuilder(copy: false);
     try {
       // Apply read timeout per chunk: stall >30s is failure. res itself has
       // no idle timeout once headers arrived; chunk stream can hang forever.
@@ -677,7 +703,10 @@ class AudioDownloadService {
       );
       await for (final chunk in timeoutRes) {
         if (_cancelled.contains(trackId)) throw const DownloadCancelled();
-        await file.writeFrom(chunk);
+        pending.add(chunk);
+        if (pending.length >= _writeBatchBytes) {
+          await file.writeFrom(pending.takeBytes());
+        }
         received += chunk.length;
         // Throttle progress events to ~every 64 KiB to avoid stream spam.
         if (received - lastEmitted >= 65536) {
@@ -685,9 +714,14 @@ class AudioDownloadService {
           _emit(DownloadProgress(trackId, received, total, false, null));
         }
       }
+      if (pending.isNotEmpty) await file.writeFrom(pending.takeBytes());
       // On disk before it is called downloaded.
       await file.flush();
     } finally {
+      // What arrived before a dropped connection is kept for the resume.
+      try {
+        if (pending.isNotEmpty) await file.writeFrom(pending.takeBytes());
+      } catch (_) {}
       try {
         await file.close();
       } catch (_) {}
@@ -705,6 +739,8 @@ class AudioDownloadService {
     }
     return (received: received, total: total);
   }
+
+  static const int _writeBatchBytes = 256 * 1024;
 
   static void _emit(DownloadProgress p) {
     if (!_progressController.isClosed) _progressController.add(p);

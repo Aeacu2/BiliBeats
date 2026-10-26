@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.provider.DocumentsContract.Root
 import android.provider.DocumentsProvider
@@ -15,7 +16,7 @@ import java.io.FileNotFoundException
 
 /// The downloaded songs, shown in the system Files app (and any app that
 /// opens documents) as a "BiliBeats" location: one read-only folder of
-/// `.m4a` files named after the songs. Copy, share or open them from there.
+/// audio files named after the songs. Copy, share or open them from there.
 ///
 /// The audio itself stays where the app keeps it (`app_flutter/
 /// bilibeat_audio/audio_<id>.m4a`, private storage no file manager can
@@ -29,6 +30,15 @@ class AudioFilesProvider : DocumentsProvider() {
         private const val FILE_PREFIX = "audio/"
 
         fun authority(context: Context) = "${context.packageName}.audiofiles"
+
+        /// Tells a Files app showing the folder to list it again: a song
+        /// was downloaded, deleted or renamed.
+        fun notifyChanged(context: Context) {
+            context.contentResolver.notifyChange(
+                DocumentsContract.buildChildDocumentsUri(authority(context), FOLDER_ID),
+                null,
+            )
+        }
 
         private val ROOT_COLUMNS = arrayOf(
             Root.COLUMN_ROOT_ID,
@@ -60,13 +70,15 @@ class AudioFilesProvider : DocumentsProvider() {
     private fun songs(): Map<String, File> {
         val dir = audioDir()
         val files = dir.listFiles() ?: return emptyMap()
+        // One listing answers every "is it whole", not a stat per song.
+        val names = files.mapTo(HashSet()) { it.name }
         val out = LinkedHashMap<String, File>()
         for (file in files.sortedByDescending { it.lastModified() }) {
             val name = file.name
             if (!name.startsWith("audio_") || !name.endsWith(".m4a")) continue
             val id = name.removePrefix("audio_").removeSuffix(".m4a")
             if (!SAFE_ID.matches(id)) continue
-            if (!File(dir, "audio_$id.ready").exists()) continue
+            if ("audio_$id.ready" !in names) continue
             out[id] = file
         }
         return out
@@ -115,20 +127,51 @@ class AudioFilesProvider : DocumentsProvider() {
         return names
     }
 
+    /// What kind of audio each song is, by id: a download is always
+    /// MPEG-4, a song imported from the phone whatever it was (it is kept
+    /// under the same `.m4a` name; players go by the content).
+    private val kinds = HashMap<String, Pair<String, String>>()
+
+    @Synchronized
+    private fun kindOf(id: String, file: File): Pair<String, String> {
+        kinds[id]?.let { return it }
+        val head = ByteArray(12)
+        val read = try {
+            file.inputStream().use { it.read(head) }
+        } catch (_: Exception) {
+            -1
+        }
+        fun at(offset: Int, text: String) = read >= offset + text.length &&
+            String(head, offset, text.length, Charsets.ISO_8859_1) == text
+        val kind = when {
+            at(4, "ftyp") -> "m4a" to "audio/mp4"
+            at(0, "ID3") ||
+                (read >= 2 && head[0] == 0xFF.toByte() &&
+                    (head[1].toInt() and 0xE0) == 0xE0) -> "mp3" to "audio/mpeg"
+            at(0, "fLaC") -> "flac" to "audio/flac"
+            at(0, "OggS") -> "ogg" to "audio/ogg"
+            at(0, "RIFF") && at(8, "WAVE") -> "wav" to "audio/wav"
+            else -> "m4a" to "audio/mp4"
+        }
+        kinds[id] = kind
+        return kind
+    }
+
     /// File names, unique within the folder.
-    private fun displayNames(ids: Collection<String>): Map<String, String> {
+    private fun displayNames(songs: Map<String, File>): Map<String, String> {
         val names = names()
         val taken = HashSet<String>()
         val out = HashMap<String, String>()
-        for (id in ids) {
+        for ((id, file) in songs) {
+            val ext = kindOf(id, file).first
             val base = (names[id] ?: id)
                 .replace(UNSAFE_NAME_CHARS, "_")
                 .take(120)
                 .ifBlank { id }
-            var name = "$base.m4a"
+            var name = "$base.$ext"
             var n = 2
             while (!taken.add(name.lowercase())) {
-                name = "$base ($n).m4a"
+                name = "$base ($n).$ext"
                 n++
             }
             out[id] = name
@@ -170,7 +213,7 @@ class AudioFilesProvider : DocumentsProvider() {
         cursor.newRow()
             .add(Document.COLUMN_DOCUMENT_ID, FILE_PREFIX + id)
             .add(Document.COLUMN_DISPLAY_NAME, name)
-            .add(Document.COLUMN_MIME_TYPE, "audio/mp4")
+            .add(Document.COLUMN_MIME_TYPE, kindOf(id, file).second)
             .add(Document.COLUMN_SIZE, file.length())
             .add(Document.COLUMN_LAST_MODIFIED, file.lastModified())
             .add(Document.COLUMN_FLAGS, 0)
@@ -184,7 +227,7 @@ class AudioFilesProvider : DocumentsProvider() {
             val file = fileOf(documentId)
             val id = documentId.removePrefix(FILE_PREFIX)
             // Named as in the folder listing, duplicates included.
-            val name = displayNames(songs().keys)[id] ?: "$id.m4a"
+            val name = displayNames(songs())[id] ?: "$id.m4a"
             addSong(cursor, id, file, name)
         }
         return cursor
@@ -198,11 +241,11 @@ class AudioFilesProvider : DocumentsProvider() {
         val cursor = MatrixCursor(projection ?: DOCUMENT_COLUMNS)
         if (parentDocumentId != FOLDER_ID) return cursor
         val songs = songs()
-        val names = displayNames(songs.keys)
+        val names = displayNames(songs)
         for ((id, file) in songs) addSong(cursor, id, file, names[id] ?: "$id.m4a")
         cursor.setNotificationUri(
             context!!.contentResolver,
-            android.provider.DocumentsContract.buildChildDocumentsUri(
+            DocumentsContract.buildChildDocumentsUri(
                 authority(context!!), FOLDER_ID,
             ),
         )

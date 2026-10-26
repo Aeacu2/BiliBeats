@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
-/// One playable Bilibili audio part.
+/// One playable Bilibili audio part, or a song imported from the phone
+/// ([isLocal]).
 ///
 /// Deliberately narrow: fields that were written but never read (uploaderFace,
 /// quality, localFilePath, addedAt, and an `isDownloaded` flag that duplicated
@@ -69,6 +70,13 @@ class Track {
     this.partName,
   });
 
+  /// Ids of songs imported from the phone's own storage start with this.
+  /// Such a song has no video behind it ([bvid] is empty) and, once its
+  /// file is deleted, nothing to download it from again.
+  static const String localPrefix = 'local_';
+
+  bool get isLocal => id.startsWith(localPrefix);
+
   static final RegExp _partSuffix = RegExp(r'^ - P\d+: (.+)$');
 
   /// For one part of a multi-part video, that part's own name (often the
@@ -98,7 +106,8 @@ class Track {
       'uploader': uploader,
       'coverUrl': coverUrl,
       'duration': duration,
-      'audioUrl': audioUrl,
+      // Not [audioUrl]: a signed link that expires within the hour. One
+      // read back days later sent every download retry to a dead address.
       if (loudness != null) 'loudness': loudness,
       if (named) 'named': true,
       if (rawUploader != null) 'rawUploader': rawUploader,
@@ -155,9 +164,6 @@ class Track {
     } else {
       duration = 0;
     }
-    final rawAudioUrl = map['audioUrl'];
-    final audioUrl =
-        rawAudioUrl is String ? rawAudioUrl : rawAudioUrl?.toString();
     final rawLoudness = map['loudness'];
     final rawOwner = map['rawUploader'];
     final rawMatcher = map['matcher'];
@@ -171,7 +177,6 @@ class Track {
       uploader: uploader,
       coverUrl: coverUrl,
       duration: duration,
-      audioUrl: audioUrl,
       loudness: rawLoudness is num ? rawLoudness.toDouble() : null,
       named: map['named'] == true,
       rawUploader: rawOwner is String && rawOwner.isNotEmpty ? rawOwner : null,

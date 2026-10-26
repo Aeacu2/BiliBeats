@@ -132,9 +132,10 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   void didUpdateWidget(covariant CachedCoverImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.url != widget.url) {
-      _loadKey = widget.url;
+      // A recycled row: the retries left were the old cover's.
       _retryTimer?.cancel();
       _retries = 0;
+      _loadKey = widget.url;
       if (_showKnown()) return;
       setState(() {
         _file = null;
@@ -172,12 +173,12 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   }
 
   int get _targetW {
-    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     return (widget.width * dpr).round().clamp(1, _maxEdge);
   }
 
   int get _targetH {
-    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     return (widget.height * dpr).round().clamp(1, _maxEdge);
   }
 
@@ -238,8 +239,9 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
           md5.convert(utf8.encode(fetchUrl)).toString().substring(0, 10);
       final file = File('${cacheDir.path}/img_${source}_$sized.img');
 
-      if (await file.exists() && await file.length() > 0) {
-        unawaited(_touch(file));
+      final stat = await file.stat();
+      if (stat.type == FileSystemEntityType.file && stat.size > 0) {
+        unawaited(_touch(file, stat.modified));
         _remember(knownKey, file);
         _settle(token, file);
         return;
@@ -259,7 +261,15 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
         }
       }
       // Only the size asked for is remembered: a stand-in is tried again.
-      if (cached != null) _remember(knownKey, cached);
+      if (cached != null) {
+        _remember(knownKey, cached);
+        // A stand-in for this cover's other sizes, if none was indexed.
+        final index = _largest;
+        if (index != null) {
+          unawaited(index.then((map) => map.putIfAbsent(source, () => cached!),
+              onError: (_) => null));
+        }
+      }
       _settle(token, cached ?? await _anySize(cacheDir, source));
     } catch (_) {
       _settle(token, null);
@@ -279,7 +289,11 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       if (!await cacheDir.exists()) {
         await cacheDir.create(recursive: true);
       }
-      unawaited(CachedCoverImage.trimCache(cacheDir));
+      // What trimming removes must not be remembered as there.
+      unawaited(CachedCoverImage.trimCache(cacheDir).whenComplete(() {
+        _known.clear();
+        _largest = null;
+      }));
       return cacheDir;
     } catch (_) {
       // Asked again by the next cover.
@@ -292,31 +306,38 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   /// still has the thumbnail its row was drawn with).
   static Future<File?> _anySize(Directory cacheDir, String source) async {
     try {
-      File? best;
-      var bestSize = 0;
-      await for (final entity in cacheDir.list()) {
-        if (entity is! File) continue;
-        final name = entity.uri.pathSegments.last;
-        if (!name.startsWith('img_${source}_') || !name.endsWith('.img')) {
-          continue;
-        }
-        final size = await entity.length();
-        if (size > bestSize) {
-          best = entity;
-          bestSize = size;
-        }
-      }
-      return best;
+      return (await (_largest ??= _indexCache(cacheDir)))[source];
     } catch (_) {
+      _largest = null;
       return null;
     }
   }
 
+  /// Offline, every row on screen asks [_anySize]: the folder is listed
+  /// once for all of them, not once per row.
+  static Future<Map<String, File>>? _largest;
+
+  static Future<Map<String, File>> _indexCache(Directory cacheDir) async {
+    final best = <String, (File, int)>{};
+    await for (final entity in cacheDir.list()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      // img_<32 hex>_<10 hex>.img
+      if (!name.startsWith('img_') || !name.endsWith('.img')) continue;
+      final cut = name.indexOf('_', 4);
+      if (cut < 0) continue;
+      final source = name.substring(4, cut);
+      final size = await entity.length();
+      if (size > (best[source]?.$2 ?? 0)) best[source] = (entity, size);
+    }
+    return {for (final e in best.entries) e.key: e.value.$1};
+  }
+
   /// Marks a cover as used, at most once a day per file.
-  static Future<void> _touch(File file) async {
+  static Future<void> _touch(File file, DateTime modified) async {
     try {
       final now = DateTime.now();
-      if (now.difference(await file.lastModified()).inHours < 24) return;
+      if (now.difference(modified).inHours < 24) return;
       await file.setLastModified(now);
     } catch (_) {}
   }
@@ -366,7 +387,7 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
 
   @override
   Widget build(BuildContext context) {
-    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     // Decode headroom: [ResizeImagePolicy.fit] fits the image *inside* the
     // box, but `BoxFit.cover` then scales by the box's *larger* ratio. Sizing
     // the decode box up by the widest cover we expect (16:9) keeps a landscape

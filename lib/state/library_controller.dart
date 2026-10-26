@@ -10,6 +10,8 @@ import '../services/download_manager.dart';
 import '../services/lyrics_engine.dart';
 import '../services/track_credit.dart';
 import '../services/track_naming.dart';
+import '../services/prefs.dart';
+import '../services/accompaniment.dart';
 
 /// How the song list is ordered.
 enum LibrarySort { recent, played, mostPlayed, forgotten, title, artist }
@@ -118,8 +120,8 @@ class LibraryController extends ChangeNotifier {
     final order = {for (var i = 0; i < byLast.length; i++) byLast[i].id: i};
     return byLast
       ..sort((a, b) {
-        final byCount = (_plays[b.id]?.count ?? 0)
-            .compareTo(_plays[a.id]?.count ?? 0);
+        final byCount =
+            (_plays[b.id]?.count ?? 0).compareTo(_plays[a.id]?.count ?? 0);
         return byCount != 0 ? byCount : order[a.id]!.compareTo(order[b.id]!);
       });
   }
@@ -128,13 +130,20 @@ class LibraryController extends ChangeNotifier {
   LibrarySort? _sortedBy;
 
   /// [downloaded] in the chosen [sort] order (cached until either changes).
+  /// Every song played replaces [recent] and the play counts; only the
+  /// orders that read them are worked out again for it.
   List<Track> get sortedDownloaded {
     final cached = _sortedCache;
+    final byListening = switch (_sort) {
+      LibrarySort.recent || LibrarySort.title || LibrarySort.artist => false,
+      _ => true,
+    };
     if (cached != null &&
         identical(_sortedSource, _downloaded) &&
         _sortedBy == _sort &&
-        identical(_sortedRecent, _recent) &&
-        identical(_sortedPlays, _plays)) {
+        (!byListening ||
+            identical(_sortedRecent, _recent) &&
+                identical(_sortedPlays, _plays))) {
       return cached;
     }
     // Lower-cased once per song, not once per comparison.
@@ -225,11 +234,11 @@ class LibraryController extends ChangeNotifier {
     if (sort == _sort) return;
     _sort = sort;
     notifyListeners();
-    await DatabaseService.setPref('librarySort', sort.name);
+    await Prefs.set('librarySort', sort.name);
   }
 
   Future<void> _loadSort() async {
-    final saved = await DatabaseService.getPref('librarySort');
+    final saved = await Prefs.get('librarySort');
     final match = LibrarySort.values.where((s) => s.name == saved);
     if (match.isNotEmpty && match.first != _sort) {
       _sort = match.first;
@@ -281,7 +290,7 @@ class LibraryController extends ChangeNotifier {
     final names = {
       for (final track in _downloaded)
         if (track.isNamed) ...artistNamesOf(track),
-    };
+    }..removeWhere(Accompaniment.isCredit);
     if (setEquals(names, _taught)) return;
     _taught = names;
     LyricsEngine.knownArtists = names;
