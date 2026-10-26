@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
-/// One playable Bilibili audio part.
+/// One playable Bilibili audio part, or a song imported from the phone
+/// ([isLocal]).
 ///
 /// Deliberately narrow: fields that were written but never read (uploaderFace,
 /// quality, localFilePath, addedAt, and an `isDownloaded` flag that duplicated
@@ -68,6 +69,13 @@ class Track {
     this.matcher,
     this.partName,
   });
+
+  /// Ids of songs imported from the phone's own storage start with this.
+  /// Such a song has no video behind it ([bvid] is empty) and, once its
+  /// file is deleted, nothing to download it from again.
+  static const String localPrefix = 'local_';
+
+  bool get isLocal => id.startsWith(localPrefix);
 
   static final RegExp _partSuffix = RegExp(r'^ - P\d+: (.+)$');
 

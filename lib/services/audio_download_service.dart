@@ -183,6 +183,17 @@ class AudioDownloadService {
     }
   }
 
+  /// Keeps [copy] (a file already in the [audioFolder]) as [track]'s audio:
+  /// a song imported from the phone, from then on held like a download.
+  static Future<void> adopt(Track track, File copy) async {
+    final dir = await _dir();
+    final key = _key(track);
+    await copy.rename(_audioPath(dir, key));
+    await saveTrackMetadata(track, force: true);
+    await File(_readyPath(dir, key)).create(recursive: true);
+    _downloadedMemo[key] = true;
+  }
+
   /// Memoised answers for [isDownloadedById].
   ///
   /// Every row of every list asks this on build, and each answer costs three
@@ -410,6 +421,11 @@ class AudioDownloadService {
   }
 
   static Future<String> _download(Track track, String dir, String path) async {
+    if (track.isLocal) {
+      const reason = '本地文件已删除';
+      _emit(DownloadProgress(track.id, 0, null, false, reason));
+      throw const VideoUnavailable(reason);
+    }
     var url = track.audioUrl;
     var isPart = false;
     if (url == null || url.isEmpty) {

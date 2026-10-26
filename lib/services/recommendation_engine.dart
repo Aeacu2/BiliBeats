@@ -111,7 +111,10 @@ class TasteProfile {
     }
 
     final seeds = [
-      for (final e in weights.entries) (track: byId[e.key]!, weight: e.value),
+      for (final e in weights.entries)
+        // Bilibili is asked what is related to a seed: a song from the
+        // phone has no video to ask about.
+        if (!byId[e.key]!.isLocal) (track: byId[e.key]!, weight: e.value),
     ]..sort((a, b) => b.weight.compareTo(a.weight));
 
     return TasteProfile(

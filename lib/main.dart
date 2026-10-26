@@ -13,6 +13,7 @@ import 'services/audio_player_handler.dart';
 import 'services/background_protection.dart';
 import 'services/error_log.dart';
 import 'services/library_transfer.dart';
+import 'services/local_songs.dart';
 import 'services/track_naming.dart';
 import 'theme/app_theme.dart';
 
@@ -68,7 +69,11 @@ Future<void> main() async {
   unawaited(TrackNaming.init(handler));
   // Bring back the last queue, song and position (paused), so a process
   // killed in the background resumes exactly where it was.
-  unawaited(handler.restoreSession());
+  final restored = handler.restoreSession();
+  unawaited(restored);
+  // A file opened with BiliBeats plays once the last session is back, not
+  // to be replaced by it.
+  LocalSongs.followOpened(handler, after: restored);
   unawaited(LibraryTransfer.resume());
   AudioFolder.followLibrary();
 

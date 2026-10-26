@@ -151,6 +151,14 @@ docs/archive/               old review notes and a superseded feature list — h
   (`TrackNaming._heardIn`), shifting automatic lyrics onto the video's clock, lyrics
   of last resort (source `bilibili`), and a suggested trim. The thresholds in
   `SubtitleMatch` are guesses until `tool/song_model/subtitles.py` has measured them.
+- **Songs from the phone.** 设置 → 导入本地歌曲 (Android), or any audio file opened
+  with / shared to BiliBeats (`MainActivity` is `singleTask` so it reaches the running
+  player). `LocalAudio.kt` copies the file into the audio folder as `incoming_*.part`
+  and reads its tags; `LocalSongs` keeps it as a download named `local_<sha1>`
+  (`Track.isLocal`, empty `bvid`), named from its tags or `歌手 - 歌名` file name and
+  never re-matched. Its file is its only copy: nothing can download it again, it is
+  not exported by 导出资料库, and it seeds no recommendations. It is stored as
+  `audio_<id>.m4a` whatever its format — ExoPlayer and the Files provider go by content.
 - **Audio files.** On Android, `AudioFilesProvider` (Kotlin) shows the downloaded
   songs read-only in the system Files app as "BiliBeats", named after the songs;
   设置 → 音频文件 opens it. The files themselves stay in private storage.

@@ -9,6 +9,7 @@ import '../services/bili_account.dart';
 import '../services/background_protection.dart';
 import '../services/error_log.dart';
 import '../services/library_transfer.dart';
+import '../services/local_songs.dart';
 import '../services/track_naming.dart';
 import '../theme/app_theme.dart';
 import '../utils/snack.dart';
@@ -96,6 +97,29 @@ class _SettingsSheetState extends State<SettingsSheet>
         message: result.queued == 0 ? '歌曲都已在资料库中' : '正在下载 ${result.queued} 首');
   }
 
+  /// Audio files from the phone's storage, kept like downloads.
+  Future<void> _importLocal() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final LocalImport? result;
+    try {
+      result = await LocalSongs.pick();
+    } catch (e) {
+      showAppSnackBar(messenger, message: '无法导入');
+      return;
+    }
+    if (result == null) {
+      showAppSnackBar(messenger, message: '没有可以选择文件的应用');
+      return;
+    }
+    final added = result.added.length;
+    final message = [
+      if (added > 0) '已导入 $added 首',
+      if (result.existing.isNotEmpty) '${result.existing.length} 首已在资料库中',
+      if (result.failed > 0) '${result.failed} 个文件无法导入',
+    ].join('，');
+    if (message.isNotEmpty) showAppSnackBar(messenger, message: message);
+  }
+
   @override
   Widget build(BuildContext context) {
     final handler = AppServices.instance.handler;
@@ -158,6 +182,12 @@ class _SettingsSheetState extends State<SettingsSheet>
                     message: '在系统「文件」App 的侧栏中打开 BiliBeats');
               }
             },
+          ),
+        if (LocalSongs.supported)
+          SheetAction(
+            icon: Icons.audio_file_outlined,
+            label: '导入本地歌曲',
+            onTap: _importLocal,
           ),
         SheetAction(
           icon: Icons.ios_share_rounded,

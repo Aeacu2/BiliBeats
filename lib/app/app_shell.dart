@@ -8,6 +8,7 @@ import '../screens/settings_sheet.dart';
 import '../services/background_protection.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
+import '../services/local_songs.dart';
 import '../theme/app_theme.dart';
 import '../theme/motion.dart';
 import '../utils/snack.dart';
@@ -46,6 +47,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   StreamSubscription<String>? _messagesSub;
   StreamSubscription<DownloadFailure>? _downloadErrorsSub;
   StreamSubscription<void>? _saveFailuresSub;
+  StreamSubscription<String>? _localSongsSub;
 
   @override
   void initState() {
@@ -60,6 +62,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _saveFailuresSub = DatabaseService.saveFailures.listen(
       (_) => _showMessage('保存失败，请检查存储空间'),
     );
+    _localSongsSub = LocalSongs.messages.listen(_showMessage);
   }
 
   @override
@@ -68,6 +71,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _messagesSub?.cancel();
     _downloadErrorsSub?.cancel();
     _saveFailuresSub?.cancel();
+    _localSongsSub?.cancel();
     _searchFocus.removeListener(_syncSearchActive);
     _searchText.removeListener(_onSearchTextChanged);
     _searchFocus.dispose();
