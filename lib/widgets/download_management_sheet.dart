@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
 import '../models/track.dart';
 import '../services/audio_download_service.dart';
+import '../services/audio_folder.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
 import '../services/library_transfer.dart';
@@ -200,10 +202,22 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
               key: ValueKey('done-${track.id}'),
               track: track,
               detail: formatBytes(_sizes[track.id] ?? 0),
-              trailing: _icon(
-                tooltip: '删除下载',
-                icon: Icons.delete_outline_rounded,
-                onPressed: () => _remove(track),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (AudioFolder.supported)
+                    _icon(
+                      tooltip: Platform.isMacOS ? '在 Finder 中显示' : '打开文件',
+                      icon: Icons.folder_open_rounded,
+                      onPressed: () =>
+                          unawaited(AudioFolder.openSong(track.id)),
+                    ),
+                  _icon(
+                    tooltip: '删除下载',
+                    icon: Icons.delete_outline_rounded,
+                    onPressed: () => _remove(track),
+                  ),
+                ],
               ),
             ),
     ];
@@ -214,6 +228,13 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
           detail: _downloaded.isEmpty
               ? null
               : '${_downloaded.length} 首 · ${formatBytes(totalBytes)}',
+          trailing: AudioFolder.supported
+              ? _icon(
+                  tooltip: Platform.isMacOS ? '在 Finder 中打开文件夹' : '音频文件',
+                  icon: Icons.folder_open_rounded,
+                  onPressed: () => unawaited(AudioFolder.open()),
+                )
+              : null,
         ),
         if (queue.pending > 0)
           Padding(

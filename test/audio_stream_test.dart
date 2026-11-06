@@ -50,6 +50,72 @@ void main() {
     expect(stream?['url'], 'https://cdn.example/backup.m4s');
   });
 
+  test('Hi-Res FLAC stream is preferred when available', () {
+    final stream = BilibiliSdk.parseAudioStream(answer({
+      'durl': [
+        {'url': 'http://cdn.example/plain.m4a'},
+      ],
+      'dash': {
+        'audio': [
+          {'bandwidth': 320000, 'baseUrl': 'https://cdn.example/320k.m4s'},
+        ],
+        'flac': {
+          'audio': {
+            'id': 30251,
+            'bandwidth': 1764000,
+            'baseUrl': 'http://cdn.example/hires.m4s',
+          },
+        },
+      },
+    }));
+    expect(stream?['url'], 'https://cdn.example/hires.m4s');
+    expect(stream?['quality'], 'Hi-Res 无损');
+    expect(stream?['qualityId'], '30251');
+    expect(stream?['bandwidth'], '1764000');
+  });
+
+  test('Dolby Atmos stream is selected over standard audio when available', () {
+    final stream = BilibiliSdk.parseAudioStream(answer({
+      'dash': {
+        'audio': [
+          {'bandwidth': 132000, 'baseUrl': 'https://cdn.example/132k.m4s'},
+        ],
+        'dolby': {
+          'audio': [
+            {
+              'id': 30250,
+              'bandwidth': 448000,
+              'baseUrl': 'http://cdn.example/dolby.m4s',
+            },
+          ],
+        },
+      },
+    }));
+    expect(stream?['url'], 'https://cdn.example/dolby.m4s');
+    expect(stream?['quality'], '杜比全景声');
+    expect(stream?['qualityId'], '30250');
+  });
+
+  test('320k DASH track is preferred over plain durl', () {
+    final stream = BilibiliSdk.parseAudioStream(answer({
+      'durl': [
+        {'url': 'http://cdn.example/plain.m4a'},
+      ],
+      'dash': {
+        'audio': [
+          {
+            'id': 30280,
+            'bandwidth': 320000,
+            'baseUrl': 'http://cdn.example/320k.m4s'
+          },
+        ],
+      },
+    }));
+    expect(stream?['url'], 'https://cdn.example/320k.m4s');
+    expect(stream?['quality'], '320k 高品质');
+    expect(stream?['qualityId'], '30280');
+  });
+
   test('a refusal, or an answer naming no stream, is nothing', () {
     expect(BilibiliSdk.parseAudioStream({'code': -412}), isNull);
     expect(BilibiliSdk.parseAudioStream(answer({})), isNull);
@@ -62,6 +128,35 @@ void main() {
       'volume': {'measured_i': 0},
     }));
     expect(stream?.containsKey('loudness'), isFalse);
+  });
+
+  test('Dolby Atmos selects highest bandwidth when multiple streams listed',
+      () {
+    final stream = BilibiliSdk.parseAudioStream(answer({
+      'dash': {
+        'dolby': {
+          'audio': [
+            {
+              'id': 30250,
+              'bandwidth': 320000,
+              'baseUrl': 'http://cdn.example/dolby_320k.m4s',
+            },
+            {
+              'id': 30250,
+              'bandwidth': 640000,
+              'baseUrl': 'http://cdn.example/dolby_640k.m4s',
+            },
+            {
+              'id': 30250,
+              'bandwidth': 448000,
+              'baseUrl': 'http://cdn.example/dolby_448k.m4s',
+            },
+          ],
+        },
+      },
+    }));
+    expect(stream?['url'], 'https://cdn.example/dolby_640k.m4s');
+    expect(stream?['bandwidth'], '640000');
   });
 
   test('a video Bilibili will not serve is told from a failed request', () {

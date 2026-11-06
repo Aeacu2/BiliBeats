@@ -139,6 +139,21 @@ class AudioDownloadService {
   static String audioPathIn(String dir, String id) => _audioPath(dir, id);
   static String _readyPath(String dir, String key) => '$dir/audio_$key.ready';
   static String _metaPath(String dir, String key) => '$dir/audio_$key.json';
+  static String _qualityPath(String dir, String key) =>
+      '$dir/audio_$key.quality.json';
+
+  /// Saved quality information for a downloaded track, or null if unrecorded.
+  static Future<Map<String, dynamic>?> qualityInfo(String id) async {
+    try {
+      final dir = await _dir();
+      final file = File(_qualityPath(dir, id));
+      if (!await file.exists()) return null;
+      final map = jsonDecode(await file.readAsString());
+      return map is Map<String, dynamic> ? map : null;
+    } catch (_) {
+      return null;
+    }
+  }
 
   static Future<void> _atomicWriteString(String path, String content) async {
     final tmp = File('$path.${DateTime.now().microsecondsSinceEpoch}.tmp');
@@ -287,6 +302,7 @@ class AudioDownloadService {
       _readyPath(dir, id),
       _audioPath(dir, id),
       _metaPath(dir, id),
+      _qualityPath(dir, id),
       '${_audioPath(dir, id)}.part',
       _partNotePath(_audioPath(dir, id)),
     ]) {
@@ -324,7 +340,9 @@ class AudioDownloadService {
   ///
   /// Idempotent and concurrency-safe: a second call for the same track while a
   /// download is in flight awaits the same future instead of downloading twice.
-  static Future<String> ensureDownloaded(Track track) async {
+  /// If [force] is true, redownloads even if the file is already on disk.
+  static Future<String> ensureDownloaded(Track track,
+      {bool force = false, int? minimumQualityRank}) async {
     String id;
     try {
       id = _key(track);
@@ -341,11 +359,12 @@ class AudioDownloadService {
       final dir = await _dir();
       final path = _audioPath(dir, id);
       await saveTrackMetadata(track);
-      if (await isDownloadedById(id)) {
+      if (!force && await isDownloadedById(id)) {
         completer.complete(path);
         return path;
       }
-      final result = await _downloadPatiently(track, dir, path);
+      final result = await _downloadPatiently(track, dir, path,
+          force: force, minimumQualityRank: minimumQualityRank);
       completer.complete(result);
       return result;
     } catch (e, st) {
@@ -382,11 +401,12 @@ class AudioDownloadService {
 
   /// [_download], tried again after [retryDelays] until it works or the
   /// failure is one that waiting does not cure.
-  static Future<String> _downloadPatiently(
-      Track track, String dir, String path) async {
+  static Future<String> _downloadPatiently(Track track, String dir, String path,
+      {bool force = false, int? minimumQualityRank}) async {
     for (var attempt = 0;; attempt++) {
       try {
-        return await _download(track, dir, path);
+        return await _download(track, dir, path,
+            force: force, minimumQualityRank: minimumQualityRank);
       } catch (e) {
         if (attempt >= retryDelays.length || !_worthRetrying(e)) rethrow;
         debugPrint('Download of ${track.id} failed ($e); '
@@ -419,7 +439,8 @@ class AudioDownloadService {
     if (_cancelled.contains(id)) throw const DownloadCancelled();
   }
 
-  static Future<String> _download(Track track, String dir, String path) async {
+  static Future<String> _download(Track track, String dir, String path,
+      {bool force = false, int? minimumQualityRank}) async {
     if (track.isLocal) {
       const reason = '本地文件已删除';
       _emit(DownloadProgress(track.id, 0, null, false, reason));
@@ -427,7 +448,8 @@ class AudioDownloadService {
     }
     var url = track.audioUrl;
     var isPart = false;
-    if (url == null || url.isEmpty) {
+    Map<String, String>? streamInfo;
+    if (url == null || url.isEmpty || force) {
       final info = await BilibiliSdk.fetchAudioStream(track.bvid, track.cid);
       final refusal = info?['unavailable'];
       if (refusal != null) {
@@ -435,6 +457,13 @@ class AudioDownloadService {
         throw VideoUnavailable(refusal);
       }
       url = info?['url'];
+      streamInfo = info;
+      if (minimumQualityRank != null &&
+          BilibiliSdk.audioQualityRank(
+                  int.tryParse(info?['qualityId'] ?? '') ?? 0) <
+              minimumQualityRank) {
+        throw const VideoUnavailable('所选音质目前不可用，已保留原下载');
+      }
       final loudness = double.tryParse(info?['loudness'] ?? '');
       if (loudness != null) track = track.copyWith(loudness: loudness);
       // The first part of a multi-part video found by search: stored as
@@ -457,6 +486,9 @@ class AudioDownloadService {
 
     final part = File('$path.part');
     final note = File(_partNotePath(path));
+    if (force) {
+      await _discardPart(part, note);
+    }
     try {
       if (_cancelled.contains(track.id)) throw const DownloadCancelled();
       // A partial file that turns out not to be the start of what the
@@ -467,22 +499,27 @@ class AudioDownloadService {
       if (done == null) throw Exception('下载无法续传');
 
       final destination = File(path);
-      if (await destination.exists()) {
-        try {
-          await destination.delete();
-        } catch (e) {
-          debugPrint('finalize delete failed: $e');
-        }
-      }
       try {
+        // On POSIX this atomically replaces an existing download, preserving
+        // it if the rename fails.
         await part.rename(path);
       } catch (e) {
-        // Windows: target exists or is locked. Copy, then drop the part.
-        debugPrint('finalize rename failed, trying copy: $e');
-        await part.copy(path);
+        // Windows may refuse to replace an existing file. Keep a backup and
+        // restore it if installing the new file fails.
+        final backup = File('$path.upgrade-backup');
+        final hadDestination = await destination.exists();
+        if (hadDestination) await destination.rename(backup.path);
         try {
-          await part.delete();
-        } catch (_) {}
+          await part.rename(path);
+        } catch (_) {
+          if (hadDestination) await backup.rename(path);
+          rethrow;
+        }
+        if (hadDestination) {
+          try {
+            await backup.delete();
+          } catch (_) {}
+        }
       }
       try {
         if (await note.exists()) await note.delete();
@@ -494,6 +531,22 @@ class AudioDownloadService {
         await readyFile.create(recursive: true);
       }
       await saveTrackMetadata(track, force: isPart || track.loudness != null);
+      if (streamInfo != null) {
+        final qualityData = {
+          'quality': streamInfo['quality'] ?? '高品质',
+          'qualityId': int.tryParse(streamInfo['qualityId'] ?? '') ?? 30232,
+          'bandwidth': int.tryParse(streamInfo['bandwidth'] ?? '') ?? 0,
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        };
+        try {
+          await _atomicWriteString(
+            _qualityPath(dir, _key(track)),
+            jsonEncode(qualityData),
+          );
+        } catch (e) {
+          debugPrint('save quality info failed: $e');
+        }
+      }
       _downloadedMemo[_key(track)] = true;
 
       _emit(DownloadProgress(track.id, done.received, done.total, true, null));

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,6 +17,7 @@ import '../theme/app_theme.dart';
 import '../utils/snack.dart';
 import '../widgets/bili_account_sheet.dart';
 import '../widgets/download_management_sheet.dart';
+import '../widgets/quality_upgrade_sheet.dart';
 import '../widgets/sheet.dart';
 
 /// The few things worth a setting.
@@ -171,17 +173,31 @@ class _SettingsSheetState extends State<SettingsSheet>
             DownloadManagementSheet.show(navigator.context);
           },
         ),
+        SheetAction(
+          icon: Icons.high_quality_rounded,
+          label: '检查更新音质',
+          trailing: const Icon(Icons.chevron_right_rounded,
+              color: AppColors.textFaint),
+          onTap: () {
+            final navigator = Navigator.of(context);
+            navigator.pop();
+            QualityUpgradeSheet.show(navigator.context);
+          },
+        ),
         if (AudioFolder.supported)
           SheetAction(
             icon: Icons.folder_open_rounded,
-            label: '音频文件',
+            label: Platform.isMacOS ? '音频存储文件夹' : '音频文件',
             trailing: const Icon(Icons.chevron_right_rounded,
                 color: AppColors.textFaint),
             onTap: () async {
               final messenger = ScaffoldMessenger.of(context);
               if (!await AudioFolder.open()) {
+                final folder = await AudioFolder.path;
                 showAppSnackBar(messenger,
-                    message: '在系统「文件」App 的侧栏中打开 BiliBeats');
+                    message: Platform.isMacOS
+                        ? '音频目录: $folder'
+                        : '在系统「文件」App 的侧栏中打开 BiliBeats');
               }
             },
           ),

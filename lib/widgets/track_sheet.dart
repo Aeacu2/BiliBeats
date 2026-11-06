@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -247,7 +248,7 @@ class _TrackSheetState extends State<TrackSheet> {
             if (downloaded && AudioFolder.supported)
               SheetAction(
                 icon: Icons.folder_open_rounded,
-                label: '打开文件',
+                label: Platform.isMacOS ? '在 Finder 中显示' : '打开文件',
                 onTap: () async {
                   final parent = _dismiss();
                   final messenger = ScaffoldMessenger.of(parent);
@@ -255,7 +256,9 @@ class _TrackSheetState extends State<TrackSheet> {
                   // No app opens the file itself: its folder, then.
                   if (!await AudioFolder.open()) {
                     showAppSnackBar(messenger,
-                        message: '在系统「文件」App 的侧栏中打开 BiliBeats');
+                        message: Platform.isMacOS
+                            ? '无法打开音乐文件所在目录'
+                            : '在系统「文件」App 的侧栏中打开 BiliBeats');
                   }
                 },
               ),

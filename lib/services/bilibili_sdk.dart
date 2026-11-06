@@ -21,6 +21,15 @@ class BiliApiException implements Exception {
 }
 
 class BilibiliSdk {
+  static int audioQualityRank(int id) => switch (id) {
+        30251 => 500,
+        30250 => 400,
+        30280 => 300,
+        30200 => 250,
+        30232 => 200,
+        30216 => 100,
+        _ => 0,
+      };
   static const String _baseUrl = 'https://api.bilibili.com';
 
   /// 音乐 partition. Covers 原创音乐 / 翻唱 / 演奏 / VOCALOID / 音乐现场 / MV /
@@ -65,6 +74,65 @@ class BilibiliSdk {
 
   @visibleForTesting
   static Future<String?> Function(String url, {String? cookies})? requestWith;
+
+  @visibleForTesting
+  static Future<String?> Function(
+      String url, Map<String, String> fields, BiliAccount account)? postWith;
+
+  static Future<Map> _postFavorite(
+      String path, Map<String, String> fields, BiliAccount account) async {
+    if (!identical(BiliAccountStore.current.value, account)) {
+      throw const BiliApiException('账号已更改');
+    }
+    final csrf = BiliAccount.cookieValue(account.cookies, 'bili_jct');
+    if (csrf == null || csrf.isEmpty) {
+      throw const BiliApiException('登录信息不完整，请重新登录');
+    }
+    final data = {...fields, 'csrf': csrf};
+    String? body;
+    try {
+      if (postWith case final override?) {
+        body = await override('$_baseUrl$path', data, account);
+      } else {
+        final request = await _httpClient
+            .postUrl(Uri.parse('$_baseUrl$path'))
+            .timeout(const Duration(seconds: 10));
+        request.headers.set('Referer', 'https://www.bilibili.com/');
+        request.headers.set('User-Agent', kBiliUserAgent);
+        request.headers.set('Cookie', account.cookies);
+        request.headers.contentType = ContentType(
+            'application', 'x-www-form-urlencoded',
+            charset: 'utf-8');
+        request.write(Uri(queryParameters: data).query);
+        final response = await request.close().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            request.abort();
+            throw TimeoutException('Bilibili request timed out');
+          },
+        );
+        body = await response
+            .transform(utf8.decoder)
+            .join()
+            .timeout(const Duration(seconds: 10));
+        if (response.statusCode != 200) body = null;
+      }
+      final result = body == null ? null : jsonDecode(body);
+      if (result is Map && result['code'] == -101) {
+        await BiliAccountStore.expire(account);
+      }
+      if (result is! Map || result['code'] != 0) {
+        throw BiliApiException(result is Map
+            ? '收藏夹操作失败：${result['message'] ?? result['code']}'
+            : '收藏夹操作失败，请重试');
+      }
+      return result;
+    } on BiliApiException {
+      rethrow;
+    } catch (_) {
+      throw const BiliApiException('收藏夹操作失败，请重试');
+    }
+  }
 
   static Future<String?> _httpGet(String rawUrl, {String? cookies}) async {
     final account = BiliAccountStore.current.value;
@@ -618,6 +686,34 @@ class BilibiliSdk {
   }
 
   /// The account's favourites folders: id, name and how many videos.
+  static Future<int> createFavoriteFolder(
+      BiliAccount account, String title) async {
+    final response = await _postFavorite(
+        '/x/v3/fav/folder/add', {'title': title, 'privacy': '1'}, account);
+    final data = response['data'];
+    if (data is! Map || data['id'] is! int) {
+      throw const BiliApiException('收藏夹创建结果不完整');
+    }
+    return data['id'] as int;
+  }
+
+  static Future<void> addVideoToFavorite(
+      BiliAccount account, int folderId, String bvid) async {
+    final view = _dataOf(await _viewBody('view', 'bvid', bvid));
+    if (view is! Map || view['aid'] is! int) {
+      throw const BiliApiException('无法读取视频信息');
+    }
+    await _postFavorite(
+        '/x/v3/fav/resource/deal',
+        {
+          'rid': '${view['aid']}',
+          'type': '2',
+          'add_media_ids': '$folderId',
+          'del_media_ids': '',
+        },
+        account);
+  }
+
   static Future<List<({int id, String title, int count})>?> favoriteFolders(
       int mid) async {
     final data = _dataOf(await _httpGet(
@@ -891,12 +987,11 @@ class BilibiliSdk {
       }
       if (cid == 0) return null;
 
-      // fnval=16 requests DASH; the response still carries a plain `durl`
-      // MP4/M4A stream for most videos, which we prefer for native playback.
+      // fnval=8144 requests DASH (16), 4K (128), Dolby Atmos (1024), and Hi-Res (4096).
       final rawParams = {
         'bvid': bvid,
         'cid': cid,
-        'fnval': 16,
+        'fnval': 8144,
         'fnver': 0,
         'fourk': 1,
         // Asks for the `volume` block (EBU R128 measurements).
@@ -909,7 +1004,8 @@ class BilibiliSdk {
           .join('&');
       final url = '$_baseUrl/x/player/wbi/playurl?$queryStr';
 
-      final body = await _httpGet(url);
+      final cookieStr = await BiliAccountStore.cookies();
+      final body = await _httpGet(url, cookies: cookieStr);
       if (body != null) {
         final json = jsonDecode(body);
         final stream = parseAudioStream(json);
@@ -956,7 +1052,52 @@ class BilibiliSdk {
       if (measured is num && measured < 0) 'loudness': '$measured',
     };
 
-    // The plain stream (standard m4a/mp4 container) is preferred.
+    final dash = data['dash'] is Map ? data['dash'] as Map : null;
+
+    // 1. Hi-Res Lossless (FLAC, 30251)
+    if (dash != null) {
+      final flac = _extractBestStream(
+          dash['flac'] is Map ? dash['flac']['audio'] : null);
+      if (flac != null) {
+        return {
+          'url': secureUrl(flac.url),
+          'quality': 'Hi-Res 无损',
+          'qualityId': '${flac.id ?? 30251}',
+          if (flac.bandwidth != null) 'bandwidth': '${flac.bandwidth}',
+          ...loudness,
+        };
+      }
+
+      // 2. Dolby Atmos (30250)
+      final dolby = _extractBestStream(
+          dash['dolby'] is Map ? dash['dolby']['audio'] : null);
+      if (dolby != null) {
+        return {
+          'url': secureUrl(dolby.url),
+          'quality': '杜比全景声',
+          'qualityId': '${dolby.id ?? 30250}',
+          if (dolby.bandwidth != null) 'bandwidth': '${dolby.bandwidth}',
+          ...loudness,
+        };
+      }
+    }
+
+    // 3. Best DASH audio track
+    final bestDash = dash != null ? _extractBestStream(dash['audio']) : null;
+
+    // If best DASH is 320k/高音质 (id 30280 or bandwidth >= 250000), prefer it over durl.
+    if (bestDash != null &&
+        (bestDash.id == 30280 || (bestDash.bandwidth ?? 0) >= 250000)) {
+      return {
+        'url': secureUrl(bestDash.url),
+        'quality': '320k 高品质',
+        'qualityId': '${bestDash.id ?? 30280}',
+        if (bestDash.bandwidth != null) 'bandwidth': '${bestDash.bandwidth}',
+        ...loudness,
+      };
+    }
+
+    // 4. The plain stream (standard m4a/mp4 container) is preferred over standard DASH.
     final durl = data['durl'];
     if (durl is List && durl.isNotEmpty && durl.first is Map) {
       final url = (durl.first as Map)['url'];
@@ -964,42 +1105,64 @@ class BilibiliSdk {
         return {
           'url': secureUrl(url),
           'quality': '高品质 AAC/M4A',
+          'qualityId': '30200',
           ...loudness,
         };
       }
     }
 
-    // Otherwise the best DASH audio track.
-    final dash = data['dash'];
-    final audio = dash is Map ? dash['audio'] : null;
-    if (audio is List && audio.isNotEmpty) {
-      int bandwidth(dynamic a) => a is Map && a['bandwidth'] is num
-          ? (a['bandwidth'] as num).toInt()
-          : 0;
-      final sorted = [...audio]..sort((a, b) => bandwidth(b) - bandwidth(a));
-      final best = sorted.first;
-      if (best is Map) {
-        String? url;
-        for (final key in ['baseUrl', 'base_url']) {
-          final v = best[key];
-          if (v is String && v.isNotEmpty) url ??= v;
-        }
-        // backupUrl is a list.
-        final backup = best['backupUrl'] ?? best['backup_url'];
-        if (url == null && backup is List && backup.isNotEmpty) {
-          final v = backup.first;
-          if (v is String && v.isNotEmpty) url = v;
-        }
-        if (url != null) {
-          return {
-            'url': secureUrl(url),
-            'quality': '320k DASH',
-            ...loudness,
-          };
-        }
+    // 5. Standard DASH audio track (132k, 64k).
+    if (bestDash != null) {
+      final label =
+          (bestDash.id == 30232 || (bestDash.bandwidth ?? 0) >= 100000)
+              ? '132k 标准'
+              : '64k 普通';
+      return {
+        'url': secureUrl(bestDash.url),
+        'quality': label,
+        'qualityId': '${bestDash.id ?? 30232}',
+        if (bestDash.bandwidth != null) 'bandwidth': '${bestDash.bandwidth}',
+        ...loudness,
+      };
+    }
+
+    return null;
+  }
+
+  static _DashAudioStream? _extractBestStream(dynamic item) {
+    if (item is List) {
+      final streams =
+          item.map(_extractAudioStream).whereType<_DashAudioStream>().toList();
+      if (streams.isEmpty) return null;
+      streams.sort((a, b) => (b.bandwidth ?? 0) - (a.bandwidth ?? 0));
+      return streams.first;
+    }
+    return _extractAudioStream(item);
+  }
+
+  static _DashAudioStream? _extractAudioStream(dynamic item) {
+    if (item is List && item.isNotEmpty) {
+      return _extractAudioStream(item.first);
+    }
+    if (item is! Map) return null;
+    String? url;
+    for (final key in ['baseUrl', 'base_url']) {
+      final v = item[key];
+      if (v is String && v.isNotEmpty) {
+        url = v;
+        break;
       }
     }
-    return null;
+    final backup = item['backupUrl'] ?? item['backup_url'];
+    if (url == null && backup is List && backup.isNotEmpty) {
+      final v = backup.first;
+      if (v is String && v.isNotEmpty) url = v;
+    }
+    if (url == null || url.isEmpty) return null;
+    final id = item['id'] is num ? (item['id'] as num).toInt() : null;
+    final bw =
+        item['bandwidth'] is num ? (item['bandwidth'] as num).toInt() : null;
+    return _DashAudioStream(url: url, id: id, bandwidth: bw);
   }
 
   /// Integrated loudness (LUFS) of one video part, or null when Bilibili has
@@ -1295,4 +1458,11 @@ class QrLogin {
   final String? cookies;
 
   const QrLogin(this.state, [this.cookies]);
+}
+
+class _DashAudioStream {
+  final String url;
+  final int? id;
+  final int? bandwidth;
+  const _DashAudioStream({required this.url, this.id, this.bandwidth});
 }

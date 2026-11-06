@@ -303,7 +303,11 @@ class LyricsEngine {
             artist = nonNoise.sublist(0, nonNoise.length - 1).join(' ');
             song = nonNoise.last;
           } else {
-            artist = nonNoise.join(' ');
+            final candidate = nonNoise.join(' ');
+            if (_looksLikeBareName(candidate) ||
+                RegExp(r'[&、]').hasMatch(candidate)) {
+              artist = candidate;
+            }
           }
         }
       }
@@ -668,13 +672,24 @@ class LyricsEngine {
     };
   }
 
-  static List<String> _artistsOf(Map song) => [
-        for (final a in song['artists'] as List? ?? const [])
-          if (a is Map &&
-              a['name'] is String &&
-              (a['name'] as String).isNotEmpty)
-            a['name'] as String,
-      ];
+  static List<String> _artistsOf(Map song) {
+    final list = <String>[
+      for (final a in song['artists'] as List? ?? const [])
+        if (a is Map && a['name'] is String && (a['name'] as String).isNotEmpty)
+          a['name'] as String,
+    ];
+    final rawName = song['name'];
+    if (rawName is String) {
+      final coverMatch = _coverOf.firstMatch(rawName);
+      if (coverMatch != null) {
+        final orig = coverMatch.group(1)!.trim();
+        if (orig.isNotEmpty && !list.contains(orig)) {
+          list.add(orig);
+        }
+      }
+    }
+    return list;
+  }
 
   /// Identifies the song behind a Bilibili video title against NetEase.
   ///

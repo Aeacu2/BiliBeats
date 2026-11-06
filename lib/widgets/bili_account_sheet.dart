@@ -7,6 +7,7 @@ import '../screens/bili_login.dart';
 import '../services/bili_account.dart';
 import '../services/bili_favorites.dart';
 import '../services/bilibili_sdk.dart';
+import '../services/download_favorites.dart';
 import '../theme/app_theme.dart';
 import '../utils/snack.dart';
 import 'sheet.dart';
@@ -34,6 +35,8 @@ class _AccountOptions extends StatefulWidget {
 
 class _AccountOptionsState extends State<_AccountOptions> {
   bool? _history;
+  bool? _backup;
+  bool _backupBusy = false;
 
   @override
   void initState() {
@@ -45,7 +48,37 @@ class _AccountOptionsState extends State<_AccountOptions> {
 
   Future<void> _load() async {
     final enabled = await BiliAccountStore.historyEnabled();
-    if (mounted) setState(() => _history = enabled);
+    final backup = await DownloadFavorites.enabled(widget.account);
+    if (mounted) {
+      setState(() {
+        _history = enabled;
+        _backup = backup;
+      });
+    }
+  }
+
+  Future<void> _setBackup(bool enabled) async {
+    setState(() => _backupBusy = true);
+    try {
+      if (enabled) {
+        await DownloadFavorites.enable(widget.account);
+        if (mounted) setState(() => _backup = true);
+        await DownloadFavorites.sync(widget.account);
+      } else {
+        await DownloadFavorites.disable(widget.account);
+        if (mounted) setState(() => _backup = false);
+      }
+      if (mounted) {
+        showAppSnackBar(ScaffoldMessenger.of(context),
+            message: enabled ? '下载视频已同步到收藏夹' : '已关闭自动同步');
+      }
+    } catch (e) {
+      if (mounted) {
+        showAppSnackBar(ScaffoldMessenger.of(context), message: '同步未完成：$e');
+      }
+    } finally {
+      if (mounted) setState(() => _backupBusy = false);
+    }
   }
 
   @override
@@ -61,6 +94,18 @@ class _AccountOptionsState extends State<_AccountOptions> {
                   expand: true,
                   builder: (_) =>
                       FavoriteFoldersSheet(account: widget.account))),
+          SwitchListTile(
+            title: const Text('备份下载到 B 站收藏夹', style: AppTypography.body),
+            subtitle: const Text('保存视频，不包含本地文件和分 P 选择'),
+            value: _backup ?? false,
+            onChanged: _backup == null || _backupBusy ? null : _setBackup,
+          ),
+          if (_backup == true)
+            SheetAction(
+              icon: Icons.sync_rounded,
+              label: '立即同步下载',
+              onTap: _backupBusy ? null : () => _setBackup(true),
+            ),
           SwitchListTile(
             title: const Text('根据观看历史推荐', style: AppTypography.body),
             value: _history ?? false,

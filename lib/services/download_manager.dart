@@ -44,11 +44,15 @@ class FailedDownload {
   final Track track;
   final String error;
   final DateTime failedAt;
+  final bool force;
+  final int? minimumQualityRank;
 
   const FailedDownload({
     required this.track,
     required this.error,
     required this.failedAt,
+    this.force = false,
+    this.minimumQualityRank,
   });
 }
 
@@ -111,7 +115,8 @@ class DownloadManager {
       return true;
     }
     _notify(trackId);
-    unawaited(startDownload(failed.track));
+    unawaited(startDownload(failed.track,
+        force: failed.force, minimumQualityRank: failed.minimumQualityRank));
     return true;
   }
 
@@ -139,26 +144,35 @@ class DownloadManager {
   final Map<String, Future<void>> _downloads = {};
 
   /// Starts downloading [track] (idempotent). Observe progress via [updates].
-  Future<void> startDownload(Track track) =>
-      _downloads[track.id] ??= _startDownload(track).whenComplete(() {
+  /// If [force] is true, redownloads even if the file is already on disk.
+  Future<void> startDownload(Track track,
+          {bool force = false, int? minimumQualityRank}) =>
+      _downloads[track.id] ??= _startDownload(track,
+              force: force, minimumQualityRank: minimumQualityRank)
+          .whenComplete(() {
         _downloads.remove(track.id);
       });
 
-  Future<void> _startDownload(Track track) async {
+  Future<void> _startDownload(Track track,
+      {bool force = false, int? minimumQualityRank}) async {
     if (_tasks.containsKey(track.id)) return;
-    if (_pendingIsDownloadedCheck.contains(track.id)) return;
-    _pendingIsDownloadedCheck.add(track.id);
-    bool alreadyDownloaded = false;
-    try {
-      alreadyDownloaded = await AudioDownloadService.isDownloaded(track);
-    } catch (_) {
-      alreadyDownloaded = false;
+    if (!force) {
+      if (_pendingIsDownloadedCheck.contains(track.id)) return;
+      _pendingIsDownloadedCheck.add(track.id);
+      bool alreadyDownloaded = false;
+      try {
+        alreadyDownloaded = await AudioDownloadService.isDownloaded(track);
+      } catch (_) {
+        alreadyDownloaded = false;
+      }
+      _pendingIsDownloadedCheck.remove(track.id);
+      if (_cancelledPending.remove(track.id)) return;
+      // If another call claimed the slot while we checked, bail.
+      if (_tasks.containsKey(track.id)) return;
+      if (alreadyDownloaded) return;
+    } else {
+      if (_tasks.containsKey(track.id)) return;
     }
-    _pendingIsDownloadedCheck.remove(track.id);
-    if (_cancelledPending.remove(track.id)) return;
-    // If another call claimed the slot while we checked, bail.
-    if (_tasks.containsKey(track.id)) return;
-    if (alreadyDownloaded) return;
     // Claim the slot synchronously after the check, before any further await.
     _tasks[track.id] = DownloadTask(track: track);
     _failed.remove(track.id);
@@ -166,7 +180,8 @@ class DownloadManager {
     // Which song it is is looked up alongside the audio, not after it.
     TrackNaming.prepare(track);
     try {
-      await AudioDownloadService.ensureDownloaded(track);
+      await AudioDownloadService.ensureDownloaded(track,
+          force: force, minimumQualityRank: minimumQualityRank);
     } on DownloadCancelled {
       // Called off: not a failure to offer a retry for.
     } catch (e) {
@@ -175,6 +190,8 @@ class DownloadManager {
         track: track,
         error: '$e',
         failedAt: DateTime.now(),
+        force: force,
+        minimumQualityRank: minimumQualityRank,
       );
       if (!_errorController.isClosed) {
         _errorController.add((track: track, error: '$e'));

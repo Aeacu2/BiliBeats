@@ -12,6 +12,7 @@ import 'services/audio_folder.dart';
 import 'services/audio_player_handler.dart';
 import 'services/background_protection.dart';
 import 'services/error_log.dart';
+import 'services/download_favorites.dart';
 import 'services/library_transfer.dart';
 import 'services/local_songs.dart';
 import 'services/track_naming.dart';
@@ -76,6 +77,7 @@ Future<void> main() async {
   LocalSongs.followOpened(handler, after: restored);
   unawaited(LibraryTransfer.resume());
   AudioFolder.followLibrary();
+  DownloadFavorites.followLibrary();
 
   // Android 13+ gates notifications behind a runtime grant on stricter OEM
   // builds. Fire-and-forget.

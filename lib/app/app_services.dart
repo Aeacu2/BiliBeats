@@ -28,6 +28,7 @@ class AppServices {
       if (identical(previous.handler, handler)) return;
       previous.lyrics.dispose();
       previous.recommendations.dispose();
+      previous.onlineSearch.dispose();
     }
     _instance = AppServices._(handler);
   }
