@@ -494,8 +494,55 @@ class AudioDownloadService {
       // A partial file that turns out not to be the start of what the
       // server has now is thrown away, and the transfer made once more
       // from the first byte.
-      var done = await _transfer(url, part, note, track.id);
-      done ??= await _transfer(url, part, note, track.id);
+      final candidates = <Map<String, String>>[
+        streamInfo ?? {'url': url},
+      ];
+      final alternatives = streamInfo?['alternateStreams'];
+      if (alternatives != null) {
+        final decoded = jsonDecode(alternatives);
+        if (decoded is List) {
+          candidates.addAll(decoded.whereType<Map>().map(
+              (item) => item.map((key, value) => MapEntry('$key', '$value'))));
+        }
+      }
+      if (minimumQualityRank != null) {
+        candidates.removeWhere((candidate) =>
+            BilibiliSdk.audioQualityRank(
+                int.tryParse(candidate['qualityId'] ?? '') ?? 0) <
+            minimumQualityRank);
+      }
+      ({int received, int? total})? done;
+      for (var candidateIndex = 0;
+          candidateIndex < candidates.length;
+          candidateIndex++) {
+        final candidate = candidates[candidateIndex];
+        // Different encodes must never share a partial file, even when their
+        // length happens to match. Backups within one candidate are mirrors.
+        if (candidateIndex > 0) await _discardPart(part, note);
+        final urls = <String>[candidate['url']!];
+        final backups = candidate['backupUrls'];
+        if (backups != null) {
+          final decoded = jsonDecode(backups);
+          if (decoded is List) urls.addAll(decoded.whereType<String>());
+        }
+        for (var i = 0; i < urls.length; i++) {
+          try {
+            done = await _transfer(urls[i], part, note, track.id);
+            done ??= await _transfer(urls[i], part, note, track.id);
+            if (done == null) throw Exception('下载无法续传');
+            streamInfo = streamInfo == null ? null : candidate;
+            break;
+          } catch (e) {
+            if (!_worthRetrying(e) ||
+                (i == urls.length - 1 &&
+                    candidateIndex == candidates.length - 1)) {
+              rethrow;
+            }
+            if (_cancelled.contains(track.id)) throw const DownloadCancelled();
+          }
+        }
+        if (done != null) break;
+      }
       if (done == null) throw Exception('下载无法续传');
 
       final destination = File(path);

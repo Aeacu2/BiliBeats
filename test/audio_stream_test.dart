@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:bilibeats/services/bilibili_sdk.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -48,6 +50,29 @@ void main() {
       },
     }));
     expect(stream?['url'], 'https://cdn.example/backup.m4s');
+  });
+
+  test('the selected audio keeps its distinct backup addresses', () {
+    final stream = BilibiliSdk.parseAudioStream(answer({
+      'dash': {
+        'audio': [
+          {
+            'id': 30280,
+            'bandwidth': 320000,
+            'baseUrl': 'http://cdn.example/main',
+            'backup_url': [
+              'https://cdn.example/main',
+              'http://backup.example/audio',
+              'http://backup.example/audio',
+              null,
+            ],
+          },
+        ],
+      },
+    }));
+    expect(stream?['url'], 'https://cdn.example/main');
+    expect(
+        jsonDecode(stream!['backupUrls']!), ['https://backup.example/audio']);
   });
 
   test('Hi-Res FLAC stream is preferred when available', () {

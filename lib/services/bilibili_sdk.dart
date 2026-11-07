@@ -987,31 +987,47 @@ class BilibiliSdk {
       }
       if (cid == 0) return null;
 
-      // fnval=8144 requests DASH (16), 4K (128), Dolby Atmos (1024), and Hi-Res (4096).
+      // Request the supported DASH feature flags, including Hi-Res audio.
+      // The additional 4096 bit makes Bilibili reject the whole request
+      // with -400, rather than returning a higher-quality stream.
       final rawParams = {
         'bvid': bvid,
         'cid': cid,
-        'fnval': 8144,
+        'fnval': 4048,
         'fnver': 0,
         'fourk': 1,
         // Asks for the `volume` block (EBU R128 measurements).
         'voice_balance': 1,
       };
 
-      final signed = await WbiSigner.signParams(rawParams);
-      final queryStr = signed.entries
-          .map((e) => '${e.key}=${Uri.encodeComponent(e.value.toString())}')
-          .join('&');
-      final url = '$_baseUrl/x/player/wbi/playurl?$queryStr';
-
       final cookieStr = await BiliAccountStore.cookies();
-      final body = await _httpGet(url, cookies: cookieStr);
-      if (body != null) {
-        final json = jsonDecode(body);
-        final stream = parseAudioStream(json);
-        if (stream != null) return {...stream, ...part};
-        final refusal = unavailableReason(json);
-        if (refusal != null) return {'unavailable': refusal};
+      // A rejected request need not mean the video is unavailable. Try the
+      // signed and plain APIs, then the minimal DASH flags, before retrying
+      // the whole download later. Real access refusals remain definitive.
+      for (final fnval in [4048, 16]) {
+        for (final signedRequest in [true, false]) {
+          final params = {...rawParams, 'fnval': fnval};
+          final query =
+              signedRequest ? await WbiSigner.signParams(params) : params;
+          final queryStr = query.entries
+              .map((e) => '${e.key}=${Uri.encodeComponent(e.value.toString())}')
+              .join('&');
+          final endpoint = signedRequest ? 'wbi/playurl' : 'playurl';
+          final body = await _httpGet('$_baseUrl/x/player/$endpoint?$queryStr',
+              cookies: cookieStr);
+          if (body == null) continue;
+          dynamic json;
+          try {
+            json = jsonDecode(body);
+          } on FormatException {
+            continue;
+          }
+          final stream = parseAudioStream(json);
+          if (stream != null) return {...stream, ...part};
+          if (json is Map && json['code'] == -400) continue;
+          final refusal = unavailableReason(json);
+          if (refusal != null) return {'unavailable': refusal};
+        }
       }
     } catch (e) {
       debugPrint('Failed to fetch audio stream: $e');
@@ -1044,6 +1060,49 @@ class BilibiliSdk {
   /// loudness measurement when it sent one. Null when it names no stream.
   @visibleForTesting
   static Map<String, String>? parseAudioStream(dynamic json) {
+    final preferred = _parsePreferredAudioStream(json);
+    if (preferred == null || json is! Map || json['data'] is! Map) {
+      return preferred;
+    }
+    final data = json['data'] as Map;
+    final dash = data['dash'];
+    final alternatives = <Map<String, String>>[];
+    final seen = <String>{preferred['url']!};
+
+    void add(Map<String, dynamic> candidate) {
+      final stream = _parsePreferredAudioStream({'code': 0, 'data': candidate});
+      if (stream != null && seen.add(stream['url']!)) alternatives.add(stream);
+    }
+
+    if (dash is Map) {
+      for (final key in ['flac', 'dolby']) {
+        if (dash[key] != null) {
+          add({
+            'dash': {key: dash[key]}
+          });
+        }
+      }
+      if (dash['audio'] is List) {
+        for (final audio in dash['audio'] as List) {
+          add({
+            'dash': {
+              'audio': [audio]
+            }
+          });
+        }
+      }
+    }
+    if (data['durl'] is List) add({'durl': data['durl']});
+    alternatives.sort((a, b) =>
+        audioQualityRank(int.tryParse(b['qualityId'] ?? '') ?? 0).compareTo(
+            audioQualityRank(int.tryParse(a['qualityId'] ?? '') ?? 0)));
+    if (alternatives.isNotEmpty) {
+      preferred['alternateStreams'] = jsonEncode(alternatives);
+    }
+    return preferred;
+  }
+
+  static Map<String, String>? _parsePreferredAudioStream(dynamic json) {
     if (json is! Map || json['code'] != 0 || json['data'] is! Map) return null;
     final data = json['data'] as Map;
     final volume = data['volume'];
@@ -1061,6 +1120,7 @@ class BilibiliSdk {
       if (flac != null) {
         return {
           'url': secureUrl(flac.url),
+          if (flac.backups.isNotEmpty) 'backupUrls': jsonEncode(flac.backups),
           'quality': 'Hi-Res 无损',
           'qualityId': '${flac.id ?? 30251}',
           if (flac.bandwidth != null) 'bandwidth': '${flac.bandwidth}',
@@ -1074,6 +1134,7 @@ class BilibiliSdk {
       if (dolby != null) {
         return {
           'url': secureUrl(dolby.url),
+          if (dolby.backups.isNotEmpty) 'backupUrls': jsonEncode(dolby.backups),
           'quality': '杜比全景声',
           'qualityId': '${dolby.id ?? 30250}',
           if (dolby.bandwidth != null) 'bandwidth': '${dolby.bandwidth}',
@@ -1090,6 +1151,8 @@ class BilibiliSdk {
         (bestDash.id == 30280 || (bestDash.bandwidth ?? 0) >= 250000)) {
       return {
         'url': secureUrl(bestDash.url),
+        if (bestDash.backups.isNotEmpty)
+          'backupUrls': jsonEncode(bestDash.backups),
         'quality': '320k 高品质',
         'qualityId': '${bestDash.id ?? 30280}',
         if (bestDash.bandwidth != null) 'bandwidth': '${bestDash.bandwidth}',
@@ -1102,8 +1165,10 @@ class BilibiliSdk {
     if (durl is List && durl.isNotEmpty && durl.first is Map) {
       final url = (durl.first as Map)['url'];
       if (url is String && url.isNotEmpty) {
+        final backups = _backupUrls(durl.first as Map, url);
         return {
           'url': secureUrl(url),
+          if (backups.isNotEmpty) 'backupUrls': jsonEncode(backups),
           'quality': '高品质 AAC/M4A',
           'qualityId': '30200',
           ...loudness,
@@ -1119,6 +1184,8 @@ class BilibiliSdk {
               : '64k 普通';
       return {
         'url': secureUrl(bestDash.url),
+        if (bestDash.backups.isNotEmpty)
+          'backupUrls': jsonEncode(bestDash.backups),
         'quality': label,
         'qualityId': '${bestDash.id ?? 30232}',
         if (bestDash.bandwidth != null) 'bandwidth': '${bestDash.bandwidth}',
@@ -1153,16 +1220,24 @@ class BilibiliSdk {
         break;
       }
     }
-    final backup = item['backupUrl'] ?? item['backup_url'];
-    if (url == null && backup is List && backup.isNotEmpty) {
-      final v = backup.first;
-      if (v is String && v.isNotEmpty) url = v;
-    }
+    final backups = _backupUrls(item, url);
+    if (url == null && backups.isNotEmpty) url = backups.removeAt(0);
     if (url == null || url.isEmpty) return null;
     final id = item['id'] is num ? (item['id'] as num).toInt() : null;
     final bw =
         item['bandwidth'] is num ? (item['bandwidth'] as num).toInt() : null;
-    return _DashAudioStream(url: url, id: id, bandwidth: bw);
+    return _DashAudioStream(url: url, backups: backups, id: id, bandwidth: bw);
+  }
+
+  static List<String> _backupUrls(Map item, String? primary) {
+    final raw = item['backupUrl'] ?? item['backup_url'];
+    if (raw is! List) return [];
+    final seen = <String>{if (primary != null) secureUrl(primary)};
+    return [
+      for (final value in raw)
+        if (value is String && value.isNotEmpty && seen.add(secureUrl(value)))
+          secureUrl(value),
+    ];
   }
 
   /// Integrated loudness (LUFS) of one video part, or null when Bilibili has
@@ -1462,7 +1537,9 @@ class QrLogin {
 
 class _DashAudioStream {
   final String url;
+  final List<String> backups;
   final int? id;
   final int? bandwidth;
-  const _DashAudioStream({required this.url, this.id, this.bandwidth});
+  const _DashAudioStream(
+      {required this.url, required this.backups, this.id, this.bandwidth});
 }

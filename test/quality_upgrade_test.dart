@@ -47,6 +47,65 @@ void main() {
     expect(candidate, isNull);
   });
 
+  test('audio requests use supported DASH flags and accept Hi-Res', () async {
+    Uri? requested;
+    BilibiliSdk.requestWith = (url, {cookies}) async {
+      requested = Uri.parse(url);
+      return jsonEncode({
+        'code': 0,
+        'data': {
+          'dash': {
+            'flac': {
+              'audio': {
+                'id': 30251,
+                'baseUrl': 'https://example.com/hires',
+              },
+            },
+          },
+        },
+      });
+    };
+    addTearDown(() => BilibiliSdk.requestWith = null);
+
+    final stream = await BilibiliSdk.fetchAudioStream('BV1TEST', 123);
+    expect(requested?.queryParameters['fnval'], '4048');
+    expect(requested?.queryParameters['bvid'], 'BV1TEST');
+    expect(requested?.queryParameters['cid'], '123');
+    expect(stream?['qualityId'], '30251');
+    expect(stream?['url'], 'https://example.com/hires');
+  });
+
+  test('request errors fall back to the plain API and minimal DASH', () async {
+    final requests = <Uri>[];
+    BilibiliSdk.requestWith = (url, {cookies}) async {
+      final uri = Uri.parse(url);
+      requests.add(uri);
+      if (uri.path.endsWith('/wbi/playurl') &&
+          uri.queryParameters['fnval'] == '16') {
+        return jsonEncode({
+          'code': 0,
+          'data': {
+            'dash': {
+              'audio': [
+                {'id': 30232, 'baseUrl': 'https://example.com/audio'}
+              ]
+            }
+          }
+        });
+      }
+      return jsonEncode({'code': -400, 'message': '请求错误'});
+    };
+    addTearDown(() => BilibiliSdk.requestWith = null);
+    final stream = await BilibiliSdk.fetchAudioStream('BV1TEST', 123);
+    expect(stream?['url'], 'https://example.com/audio');
+    expect(
+        requests.map((uri) => '${uri.path}:${uri.queryParameters['fnval']}'), [
+      '/x/player/wbi/playurl:4048',
+      '/x/player/playurl:4048',
+      '/x/player/wbi/playurl:16'
+    ]);
+  });
+
   test('a lower-quality response leaves the existing file intact', () async {
     final audioDir = Directory('${docs.path}/bilibeat_audio');
     await audioDir.create(recursive: true);
