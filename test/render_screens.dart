@@ -1,3 +1,4 @@
+import 'package:bilibeats/services/import_download_queue.dart';
 // Renders the main screens to PNG, for looking at layout changes without a
 // device. Not part of the suite (no `_test` suffix); run it by hand:
 //
@@ -29,7 +30,6 @@ import 'favorite_import_fixture.dart';
 import 'player_page_harness.dart' show pumpUntil;
 import 'package:bilibeats/services/bili_account.dart';
 import 'package:bilibeats/services/bilibili_sdk.dart';
-import 'package:bilibeats/services/library_transfer.dart';
 import 'package:bilibeats/widgets/download_management_sheet.dart';
 
 /// The first CJK font found: macOS's, else a common Linux one.
@@ -337,9 +337,9 @@ void main({bool accountOnly = false}) {
       await shot(tester, 'favorite_parts');
       await tester.pumpWidget(const SizedBox());
       await operation(() async {
-        await LibraryTransfer.cancelAll();
-        await LibraryTransfer.pause();
-        await LibraryTransfer.enqueueDownloads(tracks
+        await ImportDownloadQueue.cancelAll();
+        await ImportDownloadQueue.pause();
+        await ImportDownloadQueue.enqueueDownloads(tracks
             .take(5)
             .map((t) => Track.fromMap({...t.toMap(), 'id': 'queue_${t.id}'}))
             .toList());
@@ -353,7 +353,7 @@ void main({bool accountOnly = false}) {
       await shot(tester, 'import_queue');
       await tester.pumpWidget(const SizedBox());
       await operation(() async {
-        await LibraryTransfer.cancelAll();
+        await ImportDownloadQueue.cancelAll();
         await BiliAccountStore.logOut();
       });
       BilibiliSdk.requestWith = null;

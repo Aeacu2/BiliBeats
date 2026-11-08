@@ -178,6 +178,13 @@ void main() {
       expect(BiliAccount.cookieValue(done.cookies!, 'SESSDATA'), 'x%2Cy%2Cz');
       expect(BiliAccount.cookieValue(done.cookies!, 'bili_jct'), 'jct');
       expect(done.cookies, isNot(contains('gourl')));
+      final fromHeaders = BilibiliSdk.parseQrPoll(
+          {'code': 0, 'url': 'https://passport.bilibili.com/'},
+          responseCookies: 'SESSDATA=header%2Cvalue; bili_jct=token')!;
+      expect(fromHeaders.state, QrLoginState.done);
+      expect(BiliAccount.cookieValue(fromHeaders.cookies!, 'SESSDATA'),
+          'header%2Cvalue');
+      expect(BilibiliSdk.parseQrPoll({'code': 0})?.state, QrLoginState.failed);
     });
 
     test('the account check needs a login', () {

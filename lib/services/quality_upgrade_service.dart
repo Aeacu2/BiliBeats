@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/track.dart';
 import 'audio_download_service.dart';
+import 'bili_account.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
 import 'download_manager.dart';
@@ -26,6 +27,67 @@ class QualityUpgradeCandidate {
     required this.targetQualityId,
     this.targetBandwidth,
   });
+}
+
+enum QualityScanState { idle, scanning, finished, stopped }
+
+/// Owns a scan independently of the sheet displaying it.
+class QualityScanController extends ChangeNotifier {
+  QualityScanController({this.scan = QualityUpgradeService.scanAll});
+
+  static final instance = QualityScanController();
+
+  final Future<List<QualityUpgradeCandidate>> Function({
+    void Function(int, int)? onProgress,
+    bool Function()? isCancelled,
+  }) scan;
+  QualityScanState state = QualityScanState.idle;
+  int scanned = 0;
+  int total = 0;
+  List<QualityUpgradeCandidate> candidates = [];
+  int _generation = 0;
+
+  Future<void> start() async {
+    if (state == QualityScanState.scanning) return;
+    final generation = ++_generation;
+    state = QualityScanState.scanning;
+    scanned = total = 0;
+    candidates = [];
+    notifyListeners();
+    try {
+      await BiliAccountStore.ensureLoaded();
+      if (generation != _generation) return;
+      final results = await scan(
+        onProgress: (current, count) {
+          if (generation != _generation) return;
+          scanned = current;
+          total = count;
+          notifyListeners();
+        },
+        isCancelled: () => generation != _generation,
+      );
+      if (generation != _generation) return;
+      candidates = results;
+      state = QualityScanState.finished;
+    } catch (e) {
+      if (generation != _generation) return;
+      debugPrint('Quality scan failed: $e');
+      state = QualityScanState.stopped;
+    }
+    notifyListeners();
+  }
+
+  void stop() {
+    if (state != QualityScanState.scanning) return;
+    _generation++;
+    state = QualityScanState.stopped;
+    notifyListeners();
+  }
+
+  void remove(String id) {
+    candidates = candidates.where((c) => c.track.id != id).toList();
+    notifyListeners();
+  }
 }
 
 class QualityUpgradeService {

@@ -155,7 +155,8 @@ class BilibiliSdk {
     return body;
   }
 
-  static Future<String?> _request(String rawUrl, {String? cookies}) async {
+  static Future<String?> _request(String rawUrl,
+      {String? cookies, void Function(String)? onResponseCookies}) async {
     try {
       final override = requestWith;
       if (override != null) return await override(rawUrl, cookies: cookies);
@@ -177,6 +178,8 @@ class BilibiliSdk {
         },
       );
       if (res.statusCode == 200) {
+        onResponseCookies
+            ?.call(res.cookies.map((c) => '${c.name}=${c.value}').join('; '));
         final body = await res
             .transform(utf8.decoder)
             .join()
@@ -656,14 +659,16 @@ class BilibiliSdk {
   /// Where a QR login stands: waiting, scanned, expired, or done with the
   /// session's cookies. Null when Bilibili could not be asked.
   static Future<QrLogin?> qrLoginPoll(String key) async {
-    final data =
-        _dataOf(await _httpGet('$_passport/x/passport-login/web/qrcode/poll'
-            '?qrcode_key=${Uri.encodeQueryComponent(key)}'));
-    return parseQrPoll(data);
+    var cookies = '';
+    final body = await _request(
+        '$_passport/x/passport-login/web/qrcode/poll'
+        '?qrcode_key=${Uri.encodeQueryComponent(key)}',
+        onResponseCookies: (value) => cookies = value);
+    return parseQrPoll(_dataOf(body), responseCookies: cookies);
   }
 
   @visibleForTesting
-  static QrLogin? parseQrPoll(Object? data) {
+  static QrLogin? parseQrPoll(Object? data, {String responseCookies = ''}) {
     if (data is! Map) return null;
     switch (data['code']) {
       case 86101:
@@ -678,8 +683,11 @@ class BilibiliSdk {
         final url = '${data['url'] ?? ''}';
         final query =
             url.contains('?') ? url.substring(url.indexOf('?') + 1) : '';
-        final cookies = BiliAccount.sessionCookies(query.replaceAll('&', ';'));
-        if (!BiliAccount.hasSession(cookies)) return null;
+        final cookies = BiliAccount.sessionCookies(
+            '$responseCookies; ${query.replaceAll('&', ';')}');
+        if (!BiliAccount.hasSession(cookies)) {
+          return const QrLogin(QrLoginState.failed);
+        }
         return QrLogin(QrLoginState.done, cookies);
     }
     return null;
@@ -1522,7 +1530,7 @@ class BilibiliSdk {
   }
 }
 
-enum QrLoginState { waiting, scanned, expired, done }
+enum QrLoginState { waiting, scanned, expired, done, failed }
 
 /// One answer while a QR login is pending.
 @immutable

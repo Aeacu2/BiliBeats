@@ -122,6 +122,8 @@ class StoreFiles {
   /// Whether a file was set aside in this launch.
   static bool get setAsideThisLaunch => _setAsideAny;
   static bool _setAsideAny = false;
+  // A failed rename must not allow a later save to destroy the only copy.
+  static final Set<String> _protectedPaths = {};
 
   /// Moves `<documents>/[name]`, which this build cannot read (damaged, or
   /// written by a newer build), out of the way to `<name>.unreadable`. The
@@ -132,14 +134,19 @@ class StoreFiles {
 
   static Future<void> _setAside(String path) async {
     _setAsideAny = true;
+    _protectedPaths.add(path);
     try {
       final file = File(path);
-      if (!await file.exists()) return;
+      if (!await file.exists()) {
+        _protectedPaths.remove(path);
+        return;
+      }
       var target = '$path.unreadable';
       if (await File(target).exists()) {
         target = '$path.${DateTime.now().millisecondsSinceEpoch}.unreadable';
       }
       await file.rename(target);
+      _protectedPaths.remove(path);
       debugPrint('StoreFiles: kept unreadable file as $target');
     } catch (e) {
       debugPrint('StoreFiles: could not set aside $path: $e');
@@ -154,6 +161,9 @@ class StoreFiles {
   /// be [EncodedJson] already) to `<documents>/[name]`. Failures propagate.
   static Future<void> write(String name, Object payload) async {
     final path = await pathOf(name);
+    if (_protectedPaths.contains(path)) {
+      throw FileSystemException('Unreadable file could not be preserved', path);
+    }
     final slash = name.lastIndexOf('/');
     if (slash > 0) {
       await Directory('${await documents()}/${name.substring(0, slash)}')

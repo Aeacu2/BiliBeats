@@ -1,3 +1,4 @@
+import '../services/import_download_queue.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -8,7 +9,6 @@ import '../services/audio_download_service.dart';
 import '../services/audio_folder.dart';
 import '../services/database_service.dart';
 import '../services/download_manager.dart';
-import '../services/library_transfer.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
 import '../utils/format.dart';
@@ -49,7 +49,7 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
   @override
   void initState() {
     super.initState();
-    LibraryTransfer.status.addListener(_queueChanged);
+    ImportDownloadQueue.status.addListener(_queueChanged);
     _refreshTasks();
     _refreshLibrary();
     _dlSub = DownloadManager.instance.updates.listen((_) => _refreshTasks());
@@ -63,7 +63,7 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
 
   @override
   void dispose() {
-    LibraryTransfer.status.removeListener(_queueChanged);
+    ImportDownloadQueue.status.removeListener(_queueChanged);
     _dlSub?.cancel();
     _libSub?.cancel();
     super.dispose();
@@ -113,8 +113,8 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
   @override
   Widget build(BuildContext context) {
     final totalBytes = _sizes.values.fold<int>(0, (sum, b) => sum + b);
-    final queue = LibraryTransfer.status.value;
-    final queued = LibraryTransfer.queuedTracks;
+    final queue = ImportDownloadQueue.status.value;
+    final queued = ImportDownloadQueue.queuedTracks;
     final isEmpty = _active.isEmpty &&
         _failed.isEmpty &&
         _downloaded.isEmpty &&
@@ -133,7 +133,8 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
                   _icon(
                     tooltip: '取消下载',
                     icon: Icons.close_rounded,
-                    onPressed: () => LibraryTransfer.cancelTrack(task.track.id),
+                    onPressed: () =>
+                        ImportDownloadQueue.cancelTrack(task.track.id),
                   ),
                 ],
               ),
@@ -154,8 +155,9 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
                     color: AppColors.accent,
                     onPressed: () {
                       Haptics.light();
-                      if (LibraryTransfer.contains(failed.track.id)) {
-                        unawaited(LibraryTransfer.retryTrack(failed.track.id));
+                      if (ImportDownloadQueue.contains(failed.track.id)) {
+                        unawaited(
+                            ImportDownloadQueue.retryTrack(failed.track.id));
                       } else {
                         DownloadManager.instance.retryDownload(failed.track.id);
                       }
@@ -165,14 +167,15 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
                     tooltip: '忽略',
                     icon: Icons.close_rounded,
                     onPressed: () {
-                      unawaited(LibraryTransfer.cancelTrack(failed.track.id));
+                      unawaited(
+                          ImportDownloadQueue.cancelTrack(failed.track.id));
                       DownloadManager.instance.dismissFailed(failed.track.id);
                     },
                   ),
                 ],
               ),
             ),
-      for (final track in LibraryTransfer.failedTracks
+      for (final track in ImportDownloadQueue.failedTracks
           .where((t) => !_failed.any((f) => f.track.id == t.id)))
         () => SongTile(
             track: track,
@@ -182,11 +185,11 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
               _icon(
                   tooltip: '重试',
                   icon: Icons.refresh_rounded,
-                  onPressed: () => LibraryTransfer.retryTrack(track.id)),
+                  onPressed: () => ImportDownloadQueue.retryTrack(track.id)),
               _icon(
                   tooltip: '忽略',
                   icon: Icons.close_rounded,
-                  onPressed: () => LibraryTransfer.cancelTrack(track.id)),
+                  onPressed: () => ImportDownloadQueue.cancelTrack(track.id)),
             ])),
       for (final track in queued)
         () => SongTile(
@@ -196,7 +199,7 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
             trailing: _icon(
                 tooltip: '取消排队',
                 icon: Icons.close_rounded,
-                onPressed: () => LibraryTransfer.cancelTrack(track.id))),
+                onPressed: () => ImportDownloadQueue.cancelTrack(track.id))),
       for (final track in _downloaded)
         () => SongTile(
               key: ValueKey('done-${track.id}'),
@@ -249,19 +252,19 @@ class _DownloadManagementSheetState extends State<DownloadManagementSheet> {
                 _icon(
                     tooltip: '重试导入失败项',
                     icon: Icons.refresh_rounded,
-                    onPressed: LibraryTransfer.retryFailed),
+                    onPressed: ImportDownloadQueue.retryFailed),
               _icon(
                   tooltip: queue.paused ? '继续导入' : '暂停导入',
                   icon: queue.paused
                       ? Icons.play_arrow_rounded
                       : Icons.pause_rounded,
                   onPressed: () => queue.paused
-                      ? LibraryTransfer.continueDownloads()
-                      : LibraryTransfer.pause()),
+                      ? ImportDownloadQueue.continueDownloads()
+                      : ImportDownloadQueue.pause()),
               _icon(
                   tooltip: '取消剩余导入',
                   icon: Icons.close_rounded,
-                  onPressed: LibraryTransfer.cancelAll),
+                  onPressed: ImportDownloadQueue.cancelAll),
             ]),
           ),
         Expanded(

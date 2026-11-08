@@ -29,6 +29,13 @@ class OnlineSearchController extends ChangeNotifier {
   DateTime _lastFailure = DateTime.fromMillisecondsSinceEpoch(0);
   final Set<String> _seen = {};
 
+  @override
+  void dispose() {
+    ++_token;
+    ++_historyToken;
+    super.dispose();
+  }
+
   /// The query the current results belong to ('' before any search).
   String get query => _query;
   List<Track> get results => _results;
@@ -71,6 +78,8 @@ class OnlineSearchController extends ChangeNotifier {
     } catch (e) {
       debugPrint('Search history write failed: $e');
     }
+
+    if (token != _token) return;
 
     try {
       final results = await BilibiliSdk.search(query);

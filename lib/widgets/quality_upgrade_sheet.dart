@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../services/bili_account.dart';
-import '../services/database_service.dart';
 import '../services/quality_upgrade_service.dart';
 import '../theme/app_theme.dart';
 import '../theme/haptics.dart';
@@ -30,67 +29,29 @@ class QualityUpgradeSheet extends StatefulWidget {
   State<QualityUpgradeSheet> createState() => _QualityUpgradeSheetState();
 }
 
-enum _ScanState { idle, scanning, finished }
-
 class _QualityUpgradeSheetState extends State<QualityUpgradeSheet> {
-  _ScanState _state = _ScanState.idle;
-  int _scanned = 0;
-  int _total = 0;
-  bool _cancelled = false;
-  List<QualityUpgradeCandidate> _candidates = [];
+  final _scan = QualityScanController.instance;
+  QualityScanState get _state => _scan.state;
+  int get _scanned => _scan.scanned;
+  int get _total => _scan.total;
+  List<QualityUpgradeCandidate> get _candidates => _scan.candidates;
   final Set<String> _upgradingIds = {};
 
   @override
   void initState() {
     super.initState();
-    unawaited(_autoStart());
+    _scan.addListener(_refresh);
+    if (_state == QualityScanState.idle) unawaited(_scan.start());
   }
 
-  Future<void> _autoStart() async {
-    await BiliAccountStore.ensureLoaded();
-    final downloaded = await DatabaseService.getDownloadedTracks();
-    final count = downloaded.where((t) => !t.isLocal).length;
-    if (!mounted) return;
-    setState(() => _total = count);
-    if (count > 0) {
-      unawaited(_startScan());
-    } else {
-      setState(() => _state = _ScanState.finished);
-    }
+  void _refresh() {
+    if (mounted) setState(() {});
   }
 
-  Future<void> _startScan() async {
-    if (_state == _ScanState.scanning) return;
-    setState(() {
-      _state = _ScanState.scanning;
-      _scanned = 0;
-      _cancelled = false;
-      _candidates = [];
-    });
-
-    final results = await QualityUpgradeService.scanAll(
-      onProgress: (current, total) {
-        if (!mounted) return;
-        setState(() {
-          _scanned = current;
-          _total = total;
-        });
-      },
-      isCancelled: () => _cancelled,
-    );
-
-    if (!mounted) return;
-    setState(() {
-      _candidates = results;
-      _state = _ScanState.finished;
-    });
-  }
-
-  void _cancelScan() {
-    _cancelled = true;
-    setState(() {
-      _state = _ScanState.finished;
-    });
+  @override
+  void dispose() {
+    _scan.removeListener(_refresh);
+    super.dispose();
   }
 
   Future<void> _upgradeCandidate(QualityUpgradeCandidate candidate) async {
@@ -100,12 +61,10 @@ class _QualityUpgradeSheetState extends State<QualityUpgradeSheet> {
     });
     try {
       await QualityUpgradeService.upgrade(candidate);
+      _scan.remove(candidate.track.id);
       if (!mounted) return;
       showAppSnackBar(ScaffoldMessenger.of(context),
           message: '已重新下载「${candidate.track.title}」');
-      setState(() {
-        _candidates.removeWhere((c) => c.track.id == candidate.track.id);
-      });
     } catch (e) {
       if (!mounted) return;
       showAppSnackBar(ScaffoldMessenger.of(context), message: '升级失败: $e');
@@ -124,9 +83,9 @@ class _QualityUpgradeSheetState extends State<QualityUpgradeSheet> {
     final messenger = ScaffoldMessenger.of(context);
     final count = _candidates.length;
     final toUpgrade = List<QualityUpgradeCandidate>.from(_candidates);
-    setState(() {
-      _candidates = [];
-    });
+    for (final candidate in toUpgrade) {
+      _scan.remove(candidate.track.id);
+    }
     Navigator.of(context).pop();
     unawaited(QualityUpgradeService.upgradeAll(toUpgrade));
     showAppSnackBar(messenger, message: '正在逐首重新下载 $count 首歌曲，请保持应用运行');
@@ -196,7 +155,7 @@ class _QualityUpgradeSheetState extends State<QualityUpgradeSheet> {
   }
 
   Widget _buildBody() {
-    if (_state == _ScanState.scanning) {
+    if (_state == QualityScanState.scanning) {
       final progress = _total > 0 ? _scanned / _total : 0.0;
       return Expanded(
         child: Center(
@@ -230,7 +189,7 @@ class _QualityUpgradeSheetState extends State<QualityUpgradeSheet> {
               ),
               const SizedBox(height: 24),
               TextButton(
-                onPressed: _cancelScan,
+                onPressed: _scan.stop,
                 child: const Text('停止检查',
                     style: TextStyle(color: AppColors.textFaint)),
               ),
@@ -241,7 +200,18 @@ class _QualityUpgradeSheetState extends State<QualityUpgradeSheet> {
       );
     }
 
-    if (_state == _ScanState.finished) {
+    if (_state == QualityScanState.stopped) {
+      return Expanded(
+        child: Center(
+          child: TextButton(
+            onPressed: () => unawaited(_scan.start()),
+            child: const Text('重新检查'),
+          ),
+        ),
+      );
+    }
+
+    if (_state == QualityScanState.finished) {
       if (_candidates.isEmpty) {
         return Expanded(
           child: EmptyState(
@@ -362,8 +332,15 @@ class _QualityUpgradeSheetState extends State<QualityUpgradeSheet> {
       children: [
         SheetTitle(
           '检查更新音质',
-          detail: _state == _ScanState.finished && _candidates.isNotEmpty
+          detail: _state == QualityScanState.finished && _candidates.isNotEmpty
               ? '${_candidates.length} 首可升级'
+              : null,
+          trailing: _state == QualityScanState.finished
+              ? IconButton(
+                  tooltip: '重新检查',
+                  onPressed: () => unawaited(_scan.start()),
+                  icon: const Icon(Icons.refresh_rounded),
+                )
               : null,
         ),
         _buildAccountBanner(),

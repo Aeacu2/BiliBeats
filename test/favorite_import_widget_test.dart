@@ -1,3 +1,4 @@
+import 'package:bilibeats/services/import_download_queue.dart';
 import 'dart:async';
 
 import 'package:bilibeats/app/app_services.dart';
@@ -5,7 +6,6 @@ import 'package:bilibeats/services/audio_player_handler.dart';
 import 'package:bilibeats/services/bili_account.dart';
 import 'package:bilibeats/services/bilibili_sdk.dart';
 import 'package:bilibeats/services/database_service.dart';
-import 'package:bilibeats/services/library_transfer.dart';
 import 'package:bilibeats/theme/app_theme.dart';
 import 'package:bilibeats/widgets/bili_account_sheet.dart';
 import 'package:bilibeats/widgets/sheet.dart';
@@ -37,7 +37,7 @@ void main() {
     }))!;
     BilibiliSdk.requestWith = favoriteImportResponse;
     var downloads = 0;
-    LibraryTransfer.downloadWith = (t) async {
+    ImportDownloadQueue.downloadWith = (t) async {
       downloads++;
       return true;
     };
@@ -84,6 +84,6 @@ void main() {
     }());
     await pumpUntil(tester, () => cleanedUp);
     BilibiliSdk.requestWith = null;
-    LibraryTransfer.downloadWith = null;
+    ImportDownloadQueue.downloadWith = null;
   });
 }

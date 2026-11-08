@@ -1,3 +1,4 @@
+import 'services/import_download_queue.dart';
 import 'dart:async';
 
 import 'package:audio_service/audio_service.dart';
@@ -13,7 +14,6 @@ import 'services/audio_player_handler.dart';
 import 'services/background_protection.dart';
 import 'services/error_log.dart';
 import 'services/download_favorites.dart';
-import 'services/library_transfer.dart';
 import 'services/local_songs.dart';
 import 'services/track_naming.dart';
 import 'theme/app_theme.dart';
@@ -75,7 +75,7 @@ Future<void> main() async {
   // A file opened with BiliBeats plays once the last session is back, not
   // to be replaced by it.
   LocalSongs.followOpened(handler, after: restored);
-  unawaited(LibraryTransfer.resume());
+  unawaited(ImportDownloadQueue.resume());
   AudioFolder.followLibrary();
   DownloadFavorites.followLibrary();
 

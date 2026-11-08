@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -13,6 +14,40 @@ void main() {
   late Directory docs;
   setUpAll(() async {
     docs = await stubDocs('quality_upgrade');
+  });
+  test('scan survives listeners leaving and ignores a stopped scan', () async {
+    final pending = <Completer<List<QualityUpgradeCandidate>>>[];
+    final progress = <void Function(int, int)>[];
+    final started = <Completer<void>>[Completer<void>(), Completer<void>()];
+    final controller = QualityScanController(scan: ({onProgress, isCancelled}) {
+      progress.add(onProgress!);
+      final completer = Completer<List<QualityUpgradeCandidate>>();
+      pending.add(completer);
+      started[pending.length - 1].complete();
+      return completer.future;
+    });
+    var notifications = 0;
+    void listener() => notifications++;
+    controller.addListener(listener);
+    final first = controller.start();
+    await started.first.future;
+    controller.removeListener(listener);
+    progress.first(1, 3);
+    expect(controller.scanned, 1);
+    expect(controller.state, QualityScanState.scanning);
+    controller.stop();
+    final second = controller.start();
+    await started.last.future;
+    pending.first.complete([]);
+    await first;
+    expect(controller.state, QualityScanState.scanning);
+    progress.last(2, 3);
+    pending.last.complete([]);
+    await second;
+    expect(controller.state, QualityScanState.finished);
+    expect(controller.scanned, 2);
+    expect(notifications, greaterThan(0));
+    controller.dispose();
   });
   test('qualityRank correctly orders audio quality tiers', () {
     expect(QualityUpgradeService.qualityRank(30251), 500); // Hi-Res

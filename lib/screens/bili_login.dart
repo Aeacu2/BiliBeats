@@ -247,6 +247,11 @@ class _QrLoginState extends State<_QrLogin> {
     try {
       final answer = await BilibiliSdk.qrLoginPoll(key);
       if (answer == null || !mounted) return;
+      if (answer.state == QrLoginState.failed) {
+        _poll?.cancel();
+        setState(() => _failed = true);
+        return;
+      }
       if (answer.state == QrLoginState.done) {
         _poll?.cancel();
         final account = await BilibiliSdk.accountFor(answer.cookies!);

@@ -1,8 +1,8 @@
+import 'import_download_queue.dart';
 import '../models/track.dart';
 import 'bili_account.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
-import 'library_transfer.dart';
 import 'prefs.dart';
 
 /// A folder scan can resume the failed page, without presenting partial data
@@ -112,7 +112,7 @@ class BiliFavorites {
     await Prefs.set(_pref, sources);
     BiliAccountStore.notifyChanged();
     final queued =
-        download ? await LibraryTransfer.enqueueDownloads(tracks) : 0;
+        download ? await ImportDownloadQueue.enqueueDownloads(tracks) : 0;
     return (queued: queued, playlistId: playlist.id);
   }
 

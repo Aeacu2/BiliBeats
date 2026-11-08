@@ -1,3 +1,4 @@
+import 'package:bilibeats/services/import_download_queue.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -8,6 +9,7 @@ import 'package:bilibeats/models/playlist.dart';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/database_service.dart';
 import 'package:bilibeats/services/library_transfer.dart';
+import 'package:bilibeats/services/store_files.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
@@ -34,7 +36,18 @@ void main() {
     await DatabaseService.getDownloadedTracks();
   });
 
-  setUp(LibraryTransfer.resetForTest);
+  setUp(ImportDownloadQueue.resetForTest);
+
+  test('an unreadable import queue is preserved before it is replaced',
+      () async {
+    final path = await StoreFiles.pathOf('bilibeat_import.json');
+    final file = File(path);
+    const damaged = '{"unfinished":';
+    await file.writeAsString(damaged);
+    await ImportDownloadQueue.resume();
+    await ImportDownloadQueue.cancelAll();
+    expect(await File('$path.unreadable').readAsString(), damaged);
+  });
 
   /// The queue is written to disk between downloads: real IO, real time.
   Future<void> until(bool Function() done) async {
@@ -130,7 +143,7 @@ void main() {
     var most = 0;
     final fetched = <String>[];
     final gate = Completer<void>();
-    LibraryTransfer.downloadWith = (track) async {
+    ImportDownloadQueue.downloadWith = (track) async {
       most = ++running > most ? running : most;
       await gate.future;
       running--;
@@ -147,13 +160,13 @@ void main() {
       ],
     ));
     expect(result, (queued: 4, present: 1, playlists: 3));
-    expect(LibraryTransfer.remaining.value, 4);
+    expect(ImportDownloadQueue.remaining.value, 4);
 
     gate.complete();
-    await until(() => LibraryTransfer.remaining.value == 0);
+    await until(() => ImportDownloadQueue.remaining.value == 0);
     expect(most, 2);
     expect(fetched.toSet(), incoming.map((t) => t.id).toSet());
-    expect(LibraryTransfer.remaining.value, 0);
+    expect(ImportDownloadQueue.remaining.value, 0);
 
     final lists = await DatabaseService.getPlaylists();
     Playlist named(String name) => lists.firstWhere((p) => p.name == name);
@@ -169,7 +182,7 @@ void main() {
   });
 
   test('two incoming playlists of one name become one here', () async {
-    LibraryTransfer.downloadWith = (_) async => true;
+    ImportDownloadQueue.downloadWith = (_) async => true;
     final a = song('J'), b = song('K');
     await LibraryTransfer.import(LibrarySnapshot(
       tracks: [a, b],
@@ -182,144 +195,145 @@ void main() {
     final same = lists.where((p) => p.name == '通勤');
     expect(same, hasLength(1));
     expect(same.single.tracks.map((t) => t.id).toSet(), {a.id, b.id});
-    await until(() => LibraryTransfer.remaining.value == 0);
+    await until(() => ImportDownloadQueue.remaining.value == 0);
   });
 
   test('an unfinished import carries on after a restart', () async {
     final tracks = [song('J'), song('K')];
     final fetched = <String>[];
-    LibraryTransfer.downloadWith = (track) async {
+    ImportDownloadQueue.downloadWith = (track) async {
       // J cannot be had this time; K is never reached before the app dies.
       if (track.id == tracks[0].id) return false;
       return Completer<bool>().future;
     };
     await LibraryTransfer.import(
         LibrarySnapshot(tracks: tracks, playlists: const []));
-    await until(() => LibraryTransfer.remaining.value == 1);
-    expect(LibraryTransfer.remaining.value, 1,
+    await until(() => ImportDownloadQueue.remaining.value == 1);
+    expect(ImportDownloadQueue.remaining.value, 1,
         reason: 'a failure is not hammered again in the same run');
 
-    LibraryTransfer.resetForTest();
-    LibraryTransfer.downloadWith = (track) async {
+    ImportDownloadQueue.resetForTest();
+    ImportDownloadQueue.downloadWith = (track) async {
       fetched.add(track.id);
       return true;
     };
-    await LibraryTransfer.resume();
-    await until(() => LibraryTransfer.remaining.value == 0);
+    await ImportDownloadQueue.resume();
+    await until(() => ImportDownloadQueue.remaining.value == 0);
     expect(fetched.toSet(), {tracks[0].id, tracks[1].id});
-    expect(LibraryTransfer.remaining.value, 0);
+    expect(ImportDownloadQueue.remaining.value, 0);
   });
   test('pause survives restart and resume continues the same queue', () async {
-    await LibraryTransfer.cancelAll();
-    await LibraryTransfer.pause();
+    await ImportDownloadQueue.cancelAll();
+    await ImportDownloadQueue.pause();
     final called = <String>[];
-    LibraryTransfer.downloadWith = (t) async {
+    ImportDownloadQueue.downloadWith = (t) async {
       called.add(t.id);
       return true;
     };
-    await LibraryTransfer.enqueueDownloads([song('pause1'), song('pause2')]);
+    await ImportDownloadQueue.enqueueDownloads(
+        [song('pause1'), song('pause2')]);
     expect(called, isEmpty);
-    expect(LibraryTransfer.status.value.paused, isTrue);
-    LibraryTransfer.resetForTest();
-    LibraryTransfer.downloadWith = (t) async {
+    expect(ImportDownloadQueue.status.value.paused, isTrue);
+    ImportDownloadQueue.resetForTest();
+    ImportDownloadQueue.downloadWith = (t) async {
       called.add(t.id);
       return true;
     };
-    await LibraryTransfer.resume();
+    await ImportDownloadQueue.resume();
     expect(called, isEmpty);
-    expect(LibraryTransfer.status.value.pending, 2);
-    await LibraryTransfer.continueDownloads();
-    await until(() => LibraryTransfer.remaining.value == 0);
+    expect(ImportDownloadQueue.status.value.pending, 2);
+    await ImportDownloadQueue.continueDownloads();
+    await until(() => ImportDownloadQueue.remaining.value == 0);
     expect(called, hasLength(2));
-    expect(LibraryTransfer.status.value.completed, 2);
+    expect(ImportDownloadQueue.status.value.completed, 2);
   });
 
   test(
       'cancelling queued songs persists and does not erase playlist membership',
       () async {
-    await LibraryTransfer.cancelAll();
-    await LibraryTransfer.pause();
+    await ImportDownloadQueue.cancelAll();
+    await ImportDownloadQueue.pause();
     final one = song('cancel1');
     final two = song('cancel2');
     final playlist = await DatabaseService.createPlaylist('取消下载保留歌单');
     await DatabaseService.addTracksToPlaylist(playlist.id, [one, two]);
-    await LibraryTransfer.enqueueDownloads([one, two]);
-    await LibraryTransfer.cancelTrack(one.id);
-    LibraryTransfer.resetForTest();
+    await ImportDownloadQueue.enqueueDownloads([one, two]);
+    await ImportDownloadQueue.cancelTrack(one.id);
+    ImportDownloadQueue.resetForTest();
     final called = <String>[];
-    LibraryTransfer.downloadWith = (t) async {
+    ImportDownloadQueue.downloadWith = (t) async {
       called.add(t.id);
       return true;
     };
-    await LibraryTransfer.resume();
-    await LibraryTransfer.continueDownloads();
-    await until(() => LibraryTransfer.remaining.value == 0);
+    await ImportDownloadQueue.resume();
+    await ImportDownloadQueue.continueDownloads();
+    await until(() => ImportDownloadQueue.remaining.value == 0);
     expect(called, [two.id]);
     final local = (await DatabaseService.getPlaylists())
         .firstWhere((p) => p.id == playlist.id);
     expect(local.tracks, hasLength(2));
-    await LibraryTransfer.pause();
-    await LibraryTransfer.enqueueDownloads([one]);
-    await LibraryTransfer.cancelAll();
-    LibraryTransfer.resetForTest();
-    LibraryTransfer.downloadWith = (t) async {
+    await ImportDownloadQueue.pause();
+    await ImportDownloadQueue.enqueueDownloads([one]);
+    await ImportDownloadQueue.cancelAll();
+    ImportDownloadQueue.resetForTest();
+    ImportDownloadQueue.downloadWith = (t) async {
       called.add(t.id);
       return true;
     };
-    await LibraryTransfer.resume();
-    expect(LibraryTransfer.status.value.pending, 0);
+    await ImportDownloadQueue.resume();
+    expect(ImportDownloadQueue.status.value.pending, 0);
     expect(called, [two.id]);
   });
 
   test(
       'retry failed imports uses the queue and duplicate imports do not reset work',
       () async {
-    await LibraryTransfer.cancelAll();
+    await ImportDownloadQueue.cancelAll();
     var calls = 0;
-    LibraryTransfer.downloadWith = (t) async {
+    ImportDownloadQueue.downloadWith = (t) async {
       calls++;
       return false;
     };
     final t = song('retry');
-    expect(await LibraryTransfer.enqueueDownloads([t]), 1);
-    await until(() => LibraryTransfer.status.value.failed == 1);
+    expect(await ImportDownloadQueue.enqueueDownloads([t]), 1);
+    await until(() => ImportDownloadQueue.status.value.failed == 1);
     expect(calls, 1);
-    expect(await LibraryTransfer.enqueueDownloads([t]), 0);
+    expect(await ImportDownloadQueue.enqueueDownloads([t]), 0);
     expect(calls, 1);
-    LibraryTransfer.downloadWith = (t) async {
+    ImportDownloadQueue.downloadWith = (t) async {
       calls++;
       return true;
     };
-    await LibraryTransfer.retryFailed();
-    await until(() => LibraryTransfer.status.value.pending == 0);
+    await ImportDownloadQueue.retryFailed();
+    await until(() => ImportDownloadQueue.status.value.pending == 0);
     expect(calls, 2);
   });
 
   test('late completion of a cancelled job cannot remove a requeued song',
       () async {
-    await LibraryTransfer.cancelAll();
+    await ImportDownloadQueue.cancelAll();
     final gate = Completer<bool>();
     var calls = 0;
-    LibraryTransfer.downloadWith = (t) {
+    ImportDownloadQueue.downloadWith = (t) {
       calls++;
       return gate.future;
     };
     final t = song('late');
-    await LibraryTransfer.enqueueDownloads([t]);
+    await ImportDownloadQueue.enqueueDownloads([t]);
     await until(() => calls == 1);
-    await LibraryTransfer.cancelTrack(t.id);
-    await LibraryTransfer.pause();
-    await LibraryTransfer.enqueueDownloads([t]);
+    await ImportDownloadQueue.cancelTrack(t.id);
+    await ImportDownloadQueue.pause();
+    await ImportDownloadQueue.enqueueDownloads([t]);
     gate.complete(true);
     await Future<void>.delayed(const Duration(milliseconds: 40));
-    expect(LibraryTransfer.contains(t.id), isTrue);
-    expect(LibraryTransfer.status.value.completed, 0);
-    LibraryTransfer.downloadWith = (t) async {
+    expect(ImportDownloadQueue.contains(t.id), isTrue);
+    expect(ImportDownloadQueue.status.value.completed, 0);
+    ImportDownloadQueue.downloadWith = (t) async {
       calls++;
       return true;
     };
-    await LibraryTransfer.continueDownloads();
-    await until(() => LibraryTransfer.status.value.pending == 0);
+    await ImportDownloadQueue.continueDownloads();
+    await until(() => ImportDownloadQueue.status.value.pending == 0);
     expect(calls, 2);
   });
 }

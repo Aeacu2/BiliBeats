@@ -85,6 +85,26 @@ void main() {
     expect((await LyricsStore.get(track.id))?.pinned, isTrue);
   });
 
+  test('a failed attempt to preserve a file blocks writes until it succeeds',
+      () async {
+    const name = 'bilibeat_protected_test.json';
+    final original = File('${docs.path}/$name');
+    final blockedTarget = Directory('${original.path}.unreadable');
+    await original.writeAsString('valuable data');
+    await blockedTarget.create();
+
+    await StoreFiles.setAside(name);
+    await expectLater(StoreFiles.write(name, {'new': true}),
+        throwsA(isA<FileSystemException>()));
+    expect(await original.readAsString(), 'valuable data');
+
+    await blockedTarget.delete();
+    await StoreFiles.setAside(name);
+    await StoreFiles.write(name, {'new': true});
+    expect(await File('${original.path}.unreadable').readAsString(),
+        'valuable data');
+  });
+
   group('a picked cover follows the documents folder', () {
     const now = '/var/mobile/Containers/Data/Application/NEW/Documents';
 

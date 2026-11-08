@@ -1,3 +1,4 @@
+import 'package:bilibeats/services/import_download_queue.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -6,7 +7,6 @@ import 'package:bilibeats/services/bili_account.dart';
 import 'package:bilibeats/services/bili_favorites.dart';
 import 'package:bilibeats/services/bilibili_sdk.dart';
 import 'package:bilibeats/services/database_service.dart';
-import 'package:bilibeats/services/library_transfer.dart';
 import 'package:bilibeats/services/recommendation_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -275,12 +275,12 @@ void main() {
     expect(await BilibiliSdk.fetchSubtitles('BVcache', cid: 1), isNull);
   });
   test('accepting an import queues only the chosen parts', () async {
-    LibraryTransfer.resetForTest();
-    await LibraryTransfer.cancelAll();
+    ImportDownloadQueue.resetForTest();
+    await ImportDownloadQueue.cancelAll();
     final selected = Track.fromMap(
         {...track('BVparts').toMap(), 'id': 'BVparts_p2', 'cid': 2});
     final downloaded = <String>[];
-    LibraryTransfer.downloadWith = (t) async {
+    ImportDownloadQueue.downloadWith = (t) async {
       downloaded.add(t.id);
       return true;
     };
@@ -292,8 +292,8 @@ void main() {
         recommend: false,
         download: true);
     expect(result.queued, 1);
-    await waitFor(() => LibraryTransfer.status.value.pending == 0);
+    await waitFor(() => ImportDownloadQueue.status.value.pending == 0);
     expect(downloaded, ['BVparts_p2']);
-    LibraryTransfer.resetForTest();
+    ImportDownloadQueue.resetForTest();
   });
 }

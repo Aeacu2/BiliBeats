@@ -155,7 +155,7 @@ docs/archive/               old review notes and a superseded feature list — h
   importing (`FavoriteScan`, `FavoriteImportSheet`): title-based preselection,
   all videos visible, optional part expansion, download and taste opt-ins.
   `BiliFavorites` links folders by account/folder IDs to local playlists in
-  `biliFavoriteSources`; imports only add. `LibraryTransfer` owns the shared
+  `biliFavoriteSources`; imports only add. `ImportDownloadQueue` owns the shared
   persistent download queue (pause/resume/cancel/retry in download management).
   History recommendations are opt-in per account, scan at most four pages,
   ignore accidental starts, and do not permanently exclude watched videos.
