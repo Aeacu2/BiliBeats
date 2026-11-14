@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
 import 'package:bilibeats/services/store_files.dart';
+import 'package:bilibeats/services/trim_store.dart';
 
 /// A file this build cannot read — written by a newer build, or damaged —
 /// must survive the next save: it holds the only copy of the listener's
@@ -83,6 +84,27 @@ void main() {
     final aside = File('${docs.path}/bilibeat_lyrics.json.unreadable');
     expect(await aside.readAsString(), newerLyrics);
     expect((await LyricsStore.get(track.id))?.pinned, isTrue);
+  });
+
+  test('clearing a trim before the first load removes it from disk', () async {
+    const trimmed = 'track-to-clear';
+    const other = 'track-to-keep';
+    await StoreFiles.write('bilibeat_trims.json', {
+      trimmed: {'s': 1200},
+      other: {'s': 850},
+    });
+    TrimStore.reset();
+    addTearDown(TrimStore.reset);
+
+    await TrimStore.set(trimmed, null);
+
+    expect(TrimStore.of(trimmed), isNull);
+    expect(TrimStore.of(other)?.start, const Duration(milliseconds: 850));
+    final saved = StoreFiles.unwrap(
+        jsonDecode((await StoreFiles.readText('bilibeat_trims.json'))!));
+    expect(saved, {
+      other: {'s': 850}
+    });
   });
 
   test('a failed attempt to preserve a file blocks writes until it succeeds',

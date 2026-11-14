@@ -20,13 +20,21 @@ void useRealHttp() {
 /// instead of hanging on network timeouts, and results stay deterministic
 /// with or without ambient connectivity.
 class _SelectiveOverrides extends HttpOverrides {
+  _SelectiveOverrides({required this.allowMockCdn});
+
+  final bool allowMockCdn;
+
   @override
-  HttpClient createHttpClient(SecurityContext? context) => _SelectiveClient();
+  HttpClient createHttpClient(SecurityContext? context) =>
+      _SelectiveClient(allowMockCdn: allowMockCdn);
 }
 
 class _RealHolder extends HttpOverrides {}
 
 class _SelectiveClient implements HttpClient {
+  _SelectiveClient({required this.allowMockCdn});
+
+  final bool allowMockCdn;
   HttpClient? _real;
 
   HttpClient get _r => _real ??= HttpOverrides.runWithHttpOverrides(
@@ -37,7 +45,8 @@ class _SelectiveClient implements HttpClient {
   @override
   Future<HttpClientRequest> getUrl(Uri url) {
     if (url.host == '127.0.0.1' || url.host == 'localhost') {
-      return _r.getUrl(url);
+      // The SDK upgrades CDN links to HTTPS. A local mock uses plain HTTP.
+      return _r.getUrl(allowMockCdn ? url.replace(scheme: 'http') : url);
     }
     throw const SocketException('external network disabled in tests');
   }
@@ -77,8 +86,8 @@ class _SelectiveClient implements HttpClient {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-void useHermeticHttp() {
-  HttpOverrides.global = _SelectiveOverrides();
+void useHermeticHttp({bool allowMockCdn = false}) {
+  HttpOverrides.global = _SelectiveOverrides(allowMockCdn: allowMockCdn);
 }
 
 /// Local HTTP audio origin for handler tests: no real network, fully

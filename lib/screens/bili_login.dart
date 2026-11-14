@@ -26,6 +26,18 @@ class BiliLogin {
   /// need the Android side.
   static bool get canLogInHere => !kIsWeb && Platform.isAndroid;
 
+  @visibleForTesting
+  static bool isTrustedLoginUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.userInfo.isNotEmpty ||
+        uri.port != 443) {
+      return false;
+    }
+    return uri.host == 'bilibili.com' || uri.host.endsWith('.bilibili.com');
+  }
+
   /// How to log in; completes once logged in (or given up).
   static Future<void> start(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -67,6 +79,7 @@ class BiliLogin {
     await BiliAccountStore.save(account);
     // Songs no name was found for get another look, subtitles in hand.
     await TrackNaming.retryUnnamed();
+    if (!messenger.mounted) return;
     showAppSnackBar(messenger,
         message: account.name.isEmpty ? '已登录' : '已登录：${account.name}');
   }
@@ -122,12 +135,14 @@ class _LoginPageState extends State<_LoginPage> {
     ..setBackgroundColor(AppColors.background)
     ..setNavigationDelegate(NavigationDelegate(
       onPageFinished: (_) => unawaited(_check()),
-      // Links that leave the web (open the Bilibili app, a store page)
-      // have nowhere to go here, and nothing is loaded in the clear while
-      // the page holds a session.
-      onNavigationRequest: (request) => request.url.startsWith('https://')
-          ? NavigationDecision.navigate
-          : NavigationDecision.prevent,
+      onNavigationRequest: (request) {
+        if (request.isMainFrame && !BiliLogin.isTrustedLoginUrl(request.url)) {
+          return NavigationDecision.prevent;
+        }
+        return request.url.startsWith('https://')
+            ? NavigationDecision.navigate
+            : NavigationDecision.prevent;
+      },
     ))
     ..loadRequest(_page);
 
@@ -149,7 +164,7 @@ class _LoginPageState extends State<_LoginPage> {
   }
 
   Future<void> _check() async {
-    if (_checking || _done) return;
+    if (!mounted || _checking || _done) return;
     _checking = true;
     try {
       final all = [
@@ -219,6 +234,7 @@ class _QrLoginState extends State<_QrLogin> {
     _poll?.cancel();
     setState(() {
       _url = null;
+      _key = null;
       _failed = false;
       _state = QrLoginState.waiting;
     });
@@ -232,9 +248,13 @@ class _QrLoginState extends State<_QrLogin> {
       _url = started.url;
       _key = started.key;
     });
-    if (widget.here && !await BiliLogin._openInBilibili(started.url)) {
-      if (mounted) Navigator.of(context).pop(_QrLogin.noApp);
-      return;
+    if (widget.here) {
+      final opened = await BiliLogin._openInBilibili(started.url);
+      if (!mounted) return;
+      if (!opened) {
+        Navigator.of(context).pop(_QrLogin.noApp);
+        return;
+      }
     }
     _poll =
         Timer.periodic(const Duration(seconds: 2), (_) => unawaited(_check()));

@@ -1,3 +1,4 @@
+import 'dart:async' show Completer;
 import 'dart:io';
 
 import 'package:bilibeats/services/error_log.dart';
@@ -37,5 +38,27 @@ void main() {
     expect(log, contains('error 399 '));
     expect(log, isNot(contains('error 0 ')));
     expect(File('${docs.path}/bilibeat_errors.log').existsSync(), isTrue);
+  });
+
+  test('copy removes its snapshot and retains entries logged during copy',
+      () async {
+    await ErrorLog.clear();
+    ErrorLog.record('before clipboard', null);
+    final copying = Completer<void>();
+    final finish = Completer<void>();
+    final copy = ErrorLog.copyAndClear((text) {
+      expect(text, contains('before clipboard'));
+      copying.complete();
+      return finish.future;
+    });
+    await copying.future;
+    ErrorLog.record('during clipboard', null);
+    finish.complete();
+    await copy;
+
+    final remaining = await ErrorLog.read();
+    expect(remaining, contains('during clipboard'));
+    expect(remaining, isNot(contains('before clipboard')));
+    expect(ErrorLog.hasEntries.value, isTrue);
   });
 }

@@ -6,6 +6,8 @@
 
 - **[最新版本](https://github.com/Aeacu2/BiliBeats/releases/latest)**
 
+发布版本支持 Android、iOS 和 macOS。仓库保留 Windows、Linux 和 Web 的 Flutter 工程骨架，这三个平台没有发布构建，播放和本地资料库功能也未完成适配。
+
 ---
 
 ### Android 安装
@@ -81,21 +83,23 @@ tool/build_release.sh all
 
 **Android** — 单一混淆构建的 **arm64-v8a** APK。项目已永久放弃 32 位架构；ARM 笔记本（Apple Silicon、Windows on ARM）同样使用 arm64-v8a，因此该构建可覆盖上述全部设备。**需要 JDK 21 及以上版本**——AGP 内置 lint 在 JDK 17 下会因 `NoSuchMethodError` 失败，报错信息与 Java 版本无关，难以排查。
 
-**iOS** — 混淆构建的**未签名 .ipa**（位于 `build/ios/ipa/`）。本应用未注册 Apple Developer 账号，因此无法上架 App Store；请通过 AltStore / Sideloadly / 自有描述文件签名安装，即以您自己的身份为其签名。构建需 macOS 及 Xcode，支持 iOS 15 及以上版本。
+**iOS** — 混淆构建的**未签名 .ipa**。本应用未注册 Apple Developer 账号，因此无法上架 App Store；请通过 AltStore / Sideloadly / 自有描述文件签名安装，即以您自己的身份为其签名。构建需 macOS 及 Xcode，支持 iOS 15 及以上版本。
 
 iOS 工程**不依赖 CocoaPods**。本项目使用的全部插件均自带 `Package.swift`，已通过 Swift Package Manager 完成集成，并有意删除了 `ios/Podfile`——残留的 Podfile 会导致构建在未安装 CocoaPods 时报错。若未来某个插件仅支持 Pods 集成，请使用 `flutter create .` 重新生成 Podfile，并在本文件中说明。
 
-混淆意味着发布构建的崩溃堆栈需配合对应构建的符号文件方可解析。符号文件输出至 `symbols/<版本号>/` 目录，请妥善保留（并随发布一并提供），解码命令如下：
+Android 构建使用 Flutter 选定的 JDK。可用 `flutter config --jdk-dir=/path/to/jdk` 指定路径。Android 发布脚本也需要 Python 3。
+
+发布脚本将安装包及配套的 Dart 符号一同归档到 `symbols/<版本号+构建号>/<平台>/`，并拒绝覆盖已有的平台归档。若 `all` 构建中途失败，可单独构建尚未归档的平台。使用 `ALLOW_UNTAGGED=1` 的开发构建将安装包和符号写入 `symbols/dev/<平台>/`。解析发布版崩溃堆栈时，请使用与安装包一同归档的符号：
 
 ```bash
-flutter symbolize -i trace.txt -d symbols/<版本号>/app.android-arm64.symbols
+flutter symbolize -i trace.txt -d 'symbols/<版本号+构建号>/android/app.android-arm64.symbols'
 ```
 
-（iOS 崩溃堆栈使用同一目录下的 `app.ios-arm64.symbols`。）
+（iOS 崩溃堆栈使用 `ios/app.ios-arm64.symbols`，macOS 使用 `macos/` 下对应架构的符号。）
 
 ## 开发
 
-日常开发只需标准 Flutter 工具链：
+日常开发需要 Flutter 3.47.0 或更新版本。当前锁定的依赖需要 Dart 3.13.0 或更新版本，CI 使用 Flutter 3.47.7。
 
 ```bash
 flutter analyze   # 静态检查（未使用的成员与死代码在本项目中按错误处理）
@@ -113,8 +117,7 @@ flutter test test/render_screens.dart --update-goldens
 歌曲识别的回归语料（真实 B 站视频的标题等信息）与模型训练数据仅保存在开发者本机，
 不随仓库发布；依赖它们的测试在缺少相应文件时自动跳过。
 
-每次 push / PR 由 GitHub Actions（`.github/workflows/ci.yml`）自动执行
-`flutter analyze` 与 `flutter test`，Flutter 版本固定为 3.47.7，升级 SDK 时请同步更新。
+推送至主分支或提交 PR 时，GitHub Actions 会运行静态检查、离线测试，并为三个发布平台构建混淆包。CI 固定使用 Flutter 3.47.7 和锁定的 Dart 依赖。
 
 ## 发布流程
 
@@ -124,7 +127,7 @@ tool/release.sh patch "修复了某某问题"   # 或 minor / major，可跟多�
 
 脚本会一次性完成：提升 `pubspec.yaml` 版本号与构建号、在 `CHANGELOG.md` 顶部插入条目、
 提交并打 `vX.Y.Z` 标签。它**不执行构建**——随后运行 `tool/build_release.sh all`，
-并将产物与对应的 `symbols/` 符号文件一同附加到 GitHub Release。
+并从各平台归档中取出安装包与对应的符号，一同附加到 GitHub Release。
 脚本要求工作区干净，确保发布提交只包含版本变更本身。
 
 ## 免责声明

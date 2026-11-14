@@ -47,20 +47,17 @@ class FingerprintService {
     }
 
     try {
-      final req = await _client
-          .getUrl(Uri.parse(_spiUrl))
-          .timeout(const Duration(seconds: 10));
+      const timeout = Duration(seconds: 10);
+      final req =
+          await openHttpRequest(_client.getUrl(Uri.parse(_spiUrl)), timeout);
       req.headers.set('Referer', 'https://www.bilibili.com');
       req.headers.set('User-Agent', kBiliUserAgent);
-      final res = await req.close().timeout(const Duration(seconds: 10));
-      if (res.statusCode != 200) {
-        await res.drain<void>();
+      final res = await closeHttpRequest(req, timeout);
+      if (res.statusCode != HttpStatus.ok) {
+        await discardHttpBody(res);
         throw Exception('fingerprint HTTP ${res.statusCode}');
       }
-      final body = await res
-          .transform(utf8.decoder)
-          .join()
-          .timeout(const Duration(seconds: 10));
+      final body = await readHttpBody(res, timeout);
 
       final json = jsonDecode(body);
       if (json['code'] == 0 && json['data'] != null) {

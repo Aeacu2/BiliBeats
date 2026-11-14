@@ -54,6 +54,7 @@ class RecommendationsController extends ChangeNotifier {
   bool get loaded => _loaded;
   bool get failed => _failed;
   bool get loadingMore => _loadingMore;
+  bool get loadMoreFailed => _lastFailure != null;
   bool get reachedEnd => _reachedEnd;
 
   /// Loads the first page if nothing has been loaded yet.
@@ -71,6 +72,7 @@ class RecommendationsController extends ChangeNotifier {
     _loading = true;
     _failed = false;
     _loadingMore = false;
+    _lastFailure = null;
     notifyListeners();
 
     try {
@@ -99,12 +101,13 @@ class RecommendationsController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> loadMore() async {
+  Future<void> loadMore({bool force = false}) async {
     if (_loading || _loadingMore || _reachedEnd || _tracks.isEmpty) return;
     // A failed page gets a quiet window instead of re-firing every seed
     // search on each scroll notification.
     final failedAt = _lastFailure;
-    if (failedAt != null &&
+    if (!force &&
+        failedAt != null &&
         DateTime.now().difference(failedAt).abs() <
             const Duration(seconds: 3)) {
       return;

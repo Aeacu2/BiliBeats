@@ -47,6 +47,16 @@ class LibraryTransfer {
 
   static final RegExp _payload =
       RegExp(r'BiliBeats1:([A-Za-z0-9_\-=]+)\.([0-9a-f]{8})');
+  static final RegExp _videoId = RegExp(r'^BV[A-Za-z0-9]{1,64}$');
+  static final RegExp _partNumber = RegExp(r'^[1-9][0-9]*$');
+
+  static bool _canTransfer(Track track) {
+    if (!_videoId.hasMatch(track.bvid) || track.id.length > 80) return false;
+    if (track.id == track.bvid) return true;
+    final prefix = '${track.bvid}_p';
+    return track.id.startsWith(prefix) &&
+        _partNumber.hasMatch(track.id.substring(prefix.length));
+  }
 
   // ---------------------------------------------------------------------------
   // Text
@@ -104,7 +114,7 @@ class LibraryTransfer {
       if (json is! Map) return null;
       final tracks = <Track>[];
       final byIndex = <int, Track>{};
-      final seen = <String>{};
+      final byId = <String, Track>{};
       final rawTracks = json['t'] as List? ?? const [];
       for (var i = 0; i < rawTracks.length; i++) {
         final raw = rawTracks[i];
@@ -122,9 +132,11 @@ class LibraryTransfer {
             map.remove('coverUrl');
           }
           final track = Track.fromMap(map);
-          if (track.bvid.isEmpty) continue;
-          byIndex[i] = track;
-          if (seen.add(track.id)) tracks.add(track);
+          if (!_canTransfer(track)) continue;
+          byIndex[i] = byId.putIfAbsent(track.id, () {
+            tracks.add(track);
+            return track;
+          });
         } catch (_) {
           // One unreadable song does not cost the rest.
         }
@@ -159,26 +171,26 @@ class LibraryTransfer {
   static Future<LibrarySnapshot> snapshot() async {
     final downloaded = await DatabaseService.getDownloadedTracks();
     final playlists = await DatabaseService.getPlaylists();
-    final tracks = <Track>[];
-    final seen = <String>{};
-    for (final t in [...downloaded, ...playlists.expand((p) => p.tracks)]) {
-      if (seen.add(t.id)) tracks.add(t);
+    final tracks = <String, Track>{};
+    for (final t in downloaded.followedBy(playlists.expand((p) => p.tracks))) {
+      if (_canTransfer(t)) tracks.putIfAbsent(t.id, () => t);
     }
     return LibrarySnapshot(
-      tracks: tracks,
+      tracks: tracks.values.toList(),
       playlists: [
         for (final p in playlists)
-          if (p.tracks.isNotEmpty)
+          if (p.tracks.where((t) => tracks.containsKey(t.id)).toList()
+              case final members when members.isNotEmpty)
             (
               name: p.name,
               favorites: p.id == Playlist.favoritesId,
-              tracks: List<Track>.of(p.tracks),
+              tracks: members,
             ),
       ],
     );
   }
 
-  static Future<String> export() async => encode(await snapshot());
+  static Future<String> export() async => compute(encode, await snapshot());
 
   /// Adds [snapshot] to this library: its playlists at once, its songs as
   /// they download.

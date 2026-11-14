@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.BadParcelableException
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -16,6 +17,7 @@ import android.provider.DocumentsContract
 import android.provider.Settings
 import android.webkit.CookieManager
 import androidx.core.app.ActivityCompat
+import androidx.core.content.IntentCompat
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -60,13 +62,11 @@ class MainActivity : AudioServiceActivity() {
         return uris.isNotEmpty()
     }
 
-    @Suppress("DEPRECATION")
-    private fun streamOf(intent: Intent): Uri? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
-        }
+    private fun streamOf(intent: Intent): Uri? = try {
+        IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+    } catch (_: BadParcelableException) {
+        null
+    }
 
     /// Copies [uris] off the main thread, then answers [result] with what
     /// each became (see LocalAudio.copy).
@@ -93,7 +93,7 @@ class MainActivity : AudioServiceActivity() {
         if (resultCode == RESULT_OK && data != null) {
             val clip = data.clipData
             if (clip != null) {
-                for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+                for (i in 0 until clip.itemCount) clip.getItemAt(i).uri?.let(uris::add)
             } else {
                 data.data?.let { uris.add(it) }
             }

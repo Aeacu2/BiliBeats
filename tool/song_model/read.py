@@ -7,13 +7,16 @@ import json, os, sys, warnings; warnings.filterwarnings('ignore')
 import plm, tagger, spans, torch, torch.nn.functional as F
 from tagger import norm
 find = tagger.find
-def load(p):
+def load(p, *, has_holdout=False):
     ck = torch.load(find(p), map_location='cpu')
+    if has_holdout and ck.get('args', {}).get('use_hold'):
+        raise SystemExit(f'{p} was trained on hold; choose an evaluation checkpoint for these rows')
     m = plm.PLMSpan(find(ck['plm'])); m.load_state_dict(ck['state']); m.eval()
     return m, plm.make_tok(find(ck['plm']))
 def read(rows, weights, dev='cpu'):
     tagger.load_lexicon(json.load(open(find('lexicon.json'))))
-    models = [load(w) for w in weights]; out = []
+    has_holdout = any(row.get('set') == 'hold' for row in rows)
+    models = [load(w, has_holdout=has_holdout) for w in weights]; out = []
     for m, _ in models: m.to(dev)
     its = [plm.tensorize(rows, wp, with_labels=False) for _, wp in models]
     with torch.no_grad():

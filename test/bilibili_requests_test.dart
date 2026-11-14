@@ -60,6 +60,59 @@ void main() {
         expect(BilibiliSdk.extractBvOrAvId(query), isNull, reason: query);
       }
     });
+
+    test('a video found by id needs no second page', () async {
+      BilibiliSdk.requestWith = (url, {cookies}) async {
+        final uri = Uri.parse(url);
+        expect(uri.path, '/x/web-interface/view');
+        expect(uri.queryParameters['bvid'], 'BV1xx411c7mD');
+        return jsonEncode({
+          'code': 0,
+          'data': {'bvid': 'BV1xx411c7mD', 'title': 'Direct match'},
+        });
+      };
+      addTearDown(() => BilibiliSdk.requestWith = null);
+
+      final result = await BilibiliSdk.startSearch('BV1xx411c7mD');
+      expect(result.tracks.single.title, 'Direct match');
+      expect(result.next, isNull);
+    });
+
+    test('an AV-like keyword pages using the first search’s filter', () async {
+      const query = 'AV1 编码';
+      var allowMusicResults = false;
+      final requests = <({int page, bool musicOnly})>[];
+      BilibiliSdk.requestWith = (url, {cookies}) async {
+        final uri = Uri.parse(url);
+        if (uri.path.endsWith('/view')) return '{"code":-404}';
+        expect(uri.path, endsWith('/search/type'));
+        final page = int.parse(uri.queryParameters['page']!);
+        final musicOnly = uri.queryParameters.containsKey('tids');
+        requests.add((page: page, musicOnly: musicOnly));
+        return jsonEncode({
+          'code': 0,
+          'data': {
+            'result': [
+              if (!musicOnly || allowMusicResults)
+                {'bvid': 'test-$page', 'title': 'Match $page'},
+            ],
+          },
+        });
+      };
+      addTearDown(() => BilibiliSdk.requestWith = null);
+
+      final first = await BilibiliSdk.startSearch(query);
+      expect(first.tracks.single.title, 'Match 1');
+      allowMusicResults = true;
+      await BilibiliSdk.search(query);
+      expect((await first.next!(2)).single.title, 'Match 2');
+      expect(requests, [
+        (page: 1, musicOnly: true),
+        (page: 1, musicOnly: false),
+        (page: 1, musicOnly: true),
+        (page: 2, musicOnly: false),
+      ]);
+    });
   });
 
   group('risk control', () {

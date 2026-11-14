@@ -44,10 +44,15 @@ class AudioFilesProvider : DocumentsProvider() {
         fun documentIdOf(id: String) = FILE_PREFIX + id
 
         /// Whether [id] is a downloaded song, with a file to open.
-        fun isSong(context: Context, id: String): Boolean {
-            if (!SAFE_ID.matches(id)) return false
-            val dir = File(context.getDir("flutter", Context.MODE_PRIVATE), "bilibeat_audio")
-            return File(dir, "audio_$id.m4a").exists() && File(dir, "audio_$id.ready").exists()
+        fun isSong(context: Context, id: String): Boolean = readyFile(audioDir(context), id) != null
+
+        private fun audioDir(context: Context): File =
+            File(context.getDir("flutter", Context.MODE_PRIVATE), "bilibeat_audio")
+
+        private fun readyFile(dir: File, id: String): File? {
+            if (!SAFE_ID.matches(id)) return null
+            val file = File(dir, "audio_$id.m4a")
+            return file.takeIf { it.isFile && File(dir, "audio_$id.ready").isFile }
         }
 
         private val ROOT_COLUMNS = arrayOf(
@@ -73,7 +78,7 @@ class AudioFilesProvider : DocumentsProvider() {
 
     private fun docs(): File = context!!.getDir("flutter", Context.MODE_PRIVATE)
 
-    private fun audioDir(): File = File(docs(), "bilibeat_audio")
+    private fun audioDir(): File = audioDir(requireNotNull(context))
 
     /// Downloaded songs: an `.m4a` with its `.ready` marker (a partial or
     /// unverified file is not one), by track id.
@@ -82,16 +87,17 @@ class AudioFilesProvider : DocumentsProvider() {
         val files = dir.listFiles() ?: return emptyMap()
         // One listing answers every "is it whole", not a stat per song.
         val names = files.mapTo(HashSet()) { it.name }
-        val out = LinkedHashMap<String, File>()
-        for (file in files.sortedByDescending { it.lastModified() }) {
+        val ready = ArrayList<Triple<String, File, Long>>()
+        for (file in files) {
             val name = file.name
             if (!name.startsWith("audio_") || !name.endsWith(".m4a")) continue
             val id = name.removePrefix("audio_").removeSuffix(".m4a")
             if (!SAFE_ID.matches(id)) continue
             if ("audio_$id.ready" !in names) continue
-            out[id] = file
+            ready.add(Triple(id, file, file.lastModified()))
         }
-        return out
+        return ready.sortedByDescending { it.third }
+            .associateTo(LinkedHashMap()) { (id, file, _) -> id to file }
     }
 
     private var namesStamp = -1L
@@ -194,8 +200,7 @@ class AudioFilesProvider : DocumentsProvider() {
             throw FileNotFoundException(documentId)
         }
         val id = documentId.removePrefix(FILE_PREFIX)
-        if (!SAFE_ID.matches(id)) throw FileNotFoundException(documentId)
-        return songs()[id] ?: throw FileNotFoundException(documentId)
+        return readyFile(audioDir(), id) ?: throw FileNotFoundException(documentId)
     }
 
     override fun queryRoots(projection: Array<out String>?): Cursor {
@@ -242,6 +247,14 @@ class AudioFilesProvider : DocumentsProvider() {
         }
         return cursor
     }
+
+    override fun getDocumentType(documentId: String): String =
+        if (documentId == FOLDER_ID) {
+            Document.MIME_TYPE_DIR
+        } else {
+            val file = fileOf(documentId)
+            kindOf(documentId.removePrefix(FILE_PREFIX), file).second
+        }
 
     override fun queryChildDocuments(
         parentDocumentId: String,

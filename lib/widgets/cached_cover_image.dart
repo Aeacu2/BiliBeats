@@ -96,6 +96,8 @@ class CachedCoverImage extends StatefulWidget {
 
 enum _CoverStatus { loading, ready, failed }
 
+typedef _CoverRequest = ({String url, int width, int height});
+
 class _CachedCoverImageState extends State<CachedCoverImage> {
   static final HttpClient _client = biliHttpClient(
       connectionTimeout: const Duration(seconds: 15), maxConnectionsPerHost: 8);
@@ -110,38 +112,43 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
 
   File? _file;
   _CoverStatus _status = _CoverStatus.loading;
-  late String _loadKey;
-  bool _needsLoad = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadKey = widget.url;
-  }
+  _CoverRequest? _request;
+  Object? _loadToken;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_needsLoad) {
-      _needsLoad = false;
-      if (!_showKnown()) _loadImage();
-    }
+    _updateRequest();
   }
 
   @override
   void didUpdateWidget(covariant CachedCoverImage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.url != widget.url) {
-      // A recycled row: the retries left were the old cover's.
-      _retryTimer?.cancel();
-      _retries = 0;
-      _loadKey = widget.url;
-      if (_showKnown()) return;
-      setState(() {
-        _file = null;
-        _status = _CoverStatus.loading;
-      });
-      _loadImage();
+    _updateRequest();
+  }
+
+  void _updateRequest() {
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final request = (
+      url: widget.url,
+      width: (widget.width * dpr).round().clamp(1, _maxEdge),
+      height: (widget.height * dpr).round().clamp(1, _maxEdge),
+    );
+    if (_request == request) return;
+    _request = request;
+
+    // A row can be recycled several times before an older load completes.
+    final token = _loadToken = Object();
+    _retryTimer?.cancel();
+    _retries = 0;
+    _file = _known[request];
+    if (_file != null) {
+      _status = _CoverStatus.ready;
+    } else if (request.url.isEmpty) {
+      _status = _CoverStatus.failed;
+    } else {
+      _status = _CoverStatus.loading;
+      unawaited(_loadImage(request, token));
     }
   }
 
@@ -149,41 +156,17 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
   /// A row scrolled back into view (or rebuilt by a list that changed) is
   /// drawn at once from here, without a placeholder frame, a fade, or the
   /// directory lookup and file checks of [_loadImage].
-  static final Map<String, File> _known = {};
+  static final Map<_CoverRequest, File> _known = {};
   static const int _knownCap = 600;
 
-  String get _knownKey => '${widget.url}\n${_targetW}x$_targetH';
-
-  static void _remember(String key, File file) {
-    _known.remove(key);
-    _known[key] = file;
+  static void _remember(_CoverRequest request, File file) {
+    _known.remove(request);
+    _known[request] = file;
     if (_known.length > _knownCap) _known.remove(_known.keys.first);
   }
 
-  /// Shows a cover known from earlier; false when it has to be loaded.
-  bool _showKnown() {
-    if (widget.url.isEmpty || CachedCoverImage.isLocalPath(widget.url)) {
-      return false;
-    }
-    final file = _known[_knownKey];
-    if (file == null) return false;
-    _file = file;
-    _status = _CoverStatus.ready;
-    return true;
-  }
-
-  int get _targetW {
-    final dpr = MediaQuery.devicePixelRatioOf(context);
-    return (widget.width * dpr).round().clamp(1, _maxEdge);
-  }
-
-  int get _targetH {
-    final dpr = MediaQuery.devicePixelRatioOf(context);
-    return (widget.height * dpr).round().clamp(1, _maxEdge);
-  }
-
-  void _settle(String token, File? file) {
-    if (!mounted || token != _loadKey) return;
+  void _settle(_CoverRequest request, Object token, File? file) {
+    if (!mounted || token != _loadToken) return;
     setState(() {
       _file = file;
       _status = file == null ? _CoverStatus.failed : _CoverStatus.ready;
@@ -192,12 +175,13 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
     // while it is still on screen, a couple of times.
     _retryTimer?.cancel();
     if (file == null &&
-        widget.url.isNotEmpty &&
-        !CachedCoverImage.isLocalPath(widget.url) &&
+        !CachedCoverImage.isLocalPath(request.url) &&
         _retries < 2) {
       _retries++;
       _retryTimer = Timer(const Duration(seconds: 12), () {
-        if (mounted && token == _loadKey) unawaited(_loadImage());
+        if (mounted && token == _loadToken) {
+          unawaited(_loadImage(request, token));
+        }
       });
     }
   }
@@ -211,30 +195,22 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
     super.dispose();
   }
 
-  Future<void> _loadImage() async {
-    if (widget.url.isEmpty) {
-      _settle(_loadKey, null);
-      return;
-    }
-
-    final String token = _loadKey;
-
-    // Local file path (e.g. a user-picked custom cover): use it directly,
-    // no download or CDN resizing needed.
-    if (CachedCoverImage.isLocalPath(widget.url)) {
-      final f = File(CachedCoverImage.localPathOf(widget.url));
-      _settle(token, await f.exists() ? f : null);
-      return;
-    }
-
-    final knownKey = _knownKey;
+  Future<void> _loadImage(_CoverRequest request, Object token) async {
+    final url = request.url;
     try {
+      // A user-picked cover needs neither a download nor CDN resizing.
+      if (CachedCoverImage.isLocalPath(url)) {
+        final file = File(CachedCoverImage.localPathOf(url));
+        _settle(request, token, await file.exists() ? file : null);
+        return;
+      }
+
       final fetchUrl =
-          CachedCoverImage.sizedUrl(widget.url, _targetW, _targetH);
+          CachedCoverImage.sizedUrl(url, request.width, request.height);
       final cacheDir = await (_cacheDir ??= _openCacheDir());
       // Named by the cover, then by the size asked for, so that another
       // size of the same cover can stand in when this one cannot be fetched.
-      final source = md5.convert(utf8.encode(widget.url)).toString();
+      final source = md5.convert(utf8.encode(url)).toString();
       final sized =
           md5.convert(utf8.encode(fetchUrl)).toString().substring(0, 10);
       final file = File('${cacheDir.path}/img_${source}_$sized.img');
@@ -242,8 +218,8 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       final stat = await file.stat();
       if (stat.type == FileSystemEntityType.file && stat.size > 0) {
         unawaited(_touch(file, stat.modified));
-        _remember(knownKey, file);
-        _settle(token, file);
+        _remember(request, file);
+        _settle(request, token, file);
         return;
       }
 
@@ -262,7 +238,7 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
       }
       // Only the size asked for is remembered: a stand-in is tried again.
       if (cached != null) {
-        _remember(knownKey, cached);
+        _remember(request, cached);
         // A stand-in for this cover's other sizes, if none was indexed.
         final index = _largest;
         if (index != null) {
@@ -270,9 +246,9 @@ class _CachedCoverImageState extends State<CachedCoverImage> {
               onError: (_) => null));
         }
       }
-      _settle(token, cached ?? await _anySize(cacheDir, source));
+      _settle(request, token, cached ?? await _anySize(cacheDir, source));
     } catch (_) {
-      _settle(token, null);
+      _settle(request, token, null);
     }
   }
 

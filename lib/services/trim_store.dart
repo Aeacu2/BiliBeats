@@ -82,8 +82,7 @@ class TrimStore {
         for (final e in payload.entries)
           if (Trim.fromMap(e.value) case final trim?) '${e.key}': trim,
       };
-      // Anything set while loading is newer than the file.
-      _trims.addAll({...loaded, ..._trims});
+      _trims.addAll(loaded);
       changes.value++;
     } catch (e) {
       debugPrint('TrimStore load skipped: $e');
@@ -95,6 +94,8 @@ class TrimStore {
 
   /// Sets (or, with null or an empty trim, clears) [trackId]'s trim.
   static Future<void> set(String trackId, Trim? trim) async {
+    await ensureLoaded();
+    if (!_loaded) throw StateError('trims not loaded');
     if (trim == null || trim.isEmpty) {
       if (_trims.remove(trackId) == null) return;
     } else {
@@ -102,8 +103,6 @@ class TrimStore {
       _trims[trackId] = trim;
     }
     changes.value++;
-    await ensureLoaded();
-    if (!_loaded) throw StateError('trims not loaded');
     await StoreFiles.write(
         _file, {for (final e in _trims.entries) e.key: e.value.toMap()});
   }

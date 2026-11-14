@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/audio_download_service.dart';
+import 'package:bilibeats/services/bilibili_sdk.dart';
 import 'package:bilibeats/services/database_service.dart';
 import 'package:bilibeats/services/download_manager.dart';
 import 'package:bilibeats/utils/format.dart';
@@ -18,7 +20,7 @@ void main() {
 
   setUpAll(() async {
     await stubDocs('download_mgmt');
-    useRealHttp();
+    useHermeticHttp(allowMockCdn: true);
     server = await LocalAudioServer.start();
   });
 
@@ -109,6 +111,48 @@ void main() {
     final reloaded = playlists.firstWhere((p) => p.id == playlist.id);
     expect(reloaded.tracks.any((e) => e.id == track.id), isTrue);
     expect(await DatabaseService.isFavorite(track.id), isTrue);
+  });
+
+  test('removing audio cancels an upgrade in flight', () async {
+    const name = 'dm-delete-upgrade';
+    server.serveInstant(name);
+    final track = t(name);
+    final path = await AudioDownloadService.ensureDownloaded(track);
+    final gate = Completer<void>();
+    server.serveGated('$name-cdn', gate);
+    BilibiliSdk.requestWith = (_, {cookies}) async => jsonEncode({
+          'code': 0,
+          'data': {
+            'dash': {
+              'audio': [
+                {'id': 30280, 'baseUrl': server.urlFor('$name-cdn')},
+              ],
+            },
+          },
+        });
+    addTearDown(() {
+      BilibiliSdk.requestWith = null;
+      if (!gate.isCompleted) gate.complete();
+    });
+
+    final upgrade = expectLater(
+        AudioDownloadService.ensureDownloaded(track, force: true),
+        throwsA(isA<DownloadCancelled>()));
+    await waitFor(() => server.requested.contains('$name-cdn'));
+    final removal = DatabaseService.removeDownloadedTrack(track);
+    await pumpEventQueue();
+    await expectLater(AudioDownloadService.ensureDownloaded(track),
+        throwsA(isA<DownloadCancelled>()));
+    gate.complete();
+    await Future.wait([upgrade, removal]);
+
+    expect(await File(path).exists(), isFalse);
+    expect(await AudioDownloadService.isDownloaded(track), isFalse);
+    expect(await DatabaseService.downloadedTrack(track.id), isNull);
+
+    await AudioDownloadService.ensureDownloaded(track);
+    expect(await AudioDownloadService.isDownloaded(track), isTrue);
+    expect(await DatabaseService.downloadedTrack(track.id), track);
   });
 
   test('a song taken out of a playlist goes back where it was', () async {

@@ -53,9 +53,10 @@ class LyricsController {
     if (identical(account, _account)) return;
     _account = account;
     _misses.clear();
-    final generation = ++_generation;
     final track = _handler.currentTrack;
-    if (account == null || track == null || state.value.lyrics.pinned) return;
+    final generation = ++_generation;
+    if (track == null || state.value.lyrics.pinned) return;
+    if (account == null && state.value.status != LyricsStatus.loading) return;
     unawaited(_load(track, generation));
   }
 
@@ -72,8 +73,10 @@ class LyricsController {
   /// Songs the databases had nothing for, this session: no network request
   /// on every replay.
   final Map<String, String> _misses = {};
+  final Set<String> _rematches = {};
 
   void dispose() {
+    _rematches.clear();
     BiliAccountStore.changes.removeListener(_accountChanged);
     ++_generation;
     _handler.nowPlaying.removeListener(_onTrackChanged);
@@ -143,27 +146,40 @@ class LyricsController {
     return choose(track, current.copyWith(offset: offset));
   }
 
-  /// Drops whatever [track] has and matches it again automatically.
+  /// Searches again while keeping the saved lyrics until a replacement lands.
   Future<void> rematch(Track track) async {
-    _misses.remove(track.id);
-    final previous = LyricsStore.peek(track.id);
-    final cleared = LyricsStore.clear(track.id);
-    Future<void>? loading;
-    if (_isCurrent(track.id)) {
-      final generation = ++_generation;
-      state.value = LyricsState.loading;
-      loading = _load(track, generation);
-    }
-    await cleared;
-    // Lyrics the listener settled are not thrown away for nothing: when
-    // the new lookup finds none, they come back.
-    if (loading != null &&
-        previous != null &&
-        previous.pinned &&
-        previous.isNotEmpty) {
-      await loading;
-      final found = LyricsStore.peek(track.id);
-      if (found == null || found.isEmpty) await choose(track, previous);
+    final id = track.id;
+    if (!_rematches.add(id)) return;
+    final revision = LyricsStore.revisionOf(id);
+    final account = _account;
+    bool isCurrent() => _rematches.contains(id) && identical(_account, account);
+    try {
+      final result = await _fetch(track);
+      if (result.lyrics.isEmpty || !isCurrent()) return;
+      final aligned = await _alignToVideo(track, result.lyrics);
+      final lyrics = aligned ?? result.lyrics;
+      final saved = await LyricsStore.replaceAfterRematch(
+        id,
+        lyrics,
+        expectedRevision: revision,
+        isCurrent: isCurrent,
+      );
+      if (saved && isCurrent()) {
+        _misses.remove(id);
+        if (_isCurrent(id)) {
+          ++_generation;
+          state.value = LyricsState(LyricsStatus.ready, lyrics);
+        }
+      }
+    } catch (_) {
+      if (_rematches.contains(id) &&
+          _isCurrent(id) &&
+          state.value.status == LyricsStatus.loading) {
+        unawaited(_load(track, ++_generation));
+      }
+      rethrow;
+    } finally {
+      _rematches.remove(id);
     }
   }
 
@@ -249,21 +265,43 @@ class LyricsController {
   /// song: a live take's talk and applause would otherwise rule it out.
   Future<void> _setAgainstVideo(
       Track track, Lyrics lyrics, int revision, bool Function() owns) async {
-    if (!lyrics.synced || lyrics.source == 'bilibili') return;
-    final subtitles = await _subtitles(track.bvid, cid: track.cid);
-    if (subtitles == null || subtitles.isEmpty) return;
-    if (!owns()) return;
-    final match = SubtitleMatcher.compare(subtitles, lyrics.lines);
-    final offset = match.offset;
-    if (offset == null) return;
-    final rounded = (offset * 100).round() / 100;
-    if ((rounded - lyrics.offset).abs() < 0.3) return;
-    final shifted = lyrics.copyWith(offset: rounded);
+    final shifted = await _alignToVideo(track, lyrics);
+    if (shifted == null || !owns()) return;
     final stands = await LyricsStore.putAutomatic(track.id, shifted,
         expectedRevision: revision);
     if (stands && owns()) {
       state.value = LyricsState(LyricsStatus.ready, shifted);
     }
+  }
+
+  Future<Lyrics?> _alignToVideo(Track track, Lyrics lyrics) async {
+    if (!lyrics.synced || lyrics.source == 'bilibili') return null;
+    final subtitles = await _subtitles(track.bvid, cid: track.cid);
+    if (subtitles == null || subtitles.isEmpty) return null;
+    final match = SubtitleMatcher.compare(subtitles, lyrics.lines);
+    final offset = match.offset;
+    if (offset == null) return null;
+    final rounded = (offset * 100).round() / 100;
+    return (rounded - lyrics.offset).abs() < 0.3
+        ? null
+        : lyrics.copyWith(offset: rounded);
+  }
+
+  Future<({Lyrics lyrics, bool answered})> _fetch(Track track) async {
+    final named = _namedBy(track);
+    final failuresBefore = LyricsEngine.httpFailures;
+    var lyrics = await LyricsEngine.autoFetchLyrics(
+      _readable(track),
+      song: named.song,
+      artist: named.artist,
+      durationSeconds: track.duration,
+    );
+    // A lookup made offline is retried the next time the song plays.
+    final answered = LyricsEngine.httpFailures == failuresBefore;
+    if (lyrics.isEmpty && answered) {
+      lyrics = await _fromSubtitles(track) ?? lyrics;
+    }
+    return (lyrics: lyrics, answered: answered);
   }
 
   Future<void> _load(Track track, int generation,
@@ -299,22 +337,9 @@ class LyricsController {
         return;
       }
 
-      final named = _namedBy(track);
-      final failuresBefore = LyricsEngine.httpFailures;
-      var fresh = await LyricsEngine.autoFetchLyrics(
-        _readable(track),
-        song: named.song,
-        artist: named.artist,
-        durationSeconds: track.duration,
-      );
-      // "Nothing found" is only remembered when every provider answered:
-      // a lookup made offline is tried again the next time the song plays.
-      final asked = LyricsEngine.httpFailures == failuresBefore;
-      if (fresh.isEmpty && asked) {
-        fresh = await _fromSubtitles(track) ?? fresh;
-      }
-      if (fresh.isEmpty && asked) _misses[track.id] = _nameKeyOf(track);
+      final (lyrics: fresh, answered: asked) = await _fetch(track);
       if (!owns()) return;
+      if (fresh.isEmpty && asked) _misses[track.id] = _nameKeyOf(track);
       if (fresh.isEmpty && !asked) {
         // Could not ask: what is stored stays, and shows if it fits.
         publish(

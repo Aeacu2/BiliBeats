@@ -16,6 +16,8 @@ class _RangeServer {
 
   List<int> body = const [];
   String? etag;
+  String? overrideContentRange;
+  bool ignoreIfRange = false;
 
   /// Send only this many body bytes of the next full response, then drop
   /// the connection.
@@ -60,20 +62,23 @@ class _RangeServer {
     if (etag != null) response.headers.set(HttpHeaders.etagHeader, etag!);
 
     // A changed file answers a conditional range with the whole of itself.
-    final ranged = range != null && (ifRange == null || ifRange == etag);
+    final ranged =
+        range != null && (ignoreIfRange || ifRange == null || ifRange == etag);
     if (ranged) {
       final start =
           int.parse(RegExp(r'bytes=(\d+)-').firstMatch(range)!.group(1)!);
       if (start >= body.length) {
         response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
-        response.headers
-            .set(HttpHeaders.contentRangeHeader, 'bytes */${body.length}');
+        response.headers.set(HttpHeaders.contentRangeHeader,
+            overrideContentRange ?? 'bytes */${body.length}');
         await response.close();
         return;
       }
       response.statusCode = HttpStatus.partialContent;
-      response.headers.set(HttpHeaders.contentRangeHeader,
-          'bytes $start-${body.length - 1}/${body.length}');
+      response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          overrideContentRange ??
+              'bytes $start-${body.length - 1}/${body.length}');
       response.headers.contentLength = body.length - start;
       response.add(body.sublist(start));
     } else {
@@ -93,7 +98,7 @@ void main() {
   late Directory docs;
 
   final first = List<int>.generate(8192, (i) => i % 251);
-  final second = List<int>.generate(6000, (i) => (i * 7 + 3) % 253);
+  final second = List<int>.generate(first.length, (i) => (i * 7 + 3) % 253);
 
   setUpAll(() async {
     docs = await stubDocs('download_resume');
@@ -107,6 +112,8 @@ void main() {
     server
       ..body = first
       ..etag = '"v1"'
+      ..overrideContentRange = null
+      ..ignoreIfRange = false
       ..cutAfter = null
       ..ranges.clear();
   });
@@ -176,7 +183,7 @@ void main() {
     expect(await downloaded(t), second);
   });
 
-  test('without validators, a different total length starts over', () async {
+  test('a matching total length cannot replace a strong ETag', () async {
     final t = track('length');
     await plant(t, first.sublist(0, 3000), total: first.length);
     server
@@ -185,8 +192,35 @@ void main() {
 
     await AudioDownloadService.ensureDownloaded(t);
 
+    expect(server.ranges, [null]);
+    expect(await downloaded(t), second);
+  });
+
+  test('a 206 without a matching ETag restarts from zero', () async {
+    final t = track('unconfirmed');
+    await plant(t, first.sublist(0, 3000),
+        total: first.length, validator: '"v1"');
+    server
+      ..body = second
+      ..etag = null
+      ..ignoreIfRange = true;
+
+    await AudioDownloadService.ensureDownloaded(t);
+
     expect(server.ranges, ['bytes=3000-', null]);
     expect(await downloaded(t), second);
+  });
+
+  test('a 206 with invalid range bounds restarts from zero', () async {
+    final t = track('bounds');
+    await plant(t, first.sublist(0, 3000),
+        total: first.length, validator: '"v1"');
+    server.overrideContentRange = 'bytes 3000-3200/${first.length}';
+
+    await AudioDownloadService.ensureDownloaded(t);
+
+    expect(server.ranges, ['bytes=3000-', null]);
+    expect(await downloaded(t), first);
   });
 
   test('partial bytes nothing vouches for are not continued', () async {
@@ -214,13 +248,27 @@ void main() {
       () async {
     final t = track('toolong');
     // 9000 bytes of a file that was 12000 long; the server now has 8192.
-    await plant(t, List<int>.filled(9000, 1), total: 12000);
-    server.etag = null;
+    await plant(t, List<int>.filled(9000, 1), total: 9000, validator: '"v1"');
 
     await AudioDownloadService.ensureDownloaded(t);
 
     expect(server.ranges, ['bytes=9000-', null]);
     expect(await downloaded(t), first);
+  });
+
+  test('a 416 cannot complete a different representation of the same size',
+      () async {
+    final t = track('different');
+    await plant(t, first, total: first.length, validator: '"v1"');
+    server
+      ..body = second
+      ..etag = '"v2"'
+      ..ignoreIfRange = true;
+
+    await AudioDownloadService.ensureDownloaded(t);
+
+    expect(server.ranges, ['bytes=${first.length}-', null]);
+    expect(await downloaded(t), second);
   });
 
   group('a failed attempt', () {
@@ -235,6 +283,25 @@ void main() {
 
       expect(server.ranges, [null, 'bytes=3000-']);
       expect(await downloaded(t), first);
+    });
+
+    test('cancellation during retry removes the saved partial', () async {
+      AudioDownloadService.retryDelays = const [Duration(seconds: 10)];
+      final t = track('cancelled');
+      server.cutAfter = 3000;
+      final subscription = AudioDownloadService.progressStream.listen((event) {
+        if (event.trackId == t.id && event.retrying) {
+          AudioDownloadService.cancel(t);
+        }
+      });
+      addTearDown(subscription.cancel);
+
+      await expectLater(AudioDownloadService.ensureDownloaded(t),
+          throwsA(isA<DownloadCancelled>()));
+
+      expect(server.ranges, [null]);
+      expect(await part(t).exists(), isFalse);
+      expect(await note(t).exists(), isFalse);
     });
 
     test('is given up on once the retries run out', () async {

@@ -27,6 +27,13 @@ hold = {r['bvid'] for p in ('dev.json', 'test121.jsonl') + (() if args.use_hold 
 train_rows = [r for r in jl(args.train) if r['bvid'] not in hold]
 if args.extra: train_rows += [r for r in jl(args.extra) if r['bvid'] not in hold]
 eval_rows = jl(args.eval); dev_rows = jl('dev.json'); zs_rows = jl('test121.jsonl')
+if not eval_rows:
+    ap.error(f'{args.eval} contains no evaluation rows')
+if not train_rows:
+    ap.error('no training rows remain after excluding evaluation videos')
+shared = {r['bvid'] for r in eval_rows}.intersection(r['bvid'] for r in train_rows)
+if shared:
+    ap.error(f'{args.eval} shares {len(shared)} videos with training; choose a disjoint evaluation set')
 wp = plm.make_tok(find(args.plm))
 singers, songs = set(), set()
 for r in train_rows:
@@ -35,7 +42,8 @@ for r in train_rows:
     lab = r.get('label')
     if lab and lab.get('song'):
         songs.add(lab['song']); singers.update(p for p in lab['performers'] if p.upper() not in ('UP主', 'UP'))
-singers = [s for s in singers if 2 <= len(s) <= 20]; songs = [s for s in songs if 1 <= len(s) <= 24]
+singers = sorted(s for s in singers if 2 <= len(s) <= 20)
+songs = sorted(s for s in songs if 1 <= len(s) <= 24)
 _nick = {r['up'] for r in train_rows if 2 <= len(r['up']) <= 10 and not re.search(r'[\d_\-]|音乐|官方|频道|工作室|卫视|娱乐|影视|综艺|MV|Live|live', r['up'])}
 _lex = [n for n in json.load(open(find('lexicon.json'))) if 2 <= len(n) <= 12]
 singers = singers + random.sample(_lex, min(len(_lex), 6000)) + sorted(_nick)
@@ -68,6 +76,7 @@ print(f'{args.plm}: params {sum(p.numel() for p in model.parameters())/1e6:.1f}M
 steps_per = math.ceil(len(train_rows) / args.bs); total = steps_per * args.epochs
 opt = torch.optim.AdamW([{'params': enc, 'lr': args.lr}, {'params': head, 'lr': args.head_lr}], weight_decay=0.01)
 sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[args.lr, args.head_lr], total_steps=total, pct_start=0.1)
+span_weights = torch.tensor([1.0, 3.0, 3.0], device=dev)
 
 def evaluate(rows):
     model.eval(); items = plm.tensorize(rows, wp); ok = song_ok = isok = 0
@@ -87,13 +96,22 @@ for ep in range(args.epochs):
     model.train()
     rows = train_rows if args.no_aug else [swap(r) if random.random() < 0.7 else r for r in train_rows]
     items = plm.tensorize(rows, wp); random.shuffle(items); tot = 0
+    incomplete = sum(not item['complete'] for item in items)
+    for item in items:
+        if not item['complete']:
+            # The video is still valid for song classification. Its span
+            # targets cannot tell the model where the whole answer appears.
+            item['gold'] = [-100] * len(item['gold'])
     for k in range(0, len(items), args.bs):
         b = items[k:k + args.bs]
         tok, tseg, tfeat, dur, tpad, c2t, cand, gold, is_song = plm.collate(b, dev)
         sp, song = model(tok, tseg, tfeat, dur, tpad, c2t, cand)
-        loss = F.cross_entropy(sp.reshape(-1, 3), gold.reshape(-1), ignore_index=-100, weight=torch.tensor([1.0, 3.0, 3.0], device=dev)) + F.cross_entropy(song, is_song)
+        loss = F.cross_entropy(song, is_song)
+        if any(item['complete'] and item['gold'] for item in b):
+            loss = loss + F.cross_entropy(sp.reshape(-1, 3), gold.reshape(-1), ignore_index=-100, weight=span_weights)
         opt.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step(); sched.step(); tot += loss.item(); step += 1
         if dev == 'mps' and step % 10 == 0: torch.mps.empty_cache()
     if ep % 3 == 2 or ep == args.epochs - 1:
-        print(f'ep {ep+1} loss {tot/steps_per:.3f} eval {evaluate(eval_rows)} dev {evaluate(dev_rows)} zs {evaluate(zs_rows)} {time.time()-t0:.0f}s', flush=True)
+        print(f'ep {ep+1} loss {tot/steps_per:.3f} span labels incomplete {incomplete}/{len(items)} '
+              f'eval {evaluate(eval_rows)} dev {evaluate(dev_rows)} zs {evaluate(zs_rows)} {time.time()-t0:.0f}s', flush=True)
 torch.save({'state': model.state_dict(), 'plm': args.plm, 'args': vars(args)}, find(args.save))

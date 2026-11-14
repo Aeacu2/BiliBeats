@@ -1,4 +1,7 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 /// The desktop-Chrome user-agent Bilibili's APIs expect. Their risk control
 /// rejects requests that look like a bare Dart http client, so every service
@@ -29,3 +32,51 @@ HttpClient biliHttpClient({
       ..connectionTimeout = connectionTimeout
       ..idleTimeout = idleTimeout
       ..maxConnectionsPerHost = maxConnectionsPerHost;
+
+/// Times out a request before headers and releases any request obtained after
+/// the caller has given up waiting for a connection slot.
+Future<HttpClientRequest> openHttpRequest(
+    Future<HttpClientRequest> opening, Duration timeout) {
+  var expired = false;
+  return opening.then((request) {
+    if (expired) {
+      request.done.ignore();
+      request.abort();
+    }
+    return request;
+  }).timeout(timeout, onTimeout: () {
+    expired = true;
+    throw TimeoutException('HTTP connection timed out');
+  });
+}
+
+Future<HttpClientResponse> closeHttpRequest(
+        HttpClientRequest request, Duration timeout) =>
+    request.close().timeout(timeout, onTimeout: () {
+      request.abort();
+      throw TimeoutException('HTTP response headers timed out');
+    });
+
+/// Reads a metadata response with an overall deadline and a cap on the
+/// decoded bytes. Always cancels the response subscription on departure.
+Future<String> readHttpBody(Stream<List<int>> response, Duration timeout,
+    {int maxBytes = 4 << 20}) async {
+  final reader = StreamIterator(response);
+  final bytes = BytesBuilder(copy: false);
+  final deadline = Stopwatch()..start();
+  try {
+    while (await reader.moveNext().timeout(timeout - deadline.elapsed)) {
+      final chunk = reader.current;
+      if (bytes.length + chunk.length > maxBytes) {
+        throw const FormatException('HTTP response exceeded the size limit');
+      }
+      bytes.add(chunk);
+    }
+    return utf8.decode(bytes.takeBytes());
+  } finally {
+    await reader.cancel();
+  }
+}
+
+Future<void> discardHttpBody(Stream<List<int>> response) =>
+    response.listen((_) {}).cancel();

@@ -1,7 +1,41 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:bilibeats/services/lyrics_engine.dart';
 
 void main() {
+  tearDown(() => LyricsEngine.httpCache = null);
+
+  test('a NetEase API refusal stays retryable', () async {
+    const title = '候鸟之歌';
+    var refused = true;
+    LyricsEngine.httpCache = (_, __) async =>
+        refused ? '{"code":503}' : '{"code":200,"result":{"songs":[]}}';
+
+    expect(await LyricsEngine.identify(title), isNull);
+    expect(LyricsEngine.identitySettled(title), isFalse);
+    refused = false;
+    expect(await LyricsEngine.identify(title), isNull);
+    expect(LyricsEngine.identitySettled(title), isTrue);
+  });
+
+  test('a recording can be scored again under a better candidate', () async {
+    const title = '《第一首》《星夜》演示';
+    LyricsEngine.httpCache = (url, _) async {
+      if (!url.contains('/search/get')) return null;
+      return jsonEncode({
+        'code': 200,
+        'result': {
+          'songs': [
+            {'id': 23, 'name': '星夜', 'artists': [], 'duration': 0}
+          ],
+        },
+      });
+    };
+
+    expect((await LyricsEngine.identify(title))?.title, '星夜');
+  });
+
   group('matchesSongQuery', () {
     test('provider paren subtitle is stripped: 岁月 (live) matches 《岁月》', () {
       expect(LyricsEngine.matchesSongQuery('岁月 (live)', '岁月'), isTrue);

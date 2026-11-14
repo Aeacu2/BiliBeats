@@ -33,6 +33,7 @@ void main() {
   tearDown(() {
     LyricLibrary.transport = null;
     LyricLibrary.forget();
+    LyricsEngine.httpCache = null;
   });
 
   test('a Kugou lyric file is read word by word, with its translation', () {
@@ -45,6 +46,33 @@ void main() {
     expect(second.words![1].start, closeTo(43.662, 1e-9));
     expect(second.words![1].end, closeTo(44.067, 1e-9));
     expect(lines.first.translation, isNull);
+  });
+
+  test('KRC decompression rejects oversized output', () {
+    final file = packed('a' * ((4 << 20) + 1));
+    expect(() => LyricLibrary.decodeKrc(file), throwsFormatException);
+  });
+
+  test('KRC lines sort after translations are paired', () {
+    final parts = krc.split('\n');
+    final shuffled = [...parts.take(4), parts[5], parts[4]].join('\n');
+    final lines = LyricLibrary.parseKrc(shuffled);
+    expect(lines.map((line) => line.time), [0.482, 43.41]);
+    expect(lines.map((line) => line.translation), ['The waves', null]);
+  });
+
+  test('each timed translation attaches to one line at the closest time', () {
+    final lines = LyricLibrary.withTranslation(const [
+      LyricLine(time: 1.0, text: 'first'),
+      LyricLine(time: 1.1, text: 'second'),
+      LyricLine(time: 1.25, text: 'third'),
+    ], const [
+      LyricLine(time: 0.5, text: 'too early'),
+      LyricLine(time: 1.0, text: 'first translation'),
+      LyricLine(time: 1.1, text: 'second translation'),
+    ]);
+    expect(lines.map((line) => line.translation),
+        ['first translation', 'second translation', null]);
   });
 
   test('word timing survives being saved', () {
@@ -95,6 +123,31 @@ void main() {
       };
     }
 
+    void netEaseRecording(String artist, {String firstTime = '00:01'}) {
+      LyricsEngine.httpCache = (url, _) async {
+        if (url.contains('/api/search/get')) {
+          return jsonEncode({
+            'code': 200,
+            'result': {
+              'songs': [
+                {
+                  'id': 649,
+                  'name': 'Night Lights',
+                  'artists': [
+                    {'name': artist}
+                  ],
+                },
+              ],
+            },
+          });
+        }
+        return jsonEncode({
+          'lrc': {'lyric': '[$firstTime]wanted\n[00:02]second'},
+          'tlyric': {'lyric': '[$firstTime]第一句\n[00:02]第二句'},
+        });
+      };
+    }
+
     test('is the one by that singer, nearest the video in length', () async {
       serve(kugou([
         listed('大鱼', '双笙', 300, 'other'),
@@ -131,6 +184,48 @@ void main() {
               artist: '周深', durationSeconds: 300),
           isNull);
     });
+
+    test('does not treat an artist name prefix as the same singer', () async {
+      serve(kugou([listed('旧日', '林俊杰', 300, 'other')]));
+      expect(
+          await LyricsEngine.fetchFromLibrary('kugou', '旧日',
+              artist: '林俊', durationSeconds: 300),
+          isNull);
+    });
+
+    test('a translation from another performer keeps the wanted recording',
+        () async {
+      serve(kugou([listed('Night Lights', 'Singer One', 300, 'wanted')]));
+      netEaseRecording('Singer Two');
+
+      final found = await LyricsEngine.autoFetchLyrics('',
+          song: 'Night Lights', artist: 'Singer One', durationSeconds: 300);
+      expect(found.source, 'kugou');
+      expect(found.artist, 'Singer One');
+      expect(found.lines.first.text, 'wanted');
+      expect(found.lines.map((line) => line.translation), [null, null]);
+    });
+
+    test('a matching translation preserves Kugou word timing', () async {
+      serve(kugou([listed('Night Lights', 'Singer One', 300, 'wanted')]));
+      netEaseRecording('Singer One');
+
+      final found = await LyricsEngine.autoFetchLyrics('',
+          song: 'Night Lights', artist: 'Singer One', durationSeconds: 300);
+      expect(found.source, 'kugou');
+      expect(found.wordTimed, isTrue);
+      expect(found.lines.map((line) => line.translation), ['第一句', '第二句']);
+    });
+
+    test('a incompatible translation keeps the existing recording', () async {
+      serve(kugou([listed('Night Lights', 'Singer One', 300, 'wanted')]));
+      netEaseRecording('Singer One', firstTime: '00:07');
+
+      final found = await LyricsEngine.autoFetchLyrics('',
+          song: 'Night Lights', artist: 'Singer One', durationSeconds: 300);
+      expect(found.wordTimed, isTrue);
+      expect(found.lines.map((line) => line.translation), [null, null]);
+    });
   });
 
   testWidgets('the line being sung fills continuously, KTV-style',
@@ -166,8 +261,12 @@ void main() {
 
     // Paused, the fill holds between the player's reports.
     final held = now();
+    expect(tester.state<KaraokeTextState>(find.byType(KaraokeText)).elapsed,
+        Duration.zero);
     await tester.pump(const Duration(milliseconds: 300));
     expect(now(), held);
+    expect(tester.state<KaraokeTextState>(find.byType(KaraokeText)).elapsed,
+        Duration.zero);
 
     // Playing, it moves on between reports, frame by frame.
     playing.value = true;
@@ -181,5 +280,51 @@ void main() {
     f = fill();
     expect(f[1], lessThan(1.0));
     expect(f[2], 0.0);
+
+    playing.value = false;
+    final pausedAt =
+        tester.state<KaraokeTextState>(find.byType(KaraokeText)).elapsed;
+    position.value = const Duration(milliseconds: 44100);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(now(), closeTo(44.1, 0.001));
+    expect(tester.state<KaraokeTextState>(find.byType(KaraokeText)).elapsed,
+        pausedAt);
+  });
+
+  testWidgets('a distant seek follows wrapped lyrics in a lazy list',
+      (tester) async {
+    final position = ValueNotifier(Duration.zero);
+    addTearDown(position.dispose);
+    final lines = [
+      for (var index = 0; index < 350; index++)
+        LyricLine(
+          time: index.toDouble(),
+          text: 'Lyric $index',
+          translation: index.isEven
+              ? 'A long translation that wraps across multiple rows.'
+              : null,
+        ),
+    ];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SizedBox(
+          width: 180,
+          height: 320,
+          child: LyricsView(
+            lyrics: Lyrics(source: 'user', lines: lines),
+            position: position,
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('Lyric 300'), findsNothing);
+
+    position.value = const Duration(seconds: 300);
+    await tester.pumpAndSettle();
+    final viewport = tester.getRect(find.byType(LyricsView));
+    expect(viewport.contains(tester.getCenter(find.text('Lyric 300'))), isTrue);
+    expect(find.text('Lyric 0'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 }

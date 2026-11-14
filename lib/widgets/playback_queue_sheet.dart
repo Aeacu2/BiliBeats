@@ -32,15 +32,21 @@ class _PlaybackQueueSheetState extends State<PlaybackQueueSheet> {
   BiliBeatsAudioHandler get _handler => AppServices.instance.handler;
 
   // Open at the current song, not the top of a possibly very long queue.
-  late final ScrollController _scroll = ScrollController(
-    initialScrollOffset: _handler.queueSnapshot.currentIndex > 1
-        ? (_handler.queueSnapshot.currentIndex - 1) * SongTile.extent
-        : 0,
-  );
+  ScrollController? _scroll;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final extent = SongTile.extentOf(context);
+    final index = _handler.queueSnapshot.currentIndex;
+    _scroll ??= ScrollController(
+      initialScrollOffset: index > 1 ? (index - 1) * extent : 0,
+    );
+  }
 
   @override
   void dispose() {
-    _scroll.dispose();
+    _scroll?.dispose();
     super.dispose();
   }
 
@@ -77,7 +83,7 @@ class _PlaybackQueueSheetState extends State<PlaybackQueueSheet> {
                     )
                   : ListView.builder(
                       controller: _scroll,
-                      itemExtent: SongTile.extent,
+                      itemExtent: SongTile.extentOf(context),
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                       itemCount: snapshot.tracks.length,
                       itemBuilder: (context, index) {

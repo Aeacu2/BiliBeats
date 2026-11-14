@@ -222,8 +222,10 @@ class LibraryController extends ChangeNotifier {
     final groups = <String, List<Track>>{};
     final names = <String, String>{};
     for (final track in _downloaded) {
+      final seen = <String>{};
       for (final name in artistNamesOf(track)) {
         final key = name.toLowerCase();
+        if (!seen.add(key)) continue;
         names.putIfAbsent(key, () => name);
         groups.putIfAbsent(key, () => []).add(track);
       }

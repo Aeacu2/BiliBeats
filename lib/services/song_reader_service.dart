@@ -95,22 +95,24 @@ class SongReaderService {
 
 /// One isolate holding the model, reading one video per request.
 class _ReaderWorker {
-  _ReaderWorker._(this._ready);
+  _ReaderWorker._();
 
-  final Future<SendPort> _ready;
+  final Completer<SendPort?> _ready = Completer();
   final RawReceivePort _replies = RawReceivePort();
   final Map<int, Completer<SongReading?>> _waiting = {};
   int _next = 0;
   Isolate? _isolate;
   Timer? _idle;
+  Timer? _startup;
   bool _closed = false;
 
   static _ReaderWorker start(String dir) {
-    final port = Completer<SendPort>();
-    final worker = _ReaderWorker._(port.future..ignore());
+    final worker = _ReaderWorker._();
+    worker._startup = Timer(const Duration(seconds: 15), worker._close);
     worker._replies.handler = (Object? message) {
       if (message is SendPort) {
-        port.complete(message);
+        worker._startup?.cancel();
+        worker._ready.complete(message);
       } else if (message is List && message.length == 2 && message[0] is int) {
         // (id, reading) — or (id, error text) when the reading failed.
         final reply = message[1];
@@ -136,7 +138,6 @@ class _ReaderWorker {
         if (worker._closed) worker._isolate?.kill();
       } catch (e) {
         debugPrint('Song model worker failed to start: $e');
-        if (!port.isCompleted) port.completeError(e);
         worker._close();
       }
     }());
@@ -144,12 +145,15 @@ class _ReaderWorker {
   }
 
   Future<SongReading?> read(List<Object> request) async {
+    if (_closed) return null;
     _idle?.cancel();
     final id = _next++;
     final answer = Completer<SongReading?>();
     _waiting[id] = answer;
     try {
-      (await _ready).send([id, ...request]);
+      final port = await _ready.future;
+      if (port == null || _closed) return null;
+      port.send([id, ...request]);
     } catch (_) {
       _waiting.remove(id);
       return null;
@@ -167,6 +171,8 @@ class _ReaderWorker {
     if (_closed) return;
     _closed = true;
     _idle?.cancel();
+    _startup?.cancel();
+    if (!_ready.isCompleted) _ready.complete(null);
     if (identical(SongReaderService._worker, this)) {
       SongReaderService._worker = null;
     }

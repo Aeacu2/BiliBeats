@@ -78,6 +78,22 @@ tool/song_model/legacy/weights/
 # only; it is not published.
 tool/song_model/data/
 tool/song_model/label_haiku/
+tool/song_model/label/
+tool/song_model/crawl.jsonl
+tool/song_model/crawl.jsonl.gz
+tool/song_model/crawl_search.json
+tool/song_model/titles.jsonl
+tool/song_model/titles.jsonl.gz
+tool/song_model/titles_done.txt
+tool/song_model/train.jsonl
+tool/song_model/train_haiku.jsonl
+tool/song_model/unlabelled.jsonl
+tool/song_model/lexicon.json
+tool/song_model/singers_netease.json
+tool/song_model/dev.json
+tool/song_model/hold.json
+tool/song_model/test121.jsonl
+tool/song_model/label_fixes.json
 
 # Real videos' metadata the matching tests are measured on. Kept locally
 # only; the tests that need it skip without it.

@@ -10,6 +10,7 @@ import '../models/track.dart';
 import 'bili_http.dart';
 import 'bilibili_sdk.dart';
 import 'database_service.dart';
+import 'store_files.dart';
 
 /// Immutable snapshot of a single track download's progress.
 class DownloadProgress {
@@ -87,6 +88,7 @@ class AudioDownloadService {
 
   /// Deduplicates concurrent downloads of the same track.
   static final Map<String, Future<String>> _inFlight = {};
+  static final Map<String, Future<void>> _deleting = {};
 
   static final StreamController<DownloadProgress> _progressController =
       StreamController<DownloadProgress>.broadcast();
@@ -141,34 +143,64 @@ class AudioDownloadService {
   static String _metaPath(String dir, String key) => '$dir/audio_$key.json';
   static String _qualityPath(String dir, String key) =>
       '$dir/audio_$key.quality.json';
+  static String _pendingQualityPath(String dir, String key) =>
+      '${_qualityPath(dir, key)}.pending';
 
   /// Saved quality information for a downloaded track, or null if unrecorded.
   static Future<Map<String, dynamic>?> qualityInfo(String id) async {
+    if (!isSafeKey(id)) return null;
     try {
       final dir = await _dir();
-      final file = File(_qualityPath(dir, id));
-      if (!await file.exists()) return null;
-      final map = jsonDecode(await file.readAsString());
-      return map is Map<String, dynamic> ? map : null;
+      final pending = await _committedQuality(dir, id);
+      String? text;
+      if (pending != null) {
+        try {
+          text = await pending.readAsString();
+        } on FileSystemException {
+          // Finalization may have renamed the pending record already.
+        }
+      }
+      text ??= await File(_qualityPath(dir, id)).readAsString();
+      final map = jsonDecode(text);
+      return map is Map<String, dynamic> && map.isNotEmpty ? map : null;
     } catch (_) {
       return null;
     }
   }
 
+  /// The audio rename commits the new quality record. Until then the same
+  /// part file is present, so the original quality record remains current.
+  static Future<File?> _committedQuality(String dir, String id) async {
+    final path = _audioPath(dir, id);
+    final pending = File(_pendingQualityPath(dir, id));
+    if (!await pending.exists() || await File('$path.part').exists()) {
+      return null;
+    }
+    return await File(path).exists() ? pending : null;
+  }
+
+  static Future<void> _settleQuality(String dir, String id) async {
+    final pending = File(_pendingQualityPath(dir, id));
+    if (!await pending.exists()) return;
+    if (await _committedQuality(dir, id) == null) {
+      await pending.delete();
+    } else {
+      await pending.rename(_qualityPath(dir, id));
+    }
+  }
+
   static Future<void> _atomicWriteString(String path, String content) async {
     final tmp = File('$path.${DateTime.now().microsecondsSinceEpoch}.tmp');
-    await tmp.writeAsString(content, flush: true);
-    final target = File(path);
-    // Only Windows needs the target gone before a rename (see
-    // StoreFiles._writeAtomically).
-    if (Platform.isWindows && await target.exists()) {
-      try {
+    try {
+      await tmp.writeAsString(content, flush: true);
+      final target = File(path);
+      if (Platform.isWindows && await target.exists()) {
         await target.delete();
-      } catch (e) {
-        debugPrint('_atomicWriteString delete failed: $e');
       }
+      await tmp.rename(path);
+    } finally {
+      await StoreFiles.deleteQuietly(tmp);
     }
-    await tmp.rename(path);
   }
 
   /// Saves track metadata JSON next to the audio file (used for rediscovery).
@@ -286,15 +318,45 @@ class AudioDownloadService {
   }
 
   /// Removes a track's audio, ready-marker and metadata from disk.
+  /// [afterDelete] updates the library while downloads for this id are blocked.
   /// Returns true when something was actually deleted.
-  static Future<bool> delete(Track track) async {
-    final dir = await _dir();
+  static Future<bool> delete(Track track,
+      {Future<void> Function()? afterDelete}) async {
     String id;
     try {
       id = _key(track);
     } catch (_) {
+      await afterDelete?.call();
       return false;
     }
+
+    final previous = _deleting[id];
+    final finished = Completer<void>();
+    _deleting[id] = finished.future;
+    cancel(track);
+    try {
+      if (previous != null) await previous;
+      // The current writer may already be installing its files. Wait for
+      // it to finish, then remove everything it may have written.
+      final download = _inFlight[id];
+      if (download != null) {
+        try {
+          await download;
+        } catch (_) {
+          // A failed or cancelled transfer still needs its files removed.
+        }
+      }
+      final deleted = await _deleteFiles(id);
+      await afterDelete?.call();
+      return deleted;
+    } finally {
+      if (identical(_deleting[id], finished.future)) _deleting.remove(id);
+      finished.complete();
+    }
+  }
+
+  static Future<bool> _deleteFiles(String id) async {
+    final dir = await _dir();
     var deleted = false;
     // Delete in order: ready first so _statDownloaded immediately returns false,
     // then audio, then meta, then part. This avoids stale ready->false but m4a orphan.
@@ -303,6 +365,8 @@ class AudioDownloadService {
       _audioPath(dir, id),
       _metaPath(dir, id),
       _qualityPath(dir, id),
+      _pendingQualityPath(dir, id),
+      '${_audioPath(dir, id)}.upgrade-backup',
       '${_audioPath(dir, id)}.part',
       _partNotePath(_audioPath(dir, id)),
     ]) {
@@ -323,8 +387,11 @@ class AudioDownloadService {
   /// Drops what a download that will not be resumed left behind.
   static Future<void> discardPartial(Track track) async {
     try {
-      final path = _audioPath(await _dir(), _key(track));
-      if (_inFlight.containsKey(_key(track))) return;
+      final dir = await _dir();
+      final id = _key(track);
+      if (_inFlight.containsKey(id) || _deleting.containsKey(id)) return;
+      await _settleQuality(dir, id);
+      final path = _audioPath(dir, id);
       await _discardPart(File('$path.part'), File(_partNotePath(path)));
     } catch (e) {
       debugPrint('discardPartial error: $e');
@@ -350,6 +417,7 @@ class AudioDownloadService {
       debugPrint('ensureDownloaded invalid track: $e');
       throw Exception('无效曲目id');
     }
+    if (_deleting.containsKey(id)) throw const DownloadCancelled();
     final existing = _inFlight[id];
     if (existing != null) return existing;
     // Claim synchronously before any await to prevent parallel .part writes
@@ -358,13 +426,24 @@ class AudioDownloadService {
     try {
       final dir = await _dir();
       final path = _audioPath(dir, id);
+      final hasDownload = !force && await isDownloadedById(id);
       await saveTrackMetadata(track);
-      if (!force && await isDownloadedById(id)) {
+      if (hasDownload && !_cancelled.contains(id)) {
         completer.complete(path);
         return path;
       }
-      final result = await _downloadPatiently(track, dir, path,
-          force: force, minimumQualityRank: minimumQualityRank);
+      await _settleQuality(dir, id);
+      if (force) {
+        await _discardPart(File('$path.part'), File(_partNotePath(path)));
+      }
+      final String result;
+      try {
+        result = await _downloadPatiently(track, id, dir, path,
+            force: force, minimumQualityRank: minimumQualityRank);
+      } on DownloadCancelled {
+        await _discardPart(File('$path.part'), File(_partNotePath(path)));
+        rethrow;
+      }
       completer.complete(result);
       return result;
     } catch (e, st) {
@@ -401,18 +480,21 @@ class AudioDownloadService {
 
   /// [_download], tried again after [retryDelays] until it works or the
   /// failure is one that waiting does not cure.
-  static Future<String> _downloadPatiently(Track track, String dir, String path,
+  static Future<String> _downloadPatiently(
+      Track track, String id, String dir, String path,
       {bool force = false, int? minimumQualityRank}) async {
     for (var attempt = 0;; attempt++) {
+      if (_cancelled.contains(id)) throw const DownloadCancelled();
       try {
-        return await _download(track, dir, path,
+        return await _download(track, id, dir, path,
             force: force, minimumQualityRank: minimumQualityRank);
       } catch (e) {
+        if (_cancelled.contains(id)) throw const DownloadCancelled();
         if (attempt >= retryDelays.length || !_worthRetrying(e)) rethrow;
-        debugPrint('Download of ${track.id} failed ($e); '
+        debugPrint('Download of $id failed ($e); '
             'retrying in ${retryDelays[attempt].inSeconds}s');
-        _emit(DownloadProgress(track.id, 0, null, false, null, retrying: true));
-        await _pause(retryDelays[attempt], track.id);
+        _emit(DownloadProgress(id, 0, null, false, null, retrying: true));
+        await _pause(retryDelays[attempt], id);
       }
     }
   }
@@ -439,21 +521,22 @@ class AudioDownloadService {
     if (_cancelled.contains(id)) throw const DownloadCancelled();
   }
 
-  static Future<String> _download(Track track, String dir, String path,
+  static Future<String> _download(
+      Track track, String id, String dir, String path,
       {bool force = false, int? minimumQualityRank}) async {
     if (track.isLocal) {
       const reason = '本地文件已删除';
-      _emit(DownloadProgress(track.id, 0, null, false, reason));
+      _emit(DownloadProgress(id, 0, null, false, reason));
       throw const VideoUnavailable(reason);
     }
     var url = track.audioUrl;
     var isPart = false;
     Map<String, String>? streamInfo;
-    if (url == null || url.isEmpty || force) {
+    if (url == null || url.isEmpty || force || minimumQualityRank != null) {
       final info = await BilibiliSdk.fetchAudioStream(track.bvid, track.cid);
       final refusal = info?['unavailable'];
       if (refusal != null) {
-        _emit(DownloadProgress(track.id, 0, null, false, refusal));
+        _emit(DownloadProgress(id, 0, null, false, refusal));
         throw VideoUnavailable(refusal);
       }
       url = info?['url'];
@@ -480,17 +563,14 @@ class AudioDownloadService {
       }
     }
     if (url == null || url.isEmpty) {
-      _emit(DownloadProgress(track.id, 0, null, false, '无法获取音源下载链接'));
+      _emit(DownloadProgress(id, 0, null, false, '无法获取音源下载链接'));
       throw Exception('无法获取音源下载链接');
     }
 
     final part = File('$path.part');
     final note = File(_partNotePath(path));
-    if (force) {
-      await _discardPart(part, note);
-    }
     try {
-      if (_cancelled.contains(track.id)) throw const DownloadCancelled();
+      if (_cancelled.contains(id)) throw const DownloadCancelled();
       // A partial file that turns out not to be the start of what the
       // server has now is thrown away, and the transfer made once more
       // from the first byte.
@@ -527,8 +607,8 @@ class AudioDownloadService {
         }
         for (var i = 0; i < urls.length; i++) {
           try {
-            done = await _transfer(urls[i], part, note, track.id);
-            done ??= await _transfer(urls[i], part, note, track.id);
+            done = await _transfer(urls[i], part, note, id);
+            done ??= await _transfer(urls[i], part, note, id);
             if (done == null) throw Exception('下载无法续传');
             streamInfo = streamInfo == null ? null : candidate;
             break;
@@ -538,19 +618,36 @@ class AudioDownloadService {
                     candidateIndex == candidates.length - 1)) {
               rethrow;
             }
-            if (_cancelled.contains(track.id)) throw const DownloadCancelled();
+            if (_cancelled.contains(id)) throw const DownloadCancelled();
           }
         }
         if (done != null) break;
       }
       if (done == null) throw Exception('下载无法续传');
+      if (_cancelled.contains(id)) throw const DownloadCancelled();
 
+      // Stage metadata before replacing any playable audio. A full disk here
+      // must leave the existing download intact.
+      final qualityData = <String, Object>{
+        if (streamInfo != null) ...{
+          'quality': streamInfo['quality'] ?? '高品质',
+          'qualityId': int.tryParse(streamInfo['qualityId'] ?? '') ?? 30232,
+          'bandwidth': int.tryParse(streamInfo['bandwidth'] ?? '') ?? 0,
+          'updatedAt': DateTime.now().millisecondsSinceEpoch,
+        },
+      };
+      final pending = File(_pendingQualityPath(dir, id));
+      await _atomicWriteString(pending.path, jsonEncode(qualityData));
       final destination = File(path);
       try {
         // On POSIX this atomically replaces an existing download, preserving
         // it if the rename fails.
         await part.rename(path);
-      } catch (e) {
+      } on FileSystemException {
+        if (!Platform.isWindows) {
+          await pending.delete();
+          rethrow;
+        }
         // Windows may refuse to replace an existing file. Keep a backup and
         // restore it if installing the new file fails.
         final backup = File('$path.upgrade-backup');
@@ -560,6 +657,7 @@ class AudioDownloadService {
           await part.rename(path);
         } catch (_) {
           if (hadDestination) await backup.rename(path);
+          await pending.delete();
           rethrow;
         }
         if (hadDestination) {
@@ -573,30 +671,21 @@ class AudioDownloadService {
       } catch (_) {}
       // Without the marker the song is not downloaded as far as the next
       // launch is concerned: failing here keeps this session honest too.
-      final readyFile = File(_readyPath(dir, _key(track)));
+      final readyFile = File(_readyPath(dir, id));
       if (!await readyFile.exists()) {
         await readyFile.create(recursive: true);
       }
       await saveTrackMetadata(track, force: isPart || track.loudness != null);
-      if (streamInfo != null) {
-        final qualityData = {
-          'quality': streamInfo['quality'] ?? '高品质',
-          'qualityId': int.tryParse(streamInfo['qualityId'] ?? '') ?? 30232,
-          'bandwidth': int.tryParse(streamInfo['bandwidth'] ?? '') ?? 0,
-          'updatedAt': DateTime.now().millisecondsSinceEpoch,
-        };
-        try {
-          await _atomicWriteString(
-            _qualityPath(dir, _key(track)),
-            jsonEncode(qualityData),
-          );
-        } catch (e) {
-          debugPrint('save quality info failed: $e');
-        }
+      try {
+        await _settleQuality(dir, id);
+      } catch (e) {
+        // The staged record remains readable with the committed audio. The
+        // next upgrade settles it before starting a new transfer.
+        debugPrint('settling quality info failed: $e');
       }
-      _downloadedMemo[_key(track)] = true;
+      _downloadedMemo[id] = true;
 
-      _emit(DownloadProgress(track.id, done.received, done.total, true, null));
+      _emit(DownloadProgress(id, done.received, done.total, true, null));
       await DatabaseService.saveDownloadedTrack(track);
       return path;
     } catch (e) {
@@ -605,10 +694,11 @@ class AudioDownloadService {
       // how a partial file that no longer fits is recognised). Not when the
       // disk refused the write, though: a full disk stays full, and nothing
       // else the app saves would fit either.
-      if (e is FileSystemException || e is DownloadCancelled) {
+      if (e is FileSystemException &&
+          !await File(_pendingQualityPath(dir, id)).exists()) {
         await _discardPart(part, note);
       }
-      _emit(DownloadProgress(track.id, 0, null, false, '$e'));
+      _emit(DownloadProgress(id, 0, null, false, '$e'));
       rethrow;
     }
   }
@@ -616,9 +706,9 @@ class AudioDownloadService {
   static String _partNotePath(String audioPath) => '$audioPath.part.json';
 
   /// What a `.part` file is the beginning of: the full length of the file
-  /// it was cut from, and the server's validator (ETag / Last-Modified) for
-  /// it. Null when there is no usable note.
-  static Future<({int? total, String? validator})?> _readPartNote(
+  /// it was cut from, and the server's strong ETag for it. Null when there is
+  /// no usable note. Older notes without a strong tag start a fresh download.
+  static Future<({int? total, String validator})?> _readPartNote(
       File note) async {
     try {
       if (!await note.exists()) return null;
@@ -626,28 +716,29 @@ class AudioDownloadService {
       if (map is! Map) return null;
       final total = map['total'];
       final validator = map['validator'];
+      if (validator is! String || !_isStrongEtag(validator)) return null;
       return (
         total: total is int && total > 0 ? total : null,
-        validator:
-            validator is String && validator.isNotEmpty ? validator : null,
+        validator: validator,
       );
     } catch (_) {
       return null;
     }
   }
 
-  /// A validator the server will compare exactly: a strong ETag, else the
-  /// modification date. (`If-Range` ignores weak ETags.)
+  static bool _isStrongEtag(String tag) =>
+      tag.length >= 2 && tag.startsWith('"') && tag.endsWith('"');
+
   static String? _validatorOf(HttpClientResponse res) {
     final etag = res.headers.value(HttpHeaders.etagHeader);
-    if (etag != null && etag.isNotEmpty && !etag.startsWith('W/')) return etag;
-    return res.headers.value(HttpHeaders.lastModifiedHeader);
+    return etag != null && _isStrongEtag(etag) ? etag : null;
   }
 
   /// Anything shorter is an error page, not audio.
   static const int _minAudioBytes = 1024;
 
-  static final RegExp _contentRange = RegExp(r'bytes\s+(\d+)-\d+/(\d+|\*)');
+  static final RegExp _contentRange = RegExp(r'^bytes (\d+)-(\d+)/(\d+)$');
+  static final RegExp _unsatisfiedRange = RegExp(r'^bytes \*/(\d+)$');
 
   static Future<void> _discardPart(File part, File note) async {
     for (final file in [part, note]) {
@@ -677,6 +768,7 @@ class AudioDownloadService {
     File note,
     String trackId,
   ) async {
+    if (_cancelled.contains(trackId)) throw const DownloadCancelled();
     var existing = await part.exists() ? await part.length() : 0;
     final known = existing > 0 ? await _readPartNote(note) : null;
     if (existing > 0 && known == null) {
@@ -693,10 +785,9 @@ class AudioDownloadService {
     req.headers.set('User-Agent', kBiliUserAgent);
     req.headers.set('Accept', '*/*');
     req.headers.set('Accept-Encoding', 'identity');
-    if (existing > 0) {
+    if (known != null) {
       req.headers.set('Range', 'bytes=$existing-');
-      final validator = known?.validator;
-      if (validator != null) req.headers.set('If-Range', validator);
+      req.headers.set('If-Range', known.validator);
     }
 
     // An abandoned request would keep its connection: the pool holds four
@@ -711,11 +802,16 @@ class AudioDownloadService {
 
     // 416: nothing lies beyond what is on disk. That is a finished file
     // (e.g. a crash between the last byte and the rename) only when the
-    // length is the one recorded for it.
+    // origin confirms both the representation and its full length.
     if (res.statusCode == HttpStatus.requestedRangeNotSatisfiable &&
-        existing > 0) {
+        known != null) {
       await res.listen((_) {}).cancel();
-      if (known?.total == existing && existing >= _minAudioBytes) {
+      final range = _unsatisfiedRange
+          .firstMatch(res.headers.value(HttpHeaders.contentRangeHeader) ?? '');
+      if (known.total == existing &&
+          int.tryParse(range?.group(1) ?? '') == existing &&
+          _validatorOf(res) == known.validator &&
+          existing >= _minAudioBytes) {
         return (received: existing, total: existing);
       }
       await _discardPart(part, note);
@@ -738,22 +834,23 @@ class AudioDownloadService {
     final int? total;
     var received = 0;
     final FileMode mode;
-    if (res.statusCode == HttpStatus.partialContent && existing > 0) {
+    if (res.statusCode == HttpStatus.partialContent && known != null) {
       // 206: the rest of a file — the same one only if it starts where the
       // partial file ends, is as long as recorded, and carries the same
       // validator.
       final range = _contentRange
           .firstMatch(res.headers.value(HttpHeaders.contentRangeHeader) ?? '');
       final start = int.tryParse(range?.group(1) ?? '');
-      final full = int.tryParse(range?.group(2) ?? '');
+      final end = int.tryParse(range?.group(2) ?? '');
+      final full = int.tryParse(range?.group(3) ?? '');
       final validator = _validatorOf(res);
       final same = start == existing &&
-          (known?.total == null || full == null || full == known?.total) &&
-          (known?.validator == null ||
-              validator == null ||
-              validator == known?.validator) &&
-          // With neither to go by there is no telling.
-          (known?.validator != null || (known?.total != null && full != null));
+          full != null &&
+          full > existing &&
+          end == full - 1 &&
+          (known.total == null || full == known.total) &&
+          (res.contentLength < 0 || res.contentLength == full - existing) &&
+          validator == known.validator;
       if (!same) {
         // Not read: the body is the tail of some other file.
         await res.listen((_) {}).cancel();
@@ -761,8 +858,7 @@ class AudioDownloadService {
         return null;
       }
       received = existing;
-      total =
-          full ?? (res.contentLength > 0 ? existing + res.contentLength : null);
+      total = full;
       mode = FileMode.append;
     } else if (res.statusCode == HttpStatus.partialContent) {
       // A range nobody asked for.
@@ -788,7 +884,13 @@ class AudioDownloadService {
 
     // Written chunk by chunk rather than through an IOSink: a sink swallows
     // a failed write (a full disk) and its flush() then never completes.
-    final file = await part.open(mode: mode);
+    final RandomAccessFile file;
+    try {
+      file = await part.open(mode: mode);
+    } catch (_) {
+      await res.listen((_) {}).cancel();
+      rethrow;
+    }
     var lastEmitted = received;
     // TLS hands over a record (~16 KiB) at a time: gathered here, the file
     // sees a few hundred writes for a song instead of a few thousand.
@@ -829,8 +931,9 @@ class AudioDownloadService {
 
     // Truncated transfer (dropped connection mid-stream): fail loudly rather
     // than marking a half file as ready.
-    if (total != null && received < total) {
-      throw Exception('下载不完整 ($received/$total 字节)');
+    if (total != null && received != total) {
+      if (received > total) await _discardPart(part, note);
+      throw Exception('下载长度异常 ($received/$total 字节)');
     }
     if (received < _minAudioBytes) {
       // Not the start of anything worth resuming.

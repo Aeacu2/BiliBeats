@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../app/app_services.dart';
@@ -20,6 +22,7 @@ class SongTile extends StatelessWidget {
   final Track track;
   final VoidCallback? onTap;
   final bool showActions;
+  final bool? checked;
 
   /// Leading widget override (e.g. a selection check in edit mode).
   final Widget? leading;
@@ -36,11 +39,18 @@ class SongTile extends StatelessWidget {
   static const double artSize = 48;
   static const double extent = 64;
 
+  static double extentOf(BuildContext context) {
+    final scale = MediaQuery.textScalerOf(context);
+    final textHeight = scale.scale(15) * 1.25 + scale.scale(13) * 1.3;
+    return math.max(extent, textHeight + 19).ceilToDouble();
+  }
+
   const SongTile({
     super.key,
     required this.track,
     this.onTap,
     this.showActions = true,
+    this.checked,
     this.leading,
     this.trailing,
     this.queue,
@@ -52,9 +62,8 @@ class SongTile extends StatelessWidget {
     final services = AppServices.instance;
     final handler = services.handler;
 
-    // The row is a fixed height: its two lines may grow only so far.
-    return MediaQuery.withClampedTextScaling(
-      maxScaleFactor: 1.3,
+    return Semantics(
+      checked: checked,
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
@@ -64,7 +73,7 @@ class SongTile extends StatelessWidget {
               : null,
           borderRadius: BorderRadius.circular(AppRadius.md),
           child: SizedBox(
-            height: extent,
+            height: extentOf(context),
             child: Padding(
               padding: const EdgeInsets.only(left: 4),
               child: Row(
@@ -122,14 +131,16 @@ class SongTile extends StatelessWidget {
                       },
                     ),
                   ),
-                  trailing ??
-                      _Selected(
-                        listenables: [services.library],
-                        select: () => services.library.isDownloaded(track.id),
-                        builder: (context, downloaded) => downloaded
-                            ? _MoreButton(track: track, queue: queue)
-                            : TrackDownloadButton(track: track, size: 22),
-                      ),
+                  if (trailing != null)
+                    trailing!
+                  else if (showActions)
+                    _Selected(
+                      listenables: [services.library],
+                      select: () => services.library.isDownloaded(track.id),
+                      builder: (context, downloaded) => downloaded
+                          ? _MoreButton(track: track, queue: queue)
+                          : TrackDownloadButton(track: track, size: 22),
+                    ),
                 ],
               ),
             ),

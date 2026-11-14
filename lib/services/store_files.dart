@@ -15,7 +15,7 @@ class EncodedJson {
 
 /// The app's persisted state: whole-file JSON in the documents directory,
 /// one file per store (`bilibeat_*.json`), each wrapped in a versioned
-/// envelope and written atomically through one queue.
+/// envelope and written atomically through a queue per file.
 ///
 /// Every store (the library, preferences, lyrics, trims, the account…)
 /// reads and writes through here; none touches its file directly.
@@ -159,7 +159,11 @@ class StoreFiles {
 
   /// Atomically writes [payload] (wrapped in the versioned envelope; it may
   /// be [EncodedJson] already) to `<documents>/[name]`. Failures propagate.
-  static Future<void> write(String name, Object payload) async {
+  static Future<void> write(String name, Object payload) =>
+      _writeSnapshot(name, () => payload);
+
+  static Future<void> _writeSnapshot(
+      String name, Object Function() encodeSnapshot) async {
     final path = await pathOf(name);
     if (_protectedPaths.contains(path)) {
       throw FileSystemException('Unreadable file could not be preserved', path);
@@ -169,7 +173,7 @@ class StoreFiles {
       await Directory('${await documents()}/${name.substring(0, slash)}')
           .create(recursive: true);
     }
-    await _writeAtomically(path, _envelope(payload));
+    await _writeAtomically(path, encodeSnapshot);
   }
 
   /// Deletes `<documents>/[name]`, if it is there.
@@ -180,21 +184,22 @@ class StoreFiles {
 
   /// [write], with a failure reported to the listener ([saveFailures])
   /// instead of thrown.
-  static Future<void> save(String name, Object payload) async {
+  static Future<void> save(String name, Object payload) =>
+      saveSnapshot(name, () => payload);
+
+  /// Like [save], but serializes a captured snapshot only if it still needs
+  /// to be written when its turn arrives. Capture mutable data before calling.
+  static Future<void> saveSnapshot(
+      String name, Object Function() encodeSnapshot) async {
     try {
-      await write(name, payload);
+      await _writeSnapshot(name, encodeSnapshot);
     } catch (e) {
       debugPrint('StoreFiles: saving $name failed: $e');
       _reportSaveFailure();
     }
   }
 
-  // Write serialization: whole-file rewrites must not interleave. Each
-  // persist is small but concurrent calls (e.g. addRecentlyPlayed +
-  // toggleFavorite) shared the same `$path.tmp` and truncated each other. A
-  // simple async mutex plus per-call unique tmp file fixes lost-update +
-  // Windows rename semantics.
-  static Future<void> _writeLock = Future.value();
+  static final Map<String, Future<void>> _writeLocks = {};
 
   /// Whole-file rewrites are truncated-then-written by default; a crash in the
   /// middle corrupts the file. Writing to a temp file and renaming keeps the
@@ -205,20 +210,20 @@ class StoreFiles {
   /// skipped: the newer one carries its changes too, and its outcome is
   /// this one's. A burst (naming a library, dragging a playlist) then
   /// rewrites each file once, not once per change.
-  static Future<void> _writeAtomically(String path, Object data) {
+  static Future<void> _writeAtomically(
+      String path, Object Function() encodeSnapshot) {
     final ticket = _writeTickets[path] = (_writeTickets[path] ?? 0) + 1;
-    return _newestWrites[path] = _writeQueued(path, data, ticket);
+    return _newestWrites[path] = _writeQueued(path, encodeSnapshot, ticket);
   }
 
   static final Map<String, int> _writeTickets = {};
   static final Map<String, Future<void>> _newestWrites = {};
 
-  static Future<void> _writeQueued(String path, Object data, int ticket) async {
-    // Serialize all whole-file writes through a single async mutex so two
-    // concurrent persists never share the same tmp file.
-    final previous = _writeLock;
+  static Future<void> _writeQueued(
+      String path, Object Function() encodeSnapshot, int ticket) async {
+    final previous = _writeLocks[path];
     final completer = Completer<void>();
-    _writeLock = completer.future;
+    _writeLocks[path] = completer.future;
     await previous;
     if (_writeTickets[path] != ticket) {
       completer.complete();
@@ -227,6 +232,7 @@ class StoreFiles {
     }
     File? tmp;
     try {
+      final data = _envelope(encodeSnapshot());
       final payload =
           utf8.encode(data is EncodedJson ? data.text : jsonEncode(data));
       for (var attempt = 0; attempt < 2; attempt++) {
@@ -273,6 +279,11 @@ class StoreFiles {
         } catch (_) {}
       }
       completer.complete();
+      if (identical(_writeLocks[path], completer.future)) {
+        _writeLocks.remove(path);
+        _writeTickets.remove(path);
+        _newestWrites.remove(path);
+      }
     }
   }
 
@@ -310,7 +321,14 @@ class StoreFiles {
         final name = entity.uri.pathSegments.last;
         if (!name.startsWith('bilibeat_')) continue;
         if (name.endsWith('.unreadable')) unreadable = true;
-        if (name.endsWith('.tmp')) await deleteQuietly(entity);
+        if (name.endsWith('.tmp')) {
+          final path = entity.path;
+          final suffix = RegExp(r'\.\d+\.tmp$').firstMatch(path);
+          if (suffix == null ||
+              !_writeLocks.containsKey(path.substring(0, suffix.start))) {
+            await deleteQuietly(entity);
+          }
+        }
       }
     } catch (e) {
       debugPrint('StoreFiles tidy skipped: $e');

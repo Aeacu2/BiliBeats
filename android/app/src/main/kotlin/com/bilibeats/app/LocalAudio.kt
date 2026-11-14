@@ -1,5 +1,6 @@
 package com.bilibeats.app
 
+import android.content.ContentResolver
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -28,6 +29,11 @@ object LocalAudio {
     /// as the app starts is not swept away before the library takes it. On
     /// failure the map holds only `error` and `name`.
     fun copy(context: Context, uri: Uri): Map<String, Any?> {
+        // The sender must share a content URI with a read grant or a public
+        // provider. A file URI would be opened with this app's permissions.
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) {
+            return failure(null, "unsupported URI")
+        }
         val name = displayName(context, uri)
         val target = File(audioDir(context), "incoming_${UUID.randomUUID()}.part")
         try {

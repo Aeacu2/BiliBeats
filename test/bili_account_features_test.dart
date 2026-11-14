@@ -1,6 +1,7 @@
 import 'package:bilibeats/services/import_download_queue.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/bili_account.dart';
@@ -8,6 +9,7 @@ import 'package:bilibeats/services/bili_favorites.dart';
 import 'package:bilibeats/services/bilibili_sdk.dart';
 import 'package:bilibeats/services/database_service.dart';
 import 'package:bilibeats/services/recommendation_engine.dart';
+import 'package:bilibeats/services/store_files.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
@@ -236,6 +238,45 @@ void main() {
     // A late response for A is not allowed to expire B.
     await BiliAccountStore.expire(a);
     expect(BiliAccountStore.current.value, same(b));
+  });
+
+  test('a public audio lookup retries anonymously after login expiry',
+      () async {
+    final requests = <({String url, String? cookies})>[];
+    BilibiliSdk.requestWith = (url, {cookies}) async {
+      requests.add((url: url, cookies: cookies));
+      if (cookies != null) return '{"code":-101}';
+      return body({
+        'dash': {
+          'audio': [
+            {'id': 30232, 'baseUrl': 'https://example.com/public-audio'}
+          ]
+        }
+      });
+    };
+
+    final stream = await BilibiliSdk.fetchAudioStream('BV1TEST', 123);
+
+    expect(stream?['url'], 'https://example.com/public-audio');
+    expect(requests.map((r) => r.cookies), [a.cookies, null]);
+    expect(requests.last.url, requests.first.url);
+    expect(BiliAccountStore.current.value, isNull);
+    expect(BiliAccountStore.expired, isTrue);
+  });
+
+  test('expiration from the old account cannot overwrite a pending login',
+      () async {
+    final signIn = BiliAccountStore.save(b);
+    final staleResponse = BiliAccountStore.expire(a);
+    await Future.wait([signIn, staleResponse]);
+
+    expect(BiliAccountStore.current.value, same(b));
+    expect(BiliAccountStore.expired, isFalse);
+    final path =
+        await StoreFiles.pathOf('bilibeat_private/bilibeat_account.json');
+    final saved =
+        StoreFiles.unwrap(jsonDecode(await File(path).readAsString()));
+    expect(BiliAccount.fromMap(saved)?.mid, b.mid);
   });
 
   test('subtitle cache is isolated by login, including cached absence',

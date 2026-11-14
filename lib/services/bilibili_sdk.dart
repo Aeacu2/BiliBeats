@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -20,6 +19,8 @@ class BiliApiException implements Exception {
   String toString() => 'BiliApiException: $message';
 }
 
+typedef BiliSearchContinuation = Future<List<Track>> Function(int page);
+
 class BilibiliSdk {
   static int audioQualityRank(int id) => switch (id) {
         30251 => 500,
@@ -31,6 +32,7 @@ class BilibiliSdk {
         _ => 0,
       };
   static const String _baseUrl = 'https://api.bilibili.com';
+  static const Duration _requestTimeout = Duration(seconds: 10);
 
   /// 音乐 partition. Covers 原创音乐 / 翻唱 / 演奏 / VOCALOID / 音乐现场 / MV /
   /// 音乐综合 — everything a music player has any business showing.
@@ -94,9 +96,8 @@ class BilibiliSdk {
       if (postWith case final override?) {
         body = await override('$_baseUrl$path', data, account);
       } else {
-        final request = await _httpClient
-            .postUrl(Uri.parse('$_baseUrl$path'))
-            .timeout(const Duration(seconds: 10));
+        final request = await openHttpRequest(
+            _httpClient.postUrl(Uri.parse('$_baseUrl$path')), _requestTimeout);
         request.headers.set('Referer', 'https://www.bilibili.com/');
         request.headers.set('User-Agent', kBiliUserAgent);
         request.headers.set('Cookie', account.cookies);
@@ -104,18 +105,12 @@ class BilibiliSdk {
             'application', 'x-www-form-urlencoded',
             charset: 'utf-8');
         request.write(Uri(queryParameters: data).query);
-        final response = await request.close().timeout(
-          const Duration(seconds: 10),
-          onTimeout: () {
-            request.abort();
-            throw TimeoutException('Bilibili request timed out');
-          },
-        );
-        body = await response
-            .transform(utf8.decoder)
-            .join()
-            .timeout(const Duration(seconds: 10));
-        if (response.statusCode != 200) body = null;
+        final response = await closeHttpRequest(request, _requestTimeout);
+        if (response.statusCode == HttpStatus.ok) {
+          body = await readHttpBody(response, _requestTimeout);
+        } else {
+          await discardHttpBody(response);
+        }
       }
       final result = body == null ? null : jsonDecode(body);
       if (result is Map && result['code'] == -101) {
@@ -160,33 +155,20 @@ class BilibiliSdk {
     try {
       final override = requestWith;
       if (override != null) return await override(rawUrl, cookies: cookies);
-      final req = await _httpClient
-          .getUrl(Uri.parse(rawUrl))
-          .timeout(const Duration(seconds: 10));
+      final req = await openHttpRequest(
+          _httpClient.getUrl(Uri.parse(rawUrl)), _requestTimeout);
       req.headers.set('Referer', 'https://www.bilibili.com');
       req.headers.set('User-Agent', kBiliUserAgent);
       if (cookies != null && cookies.isNotEmpty) {
         req.headers.set('Cookie', cookies);
       }
-      // A request given up on is aborted: left alone it keeps one of the
-      // connections the pool allows this host.
-      final res = await req.close().timeout(
-        const Duration(seconds: 10),
-        onTimeout: () {
-          req.abort();
-          throw TimeoutException('Bilibili request timed out');
-        },
-      );
-      if (res.statusCode == 200) {
+      final res = await closeHttpRequest(req, _requestTimeout);
+      if (res.statusCode == HttpStatus.ok) {
         onResponseCookies
             ?.call(res.cookies.map((c) => '${c.name}=${c.value}').join('; '));
-        final body = await res
-            .transform(utf8.decoder)
-            .join()
-            .timeout(const Duration(seconds: 10));
-        return body;
+        return await readHttpBody(res, _requestTimeout);
       } else {
-        await res.listen((_) {}).cancel();
+        await discardHttpBody(res);
         debugPrint('Bilibili HTTP ${res.statusCode}');
       }
     } catch (e) {
@@ -261,22 +243,16 @@ class BilibiliSdk {
               u.host.endsWith('.bilibili.com') ||
               hosts.any((h) => u.host == h || u.host.endsWith('.$h')));
       var at = uri;
+      const timeout = Duration(seconds: 5);
       for (var hop = 0; hop < 5; hop++) {
-        final req =
-            await _httpClient.getUrl(at).timeout(const Duration(seconds: 5));
+        final req = await openHttpRequest(_httpClient.getUrl(at), timeout);
         req.followRedirects = false;
         req.headers.set('User-Agent', kBiliUserAgent);
         req.headers.set('Referer', 'https://www.bilibili.com/');
-        final res = await req.close().timeout(
-          const Duration(seconds: 5),
-          onTimeout: () {
-            req.abort();
-            throw TimeoutException('short link timed out');
-          },
-        );
+        final res = await closeHttpRequest(req, timeout);
         final target = res.headers.value(HttpHeaders.locationHeader);
         if (target != null) {
-          await res.listen((_) {}).cancel();
+          await discardHttpBody(res);
           final id = extractBvOrAvId(target);
           if (id != null) return id;
           if (!res.isRedirect) return null;
@@ -286,11 +262,11 @@ class BilibiliSdk {
           continue;
         }
         // Some short links answer 200 with a page naming the video.
-        final body = await res
-            .transform(utf8.decoder)
-            .join()
-            .timeout(const Duration(seconds: 5))
-            .catchError((_) => '');
+        if (res.statusCode != HttpStatus.ok) {
+          await discardHttpBody(res);
+          return null;
+        }
+        final body = await readHttpBody(res, timeout);
         final bvInBody = _bvId.firstMatch(body);
         return bvInBody == null ? null : 'BV${bvInBody.group(1)}';
       }
@@ -1008,7 +984,7 @@ class BilibiliSdk {
         'voice_balance': 1,
       };
 
-      final cookieStr = await BiliAccountStore.cookies();
+      var cookies = await BiliAccountStore.cookies();
       // A rejected request need not mean the video is unavailable. Try the
       // signed and plain APIs, then the minimal DASH flags, before retrying
       // the whole download later. Real access refusals remain definitive.
@@ -1021,18 +997,17 @@ class BilibiliSdk {
               .map((e) => '${e.key}=${Uri.encodeComponent(e.value.toString())}')
               .join('&');
           final endpoint = signedRequest ? 'wbi/playurl' : 'playurl';
-          final body = await _httpGet('$_baseUrl/x/player/$endpoint?$queryStr',
-              cookies: cookieStr);
-          if (body == null) continue;
-          dynamic json;
-          try {
-            json = jsonDecode(body);
-          } on FormatException {
-            continue;
+          final url = '$_baseUrl/x/player/$endpoint?$queryStr';
+          var json = _jsonObject(await _httpGet(url, cookies: cookies));
+          if (json?['code'] == -101 && cookies != null) {
+            // _httpGet expires the matching login. Try the same public
+            // endpoint again anonymously and leave later attempts anonymous.
+            cookies = null;
+            json = _jsonObject(await _httpGet(url));
           }
           final stream = parseAudioStream(json);
           if (stream != null) return {...stream, ...part};
-          if (json is Map && json['code'] == -400) continue;
+          if (json?['code'] == -400) continue;
           final refusal = unavailableReason(json);
           if (refusal != null) return {'unavailable': refusal};
         }
@@ -1042,6 +1017,16 @@ class BilibiliSdk {
     }
 
     return null;
+  }
+
+  static Map? _jsonObject(String? body) {
+    if (body == null) return null;
+    try {
+      final value = jsonDecode(body);
+      return value is Map ? value : null;
+    } on FormatException {
+      return null;
+    }
   }
 
   /// Bilibili's codes for "too many requests" and its own trouble: worth
@@ -1259,10 +1244,14 @@ class BilibiliSdk {
   //
   // Contract: a successful request with no matches resolves to []. Every
   // applicable request/fallback attempt failing throws [BiliApiException].
-  static final Set<String> _unfilteredQueries = {};
+  static Future<List<Track>> search(String query) async =>
+      (await startSearch(query)).tracks;
 
-  static Future<List<Track>> search(String query, {int page = 1}) async {
-    if (query.trim().isEmpty) return [];
+  /// Starts a search and keeps the selected filter with this caller's pages.
+  /// A direct video already includes all of its parts in the first response.
+  static Future<({List<Track> tracks, BiliSearchContinuation? next})>
+      startSearch(String query) async {
+    if (query.trim().isEmpty) return (tracks: const <Track>[], next: null);
 
     // A BV number or a link never goes through the keyword search: asking for
     // something by id means you want exactly it, whatever zone it lives in.
@@ -1270,10 +1259,8 @@ class BilibiliSdk {
     // 编码"), and is searched for like any other.
     final directId = extractBvOrAvId(query);
     if (directId != null) {
-      // One video is one page: there is nothing further to scroll to.
-      if (page > 1) return [];
       final direct = await fetchVideoInfo(directId);
-      if (direct.isNotEmpty) return direct;
+      if (direct.isNotEmpty) return (tracks: direct, next: null);
     }
     // Handle Bilibili short share links (b23.tv / bili2233.cn) that hide the BV
     // behind a redirect. The pasted share text is often `【标题】 https://b23.tv/xxx`
@@ -1285,7 +1272,7 @@ class BilibiliSdk {
             await _resolveShortLink(query).timeout(const Duration(seconds: 6));
         if (resolved != null) {
           final viaResolved = await fetchVideoInfo(resolved);
-          if (viaResolved.isNotEmpty) return viaResolved;
+          if (viaResolved.isNotEmpty) return (tracks: viaResolved, next: null);
         }
       } catch (e) {
         debugPrint('Short link resolve error: $e');
@@ -1299,24 +1286,25 @@ class BilibiliSdk {
     // endpoint may still answer), and only throw if that fails too.
     // Later pages stay in whichever of the two the first page came from:
     // page 3 of the music zone is not followed by page 4 of everything.
-    final key = query.trim();
-    if (page > 1) {
-      return _searchOnce(query,
-          musicOnly: !_unfilteredQueries.contains(key), page: page);
-    }
     List<Track>? musical;
     try {
-      musical = await _searchOnce(query, musicOnly: true, page: page);
+      musical = await _searchOnce(query, musicOnly: true);
     } catch (e) {
       debugPrint('Music-zone search failed, trying unfiltered: $e');
     }
     if (musical != null && musical.isNotEmpty) {
-      _unfilteredQueries.remove(key);
-      return musical;
+      return (
+        tracks: musical,
+        next: (page) => _searchOnce(query, musicOnly: true, page: page),
+      );
     }
-    if (_unfilteredQueries.length > 200) _unfilteredQueries.clear();
-    _unfilteredQueries.add(key);
-    return _searchOnce(query, musicOnly: false, page: page);
+    final all = await _searchOnce(query, musicOnly: false);
+    return (
+      tracks: all,
+      next: all.isEmpty
+          ? null
+          : (page) => _searchOnce(query, musicOnly: false, page: page),
+    );
   }
 
   /// A single search attempt: WBI-signed primary plus the plain fallback API.

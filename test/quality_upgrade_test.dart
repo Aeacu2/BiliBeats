@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/bilibili_sdk.dart';
 import 'package:bilibeats/services/audio_download_service.dart';
+import 'package:bilibeats/services/database_service.dart';
 import 'package:bilibeats/services/quality_upgrade_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -218,5 +219,65 @@ void main() {
     final candidate = await QualityUpgradeService.checkTrack(track);
     expect(candidate, isNull);
     expect(contacted, isFalse);
+  });
+
+  test('a malformed quality record does not stop scanning other tracks',
+      () async {
+    final audioDir = Directory('${docs.path}/bilibeat_audio');
+    await audioDir.create(recursive: true);
+
+    Track track(String bvid) => Track(
+          id: '${bvid}_p1',
+          bvid: bvid,
+          cid: 123,
+          title: 'Track',
+          rawTitle: 'Track',
+          uploader: 'Artist',
+          coverUrl: '',
+          duration: 200,
+        );
+
+    final standard = track('BV1STANDARD');
+    final malformed = track('BV1MALFORMED');
+    await DatabaseService.saveDownloadedTrack(standard);
+    await DatabaseService.saveDownloadedTrack(malformed);
+    await File('${audioDir.path}/audio_${standard.id}.quality.json')
+        .writeAsString(jsonEncode({'qualityId': 30232, 'quality': '标准品质'}));
+    await File('${audioDir.path}/audio_${malformed.id}.quality.json')
+        .writeAsString(jsonEncode({'qualityId': 'invalid'}));
+
+    BilibiliSdk.requestWith = (_, {cookies}) async => jsonEncode({
+          'code': 0,
+          'data': {
+            'dash': {
+              'audio': [
+                {'id': 30280, 'baseUrl': 'https://example.com/audio'}
+              ],
+            },
+          },
+        });
+    addTearDown(() => BilibiliSdk.requestWith = null);
+
+    final results = await QualityUpgradeService.scanAll();
+    expect(results.map((candidate) => candidate.track), [malformed, standard]);
+    expect(results.map((candidate) => candidate.currentQualityId), [0, 30232]);
+  });
+
+  test('interrupted quality upgrade reports the metadata for the audio on disk',
+      () async {
+    const id = 'BV1RECOVERED_p1';
+    final dir = await AudioDownloadService.audioFolder();
+    final path = AudioDownloadService.audioPathIn(dir, id);
+    final oldQuality = File('$dir/audio_$id.quality.json');
+    final pending = File('${oldQuality.path}.pending');
+    final part = File('$path.part');
+    await File(path).writeAsBytes([1]);
+    await oldQuality.writeAsString('{"qualityId":30232}');
+    await part.writeAsBytes([2]);
+    await pending.writeAsString('{"qualityId":30280}');
+
+    expect((await AudioDownloadService.qualityInfo(id))!['qualityId'], 30232);
+    await part.rename(path);
+    expect((await AudioDownloadService.qualityInfo(id))!['qualityId'], 30280);
   });
 }

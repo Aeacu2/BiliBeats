@@ -28,8 +28,13 @@ UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 
 def get(url, cookies='', referer='https://www.bilibili.com'):
-    req = urllib.request.Request(url, headers={'User-Agent': UA, 'Referer': referer, 'Cookie': cookies})
     try:
+        endpoint = urllib.parse.urlsplit(url)
+        if endpoint.scheme != 'https' or endpoint.hostname is None:
+            return None
+        req = urllib.request.Request(url, headers={'User-Agent': UA, 'Referer': referer})
+        if cookies and endpoint.netloc == 'api.bilibili.com':
+            req.add_unredirected_header('Cookie', cookies)
         with urllib.request.urlopen(req, timeout=15) as r:
             return json.loads(r.read().decode('utf-8'))
     except Exception as e:
@@ -87,7 +92,7 @@ def subtitles_of(bvid, cookies, subs, put):
         usable.sort(key=lambda s: (2 if ai(s) else 0) + (0 if 'zh' in str(s.get('lan', '')).lower() else 1))
         pick = usable[0]; url = pick['subtitle_url']
         url = ('https:' + url) if url.startswith('//') else url.replace('http:', 'https:')
-        body = get(url, cookies)
+        body = get(url)
         if body is None: return None
         out = {'state': 'ai' if ai(pick) else 'cc',
                'lines': sorted([[b['from'], b['to'], b['content'].strip()] for b in body.get('body', []) if b.get('content', '').strip()])}
@@ -129,18 +134,21 @@ def same(a, b):
 
 
 def compare(sub_lines, lyric_lines):
-    lg = [g for g in (grams(normalize(l)) for l in lyric_lines) if len(g) >= 2]
-    distinct = {normalize(l) for l in lyric_lines if len(grams(normalize(l))) >= 2}
+    lyric_grams = {}
+    for text in set(map(normalize, lyric_lines)):
+        g = grams(text)
+        if len(g) >= 2:
+            lyric_grams[text] = g
     considered = matched = 0; heard = set()
     for _, _, text in sub_lines:
         g = grams(normalize(text))
         if len(g) < 2: continue
         considered += 1; hit = False
-        for l, raw in zip(lg, [x for x in lyric_lines if len(grams(normalize(x))) >= 2]):
-            if same(g, l): hit = True; heard.add(normalize(raw))
+        for lyric, lyric_g in lyric_grams.items():
+            if same(g, lyric_g): hit = True; heard.add(lyric)
         matched += hit
     return dict(matched=matched, precision=matched / considered if considered else 0,
-                coverage=len(heard) / len(distinct) if distinct else 0)
+                coverage=len(heard) / len(lyric_grams) if lyric_grams else 0)
 
 
 def confirms(m, k, p, c): return m['matched'] >= k and m['precision'] >= p and m['coverage'] >= c

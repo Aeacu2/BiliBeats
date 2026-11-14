@@ -834,7 +834,7 @@ class _SkipButton extends StatelessWidget {
       tooltip: tooltip,
       onPressed: onPressed,
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints.tightFor(width: 60, height: 60),
+      constraints: const BoxConstraints.tightFor(width: 54, height: 60),
       icon: Icon(icon, size: 44, color: AppColors.textPrimary),
     );
   }
