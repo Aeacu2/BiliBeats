@@ -100,15 +100,21 @@ class QualityUpgradeService {
   /// Checks if [track] can be upgraded to a higher quality on Bilibili.
   static Future<QualityUpgradeCandidate?> checkTrack(Track track) async {
     if (track.isLocal) return null;
+    final quality = await _readQuality(track.id);
+    if (quality != null && qualityRank(quality.id) >= 500) return null;
+    return _checkRemote(track, quality);
+  }
 
-    final localInfo = await AudioDownloadService.qualityInfo(track.id);
-    if (localInfo != null) {
-      final currentQualityId = localInfo['qualityId'] as int? ?? 30232;
-      final currentRank = qualityRank(currentQualityId);
-      // If already at the highest possible tier (Hi-Res FLAC), no upgrade is possible.
-      if (currentRank >= 500) return null;
-    }
+  static Future<({int id, String label})?> _readQuality(String trackId) async {
+    final info = await AudioDownloadService.qualityInfo(trackId);
+    final id = info?['qualityId'];
+    if (id is! int || qualityRank(id) == 0) return null;
+    final label = info?['quality'];
+    return (id: id, label: label is String ? label : '未知');
+  }
 
+  static Future<QualityUpgradeCandidate?> _checkRemote(
+      Track track, ({int id, String label})? quality) async {
     final stream = await BilibiliSdk.fetchAudioStream(track.bvid, track.cid);
     if (stream == null || stream.containsKey('unavailable')) return null;
 
@@ -117,16 +123,14 @@ class QualityUpgradeService {
     final targetBandwidth = int.tryParse(stream['bandwidth'] ?? '');
     final targetRank = qualityRank(targetQualityId);
 
-    if (localInfo != null) {
-      final currentQualityId = localInfo['qualityId'] as int? ?? 30232;
-      final currentQuality = localInfo['quality'] as String? ?? '标准品质';
-      final currentRank = qualityRank(currentQualityId);
+    if (quality != null) {
+      final currentRank = qualityRank(quality.id);
 
       if (targetRank > currentRank) {
         return QualityUpgradeCandidate(
           track: track,
-          currentQuality: currentQuality,
-          currentQualityId: currentQualityId,
+          currentQuality: quality.label,
+          currentQualityId: quality.id,
           targetQuality: targetQuality,
           targetQualityId: targetQualityId,
           targetBandwidth: targetBandwidth,
@@ -164,22 +168,18 @@ class QualityUpgradeService {
       if (isCancelled?.call() == true) break;
       onProgress?.call(i + 1, onlineTracks.length);
       final track = onlineTracks[i];
-      final localInfo = await AudioDownloadService.qualityInfo(track.id);
-      if (localInfo != null) {
-        final currentQualityId = localInfo['qualityId'] as int? ?? 30232;
-        if (qualityRank(currentQualityId) >= 500) {
-          // Already at Hi-Res; skip network check and rate-limit delay.
-          continue;
-        }
-      }
       try {
-        final candidate = await checkTrack(track);
+        final quality = await _readQuality(track.id);
+        if (isCancelled?.call() == true) break;
+        if (quality != null && qualityRank(quality.id) >= 500) continue;
+        final candidate = await _checkRemote(track, quality);
         if (candidate != null) {
           candidates.add(candidate);
         }
       } catch (e) {
         debugPrint('checkTrack error for ${track.id}: $e');
       }
+      if (i == onlineTracks.length - 1 || isCancelled?.call() == true) break;
       // Polite interval to avoid triggering rate-limits
       await Future<void>.delayed(const Duration(milliseconds: 120));
     }

@@ -361,6 +361,15 @@ class DatabaseService {
           if (name.endsWith('.part') || name.endsWith('.part.json')) {
             try {
               if ((await entity.lastModified()).isBefore(stale)) {
+                // A pending quality record uses the part file to distinguish
+                // an uncommitted replacement from one that already landed.
+                if (name.endsWith('.m4a.part')) {
+                  final stem = entity.path
+                      .substring(0, entity.path.length - '.m4a.part'.length);
+                  if (await File('$stem.quality.json.pending').exists()) {
+                    continue;
+                  }
+                }
                 await StoreFiles.deleteQuietly(entity);
               }
             } catch (_) {}
@@ -503,11 +512,17 @@ class DatabaseService {
     return '$body${body == '{' ? '' : ','}"tracks":$tracksJson}';
   }
 
-  static Future<void> _persistDownloaded() => StoreFiles.save(
-      _downloadedFile, EncodedJson(_tracksJson(_downloadedTracks)));
+  static Future<void> _persistDownloaded() {
+    final tracks = List<Track>.of(_downloadedTracks);
+    return StoreFiles.saveSnapshot(
+        _downloadedFile, () => EncodedJson(_tracksJson(tracks)));
+  }
 
-  static Future<void> _persistRecentlyPlayed() =>
-      StoreFiles.save(_historyFile, EncodedJson(_tracksJson(_recentlyPlayed)));
+  static Future<void> _persistRecentlyPlayed() {
+    final tracks = List<Track>.of(_recentlyPlayed);
+    return StoreFiles.saveSnapshot(
+        _historyFile, () => EncodedJson(_tracksJson(tracks)));
+  }
 
   static String _json(Track t) => _trackJson[t] ??= jsonEncode(t.toMap());
 
@@ -517,6 +532,10 @@ class DatabaseService {
   /// lost whatever becomes of the download.
   static Future<void> _persistPlaylists() async {
     final downloads = {for (final t in _downloadedTracks) t.id: t};
+    final playlists = [
+      for (final playlist in _playlists)
+        (metadata: playlist.toMap(), tracks: List<Track>.of(playlist.tracks)),
+    ];
     String entry(Track t) {
       final download = downloads[t.id];
       final same = download != null &&
@@ -524,15 +543,17 @@ class DatabaseService {
       return same ? jsonEncode(t.id) : _json(t);
     }
 
-    final list = [
-      for (final p in _playlists)
-        _withTracks(jsonEncode(p.toMap()),
-            '[${[for (final t in p.tracks) entry(t)].join(',')}]'),
-    ];
     // Shown at once, not once the file is written: a heart tapped waits
     // for no disk (and, with writes queued, for no other file either).
     _libraryChanged();
-    await StoreFiles.save(_playlistsFile, EncodedJson('[${list.join(',')}]'));
+    await StoreFiles.saveSnapshot(_playlistsFile, () {
+      final list = [
+        for (final playlist in playlists)
+          _withTracks(jsonEncode(playlist.metadata),
+              '[${[for (final t in playlist.tracks) entry(t)].join(',')}]'),
+      ];
+      return EncodedJson('[${list.join(',')}]');
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -669,16 +690,17 @@ class DatabaseService {
   /// one opens track details instead of silently re-downloading.
   static Future<void> removeDownloadedTrack(Track track) async {
     await _ensureLoaded();
-    await AudioDownloadService.delete(track);
-    _downloadedTracks.removeWhere((t) => t.id == track.id);
-    _downloadRemovedController.add({track.id});
-    // Playlists holding the song by id now write it in full — before the
-    // list that id pointed into stops holding it.
-    if (_playlists.any((p) => p.tracks.any((t) => t.id == track.id))) {
-      await _persistPlaylists();
-    }
-    await _persistDownloaded();
-    _libraryChanged();
+    await AudioDownloadService.delete(track, afterDelete: () async {
+      _downloadedTracks.removeWhere((t) => t.id == track.id);
+      _downloadRemovedController.add({track.id});
+      // Playlists holding the song by id now write it in full — before the
+      // list that id pointed into stops holding it.
+      if (_playlists.any((p) => p.tracks.any((t) => t.id == track.id))) {
+        await _persistPlaylists();
+      }
+      await _persistDownloaded();
+      _libraryChanged();
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -804,6 +826,24 @@ class DatabaseService {
         if (oldIndex < 0 || oldIndex >= tracks.length) return false;
         final track = tracks.removeAt(oldIndex);
         tracks.insert(newIndex.clamp(0, tracks.length), track);
+        return true;
+      });
+
+  /// Moves the selected track beside its drop target in the current playlist.
+  /// Changes made while the row was being dragged can shift either index.
+  static Future<void> movePlaylistTrack(
+    String playlistId, {
+    required String trackId,
+    required String targetId,
+    required bool after,
+  }) =>
+      _editTracks(playlistId, (tracks) {
+        final from = tracks.indexWhere((track) => track.id == trackId);
+        final target = tracks.indexWhere((track) => track.id == targetId);
+        if (from < 0 || target < 0 || from == target) return false;
+        final to = target + (after ? 1 : 0) - (target > from ? 1 : 0);
+        if (from == to) return false;
+        tracks.insert(to, tracks.removeAt(from));
         return true;
       });
 

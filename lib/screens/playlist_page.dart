@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../app/app_services.dart';
@@ -44,9 +46,6 @@ class _PlaylistPageState extends State<PlaylistPage> {
   bool _editing = false;
   final Set<String> _selected = {};
 
-  /// Optimistic order while a reorder is being persisted.
-  List<Track>? _pendingOrder;
-
   /// Rows swiped away whose removal is still being persisted. A dismissed
   /// row must leave the tree immediately.
   final Set<String> _removing = {};
@@ -71,7 +70,7 @@ class _PlaylistPageState extends State<PlaylistPage> {
           return const Scaffold(backgroundColor: AppColors.background);
         }
         final tracks = [
-          for (final t in _pendingOrder ?? playlist.tracks)
+          for (final t in playlist.tracks)
             if (!_removing.contains(t.id)) t,
         ];
         final playable = _library.playableOf(tracks);
@@ -235,12 +234,16 @@ class _PlaylistPageState extends State<PlaylistPage> {
 
   Widget _list(Playlist playlist, List<Track> tracks, List<Track> playable) {
     if (_editing) {
+      final order = [for (final track in tracks) track.id];
       return SliverPadding(
         padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
         sliver: SliverReorderableList(
+          // An external edit may change what the drop index refers to even
+          // when the list length stays the same. Cancel that drag.
+          key: ValueKey(jsonEncode(order)),
           itemCount: tracks.length,
           onReorderItem: (oldIndex, newIndex) =>
-              _reorder(playlist, tracks, oldIndex, newIndex),
+              _reorder(playlist.id, order, oldIndex, newIndex),
           itemBuilder: (context, index) {
             final track = tracks[index];
             final selected = _selected.contains(track.id);
@@ -251,6 +254,8 @@ class _PlaylistPageState extends State<PlaylistPage> {
               borderRadius: BorderRadius.circular(AppRadius.md),
               child: SongTile(
                 track: track,
+                showActions: false,
+                checked: selected,
                 onTap: () => setState(() {
                   selected
                       ? _selected.remove(track.id)
@@ -365,18 +370,20 @@ class _PlaylistPageState extends State<PlaylistPage> {
   }
 
   Future<void> _reorder(
-    Playlist playlist,
-    List<Track> tracks,
+    String playlistId,
+    List<String> order,
     int oldIndex,
     int newIndex,
   ) async {
     Haptics.selection();
-    // onReorderItem already reports newIndex adjusted for the removal.
-    final order = List<Track>.of(tracks);
-    order.insert(newIndex, order.removeAt(oldIndex));
-    setState(() => _pendingOrder = order);
-    await DatabaseService.reorderPlaylist(playlist.id, oldIndex, newIndex);
-    if (mounted) setState(() => _pendingOrder = null);
+    // The target is the row originally at newIndex. Moving forward puts the
+    // selected row after it, moving backward puts the selected row before it.
+    await DatabaseService.movePlaylistTrack(
+      playlistId,
+      trackId: order[oldIndex],
+      targetId: order[newIndex],
+      after: oldIndex < newIndex,
+    );
   }
 
   Future<void> _removeOne(Playlist playlist, Track track) async {
@@ -501,13 +508,15 @@ class _SongPickerState extends State<_SongPicker> {
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.fromLTRB(16, 0, 8, 16),
-            itemExtent: SongTile.extent,
+            itemExtent: SongTile.extentOf(context),
             itemCount: widget.tracks.length,
             itemBuilder: (context, index) {
               final track = widget.tracks[index];
               final checked = _selected.contains(track.id);
               return SongTile(
                 track: track,
+                showActions: false,
+                checked: checked,
                 onTap: () => setState(() {
                   checked
                       ? _selected.remove(track.id)

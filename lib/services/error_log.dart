@@ -61,13 +61,27 @@ class ErrorLog {
   }
 
   static Future<void> clear() {
-    hasEntries.value = false;
     return _writes = _writes.then((_) async {
       try {
         final file = File(await _pathOf());
         if (await file.exists()) await file.delete();
+        hasEntries.value = false;
       } catch (_) {}
     });
+  }
+
+  /// Copies the current log, then removes only the copied entries. Errors
+  /// recorded during [copy] wait in the write queue and are appended after it.
+  static Future<void> copyAndClear(Future<void> Function(String) copy) {
+    final operation = _writes.then((_) async {
+      final file = File(await _pathOf());
+      if (!await file.exists()) return;
+      await copy(await file.readAsString());
+      await file.delete();
+      hasEntries.value = false;
+    });
+    _writes = operation.catchError((Object _) {});
+    return operation;
   }
 
   static Future<String> _pathOf() async =>

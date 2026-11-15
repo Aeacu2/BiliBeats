@@ -231,6 +231,7 @@ class FakeAudioPlayer implements ja.AudioPlayer {
 
   @override
   Future<void> seek(Duration? position, {int? index}) async {
+    final previous = positionValue;
     if (position != null) positionValue = position;
     if (_processing == ja.ProcessingState.completed) {
       _processing = ja.ProcessingState.ready;
@@ -240,6 +241,11 @@ class FakeAudioPlayer implements ja.AudioPlayer {
       _index = index;
       _emitSequence();
     }
+    _discontinuities.add(ja.PositionDiscontinuity(
+      ja.PositionDiscontinuityReason.seek,
+      ja.PlaybackEvent(updatePosition: previous),
+      ja.PlaybackEvent(updatePosition: positionValue),
+    ));
   }
 
   @override

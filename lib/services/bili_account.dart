@@ -87,6 +87,7 @@ class BiliAccountStore {
   static final ValueNotifier<int> changes = ValueNotifier(0);
   static bool expired = false;
   static Future<void>? _loading;
+  static Future<void> _accountChanges = Future.value();
 
   static void notifyChanged() => changes.value++;
 
@@ -141,28 +142,38 @@ class BiliAccountStore {
     return current.value?.cookies;
   }
 
-  static Future<void> save(BiliAccount account) async {
-    await ensureLoaded();
-    await StoreFiles.write(_file, account.toMap());
-    expired = false;
-    current.value = account;
-    notifyChanged();
+  // Apply the identity check, disk write and notification in request order.
+  // In particular, a response from the old account can arrive while a new
+  // sign-in is still saving its credentials.
+  static Future<void> _changeAccount(Future<void> Function() change) {
+    final next = _accountChanges.then((_) async {
+      await ensureLoaded();
+      await change();
+    });
+    _accountChanges = next.catchError((Object _) {});
+    return next;
   }
 
-  static Future<void> logOut() async {
-    await ensureLoaded();
-    await StoreFiles.write(_file, const <String, dynamic>{});
-    expired = false;
-    current.value = null;
-    notifyChanged();
-  }
+  static Future<void> save(BiliAccount account) => _changeAccount(() async {
+        await StoreFiles.write(_file, account.toMap());
+        expired = false;
+        current.value = account;
+        notifyChanged();
+      });
+
+  static Future<void> logOut() => _changeAccount(() async {
+        await StoreFiles.write(_file, const <String, dynamic>{});
+        expired = false;
+        current.value = null;
+        notifyChanged();
+      });
 
   /// An old request must never expire a newer login.
-  static Future<void> expire(BiliAccount account) async {
-    if (!identical(current.value, account)) return;
-    expired = true;
-    current.value = null;
-    notifyChanged();
-    await StoreFiles.write(_file, const {'expired': true});
-  }
+  static Future<void> expire(BiliAccount account) => _changeAccount(() async {
+        if (!identical(current.value, account)) return;
+        expired = true;
+        current.value = null;
+        notifyChanged();
+        await StoreFiles.write(_file, const {'expired': true});
+      });
 }

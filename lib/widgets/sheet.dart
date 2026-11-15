@@ -240,16 +240,48 @@ Future<String?> promptForText(
   required String confirm,
   String initial = '',
 }) async {
-  final controller = TextEditingController(text: initial);
   final value = await showDialog<String>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
+    builder: (_) =>
+        _TextPrompt(title: title, confirm: confirm, initial: initial),
+  );
+  final trimmed = value?.trim() ?? '';
+  return trimmed.isEmpty ? null : trimmed;
+}
+
+class _TextPrompt extends StatefulWidget {
+  final String title;
+  final String confirm;
+  final String initial;
+
+  const _TextPrompt({
+    required this.title,
+    required this.confirm,
+    required this.initial,
+  });
+
+  @override
+  State<_TextPrompt> createState() => _TextPromptState();
+}
+
+class _TextPromptState extends State<_TextPrompt> {
+  late final _controller = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
       content: TextField(
-        controller: controller,
+        controller: _controller,
         autofocus: true,
         style: AppTypography.body,
-        onSubmitted: (value) => Navigator.pop(ctx, value),
+        onSubmitted: (value) => Navigator.pop(context, value),
         // The same rounded, filled field as everywhere else.
         decoration: InputDecoration(
           isDense: true,
@@ -265,19 +297,17 @@ Future<String?> promptForText(
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(ctx),
+          onPressed: () => Navigator.pop(context),
           child: const Text('取消'),
         ),
         TextButton(
-          onPressed: () => Navigator.pop(ctx, controller.text),
-          child: Text(confirm, style: const TextStyle(color: AppColors.accent)),
+          onPressed: () => Navigator.pop(context, _controller.text),
+          child: Text(widget.confirm,
+              style: const TextStyle(color: AppColors.accent)),
         ),
       ],
-    ),
-  );
-  controller.dispose();
-  final trimmed = value?.trim() ?? '';
-  return trimmed.isEmpty ? null : trimmed;
+    );
+  }
 }
 
 /// Asks before something destructive. True when confirmed.

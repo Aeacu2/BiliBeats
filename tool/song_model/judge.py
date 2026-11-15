@@ -27,6 +27,10 @@ def judge(o, x, sure=SURE, up=''):
 
 def load(rules_file, reads_file):
     rows = json.load(open(find('eval.json'))); rules = json.load(open(find(rules_file))); reads = json.load(open(find(reads_file)))
+    bvids = [row['bvid'] for row in rows]
+    for filename, predictions in ((rules_file, rules), (reads_file, reads)):
+        if [row.get('bvid') for row in predictions] != bvids:
+            raise SystemExit(f'{filename} does not match the BVID order in eval.json')
     fixes = json.load(open(find('label_fixes.json')))
     for r in rows:
         f = fixes.get(r['bvid'])

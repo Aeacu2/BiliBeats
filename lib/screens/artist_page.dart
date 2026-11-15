@@ -116,7 +116,7 @@ class ArtistPage extends StatelessWidget {
                     SliverPadding(
                       padding: const EdgeInsets.fromLTRB(16, 0, 8, 24),
                       sliver: SliverFixedExtentList.builder(
-                        itemExtent: SongTile.extent,
+                        itemExtent: SongTile.extentOf(context),
                         itemCount: tracks.length,
                         itemBuilder: (context, index) {
                           final track = tracks[index];

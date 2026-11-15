@@ -401,8 +401,7 @@ void main() {
 
       expect(find.byTooltip('回到当前'), findsNothing);
 
-      await tester.drag(
-          find.byType(SingleChildScrollView), const Offset(0, -200));
+      await tester.drag(find.byType(LyricsView), const Offset(0, -200));
       await tester.pump();
       expect(find.byTooltip('回到当前'), findsOneWidget,
           reason: 'following must yield while the user is reading ahead');
@@ -421,8 +420,7 @@ void main() {
     testWidgets('following resumes by itself after a pause', (tester) async {
       await tester.pumpWidget(host(lyrics: synced()));
       await tester.pumpAndSettle();
-      await tester.drag(
-          find.byType(SingleChildScrollView), const Offset(0, -200));
+      await tester.drag(find.byType(LyricsView), const Offset(0, -200));
       await tester.pumpAndSettle();
       expect(find.byTooltip('回到当前'), findsOneWidget);
 

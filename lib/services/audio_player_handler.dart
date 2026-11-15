@@ -300,6 +300,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
     _applyLoudness(track);
     if (track == null) {
       durationNotifier.value = Duration.zero;
+      mediaItem.add(null);
       return;
     }
     _backfillLoudness(track);
@@ -410,7 +411,7 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
       _trimEnded = true;
       if (_sleepMode == SleepTimerMode.endOfTrack) {
         _fireSleepTimer();
-      } else if (_loopMode == LoopMode.one) {
+      } else if (_repeatCurrent) {
         _listeningTo = null;
         unawaited(_player.seek(trim!.start));
       } else {
@@ -434,7 +435,10 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   void _onDiscontinuity(ja.PositionDiscontinuity discontinuity) {
-    if (discontinuity.reason != ja.PositionDiscontinuityReason.autoAdvance) {
+    if (discontinuity.reason == ja.PositionDiscontinuityReason.seek) {
+      // A small jump looks like playback in the position stream. Reset its
+      // baseline using the player's explicit seek event.
+      _lastPosition = discontinuity.event.updatePosition;
       return;
     }
     // A song repeated (单曲循环) is heard again: count it again.
@@ -1213,8 +1217,10 @@ class BiliBeatsAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> setShuffleMode(AudioServiceShuffleMode shuffleMode) =>
       setShuffle(shuffleMode != AudioServiceShuffleMode.none);
 
+  bool get _repeatCurrent => _autoAdvanceHolds > 0 || _loopMode == LoopMode.one;
+
   Future<void> _applyNativeLoopMode() => _player.setLoopMode(
-        _autoAdvanceHolds > 0 || _loopMode == LoopMode.one
+        _repeatCurrent
             ? ja.LoopMode.one
             : _loopMode == LoopMode.all
                 ? ja.LoopMode.all

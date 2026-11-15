@@ -22,7 +22,7 @@ class OnlineSearchController extends ChangeNotifier {
   bool _failed = false;
   bool _loadingMore = false;
   bool _loadMoreFailed = false;
-  bool _reachedEnd = false;
+  BiliSearchContinuation? _nextPage;
   int _page = 1;
   int _token = 0;
   int _historyToken = 0;
@@ -45,7 +45,7 @@ class OnlineSearchController extends ChangeNotifier {
   bool get failed => _failed;
   bool get loadingMore => _loadingMore;
   bool get loadMoreFailed => _loadMoreFailed;
-  bool get reachedEnd => _reachedEnd;
+  bool get reachedEnd => _nextPage == null;
 
   Future<void> _loadHistory() async {
     final token = _historyToken;
@@ -68,7 +68,7 @@ class OnlineSearchController extends ChangeNotifier {
     _failed = false;
     _loadingMore = false;
     _loadMoreFailed = false;
-    _reachedEnd = false;
+    _nextPage = null;
     notifyListeners();
 
     final historyToken = _historyToken;
@@ -82,13 +82,13 @@ class OnlineSearchController extends ChangeNotifier {
     if (token != _token) return;
 
     try {
-      final results = await BilibiliSdk.search(query);
+      final result = await BilibiliSdk.startSearch(query);
       if (token != _token) return;
       _results = [
-        for (final t in results)
+        for (final t in result.tracks)
           if (_seen.add(t.id)) t,
       ];
-      _reachedEnd = results.isEmpty;
+      _nextPage = result.next;
     } catch (e) {
       debugPrint('Search error: $e');
       if (token != _token) return;
@@ -102,7 +102,8 @@ class OnlineSearchController extends ChangeNotifier {
 
   /// [force] is the 重试 button: a deliberate tap is not made to wait.
   Future<void> loadMore({bool force = false}) async {
-    if (_query.isEmpty || _loading || _loadingMore || _reachedEnd) return;
+    final next = _nextPage;
+    if (next == null || _loadingMore) return;
     // A failed page gets a quiet retry window instead of re-firing on every
     // scroll pixel.
     if (!force &&
@@ -117,7 +118,7 @@ class OnlineSearchController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final results = await BilibiliSdk.search(_query, page: page);
+      final results = await next(page);
       if (token != _token) return;
       _results = [
         ..._results,
@@ -127,7 +128,7 @@ class OnlineSearchController extends ChangeNotifier {
       _page = page;
       _loadMoreFailed = false;
       // Only an empty page proves the end; a page of duplicates does not.
-      if (results.isEmpty) _reachedEnd = true;
+      if (results.isEmpty) _nextPage = null;
     } catch (e) {
       debugPrint('Load more search error: $e');
       if (token != _token) return;
@@ -148,7 +149,7 @@ class OnlineSearchController extends ChangeNotifier {
     _failed = false;
     _loadingMore = false;
     _loadMoreFailed = false;
-    _reachedEnd = false;
+    _nextPage = null;
     notifyListeners();
   }
 

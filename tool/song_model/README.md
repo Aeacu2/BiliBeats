@@ -28,8 +28,18 @@ legacy/    the character model trained from scratch that this replaced
 
 ## Train, measure, ship
 
+Use a fresh Python 3.12 environment with the pinned direct dependencies
+below. Record `python --version`, `python -m pip freeze`, the device, and the
+pretrained model revision with each comparison. The training seed controls
+the shuffle and augmentation, including the ordering of sampled song and
+singer pools. Results can vary between devices and PyTorch builds. Set
+`DEV=cpu` to compare runs on the same CPU environment.
+
 ```bash
-pip install torch transformers            # zhconv too, for fairer scoring
+mkdir -p work
+python3.12 -m venv work/venv
+. work/venv/bin/activate
+python -m pip install torch==2.8.0 transformers==4.56.2 numpy==2.2.6 zhconv==1.4.3
 mkdir -p work/plm/mmbert-small            # from huggingface.co/jhu-clsp/mmBERT-small:
                                           #   config.json tokenizer.json pytorch_model.bin
 
@@ -51,6 +61,10 @@ python3 export_plm.py ship.pt ../../assets/song_model --int8
 READER_DIR=assets/song_model flutter test test/tools/song_reader_parity.dart
 ```
 
+The training log reports the count of examples whose labelled song or
+performers do not fit the generated candidates. They contribute to song
+classification while span loss uses examples with complete targets.
+
 Publishing the exported model, so that any clone can build with it, is in
 the header of `tool/fetch_song_model.sh`.
 
@@ -64,6 +78,9 @@ port reproduces it — move that file out of `assets/` afterwards.
 Measure on `hold` (never trained on, never used to pick a model). `dev` chose
 earlier models and flatters them; the 周深 fixture is what the rules were
 tuned on, so the rules score 100% there and anything else looks worse.
+Generate predictions from the evaluation checkpoint. `read.py` rejects a
+checkpoint trained with `--use-hold` when any input row is from `hold`, and
+`judge.py` checks that both prediction files match the evaluation BVID order.
 A wrong name in the library is worse than no name: read `wrong` before
 `right`.
 

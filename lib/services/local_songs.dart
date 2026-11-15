@@ -66,15 +66,18 @@ class LocalSongs {
   static void followOpened(BiliBeatsAudioHandler handler,
       {Future<void>? after}) {
     if (!supported) return;
-    _channel.setMethodCallHandler((call) async {
-      if (call.method == 'opened') await _playOpened(handler);
-    });
-    unawaited(Future(() async {
+    Future<void> pending = Future(() async {
       try {
         await after;
       } catch (_) {}
       await _playOpened(handler);
-    }));
+    });
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'opened') {
+        await (pending = pending.then((_) => _playOpened(handler)));
+      }
+    });
+    unawaited(pending);
   }
 
   static Future<void> _playOpened(BiliBeatsAudioHandler handler) async {
@@ -97,7 +100,17 @@ class LocalSongs {
 
   /// Turns the native side's copies into songs in the library.
   @visibleForTesting
-  static Future<LocalImport> adopt(List<Object?> copies) async {
+  static Future<LocalImport> adopt(List<Object?> copies) {
+    final adoption = _adopting.then((_) => _adopt(copies));
+    _adopting = adoption.then<void>((_) {}, onError: (Object _) {});
+    return adoption;
+  }
+
+  // Picker and open intents can both carry the same song. The second
+  // adoption must check the library after the first one has finished.
+  static Future<void> _adopting = Future.value();
+
+  static Future<LocalImport> _adopt(List<Object?> copies) async {
     final added = <Track>[];
     final existing = <Track>[];
     var failed = 0;
@@ -106,7 +119,7 @@ class LocalSongs {
         failed++;
         continue;
       }
-      final copy = Map<String, Object?>.from(raw);
+      final copy = raw.cast<String, Object?>();
       final path = copy['path'];
       final hash = copy['hash'];
       if (path is! String ||
@@ -121,12 +134,14 @@ class LocalSongs {
       try {
         final known = await DatabaseService.downloadedTrack(id);
         if (known != null) {
-          await file.delete();
+          // The OS or a file manager may have removed the previous copy.
+          AudioDownloadService.invalidateMemo(id);
+          if (await AudioDownloadService.isDownloadedById(id)) {
+            await file.delete();
+          } else {
+            await AudioDownloadService.adopt(known, file);
+          }
           existing.add(known);
-          continue;
-        }
-        if (added.any((t) => t.id == id)) {
-          await file.delete();
           continue;
         }
         final track = trackFrom(id, copy,

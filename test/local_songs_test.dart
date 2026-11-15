@@ -105,4 +105,27 @@ void main() {
     await expectLater(AudioDownloadService.ensureDownloaded(track),
         throwsA(isA<VideoUnavailable>()));
   });
+
+  test('opening an existing song again restores its missing file', () async {
+    const hash = '1234567890abcdef1234567890abcdef12345678';
+    final bytes = List.filled(4096, 7);
+    final first = await LocalSongs.adopt([
+      {
+        'path': await copy('first', bytes),
+        'hash': hash,
+        'name': 'Original.mp3'
+      },
+    ]);
+    final track = first.added.single;
+    final file = File(await AudioDownloadService.audioPathForId(track.id));
+    expect(await AudioDownloadService.isDownloaded(track), isTrue);
+    await file.delete();
+
+    final again = await LocalSongs.adopt([
+      {'path': await copy('again', bytes), 'hash': hash, 'name': 'Renamed.mp3'},
+    ]);
+    expect(again.existing.single.title, 'Original');
+    expect(await file.readAsBytes(), bytes);
+    expect(await AudioDownloadService.isDownloaded(track), isTrue);
+  });
 }

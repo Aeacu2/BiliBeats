@@ -57,7 +57,16 @@ class LyricsView extends StatefulWidget {
 
 class _LyricsViewState extends State<LyricsView> {
   final ScrollController _scroll = ScrollController();
-  List<GlobalKey> _keys = const [];
+
+  List<double> _lineOffsets = const [];
+  ({
+    List<LyricLine> lines,
+    double width,
+    TextScaler scaler,
+    TextStyle inheritedStyle,
+    Locale? locale,
+    TextDirection direction
+  })? _layout;
 
   int _active = -1;
   bool _browsing = false;
@@ -74,10 +83,8 @@ class _LyricsViewState extends State<LyricsView> {
   @override
   void initState() {
     super.initState();
-    _keys = List.generate(_lines.length, (_) => GlobalKey());
     widget.position.addListener(_onPosition);
     _active = _indexAt(widget.position.value);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _follow(jump: true));
   }
 
   @override
@@ -88,12 +95,11 @@ class _LyricsViewState extends State<LyricsView> {
       widget.position.addListener(_onPosition);
     }
     if (!identical(old.lyrics.lines, widget.lyrics.lines)) {
-      _keys = List.generate(_lines.length, (_) => GlobalKey());
       _browsing = false;
       _resumeTimer?.cancel();
       _active = _indexAt(widget.position.value);
-      WidgetsBinding.instance.addPostFrameCallback((_) => _follow(jump: true));
-    } else if (old.lyrics.offset != widget.lyrics.offset) {
+    } else if (old.lyrics.offset != widget.lyrics.offset ||
+        old.position != widget.position) {
       _active = _indexAt(widget.position.value);
       WidgetsBinding.instance.addPostFrameCallback((_) => _follow());
     }
@@ -137,19 +143,25 @@ class _LyricsViewState extends State<LyricsView> {
   }
 
   void _follow({bool jump = false}) {
-    if (!mounted || !_synced || _keys.isEmpty) return;
-    final target = _keys[_active.clamp(0, _keys.length - 1)].currentContext;
-    if (target == null) return;
-    final media = MediaQuery.maybeOf(context);
+    if (!mounted || !_synced || !_scroll.hasClients || _lines.isEmpty) return;
+    final scroll = _scroll.position;
+    if (!scroll.hasContentDimensions ||
+        _lineOffsets.length != _lines.length + 1) {
+      return;
+    }
+    final index = _active.clamp(0, _lines.length - 1);
+    final extent = _lineOffsets[index + 1] - _lineOffsets[index];
+    final offset = (_lineOffsets[index] + extent * _restAt)
+        .clamp(scroll.minScrollExtent, scroll.maxScrollExtent);
     final still = jump ||
-        media?.disableAnimations == true ||
-        media?.accessibleNavigation == true;
-    Scrollable.ensureVisible(
-      target,
-      alignment: _restAt,
-      duration: still ? Duration.zero : AppMotion.slow,
-      curve: AppMotion.standard,
-    );
+        MediaQuery.disableAnimationsOf(context) ||
+        MediaQuery.accessibleNavigationOf(context);
+    if (still) {
+      _scroll.jumpTo(offset);
+    } else {
+      unawaited(_scroll.animateTo(offset,
+          duration: AppMotion.slow, curve: AppMotion.standard));
+    }
   }
 
   void _resume() {
@@ -191,11 +203,71 @@ class _LyricsViewState extends State<LyricsView> {
     _resume();
   }
 
+  void _measureLines(BuildContext context, double width) {
+    final layout = (
+      lines: _lines,
+      width: width,
+      scaler: MediaQuery.textScalerOf(context),
+      inheritedStyle: DefaultTextStyle.of(context).style,
+      locale: Localizations.maybeLocaleOf(context),
+      direction: Directionality.of(context),
+    );
+    if (_layout == layout) return;
+    _layout = layout;
+    // The list builds only nearby lyric rows. Cached text heights let a seek
+    // jump directly to a distant row, even if its translation wraps.
+    final lineStyle = layout.inheritedStyle.merge(_Line.lineStyle(_synced));
+    final translationStyle =
+        layout.inheritedStyle.merge(_Line.translationStyle);
+    final painter = TextPainter(
+      textDirection: layout.direction,
+      textScaler: layout.scaler,
+      locale: layout.locale,
+    );
+    double measure(String text, TextStyle style) {
+      painter
+        ..text = TextSpan(text: text, style: style)
+        ..layout(maxWidth: width);
+      return painter.height;
+    }
+
+    final offsets = <double>[0];
+    for (final line in _lines) {
+      var extent =
+          _Line.paddingFor(_synced) * 2 + measure(line.text, lineStyle);
+      final translation = line.translation;
+      if (translation != null && translation.isNotEmpty) {
+        extent += 4 + measure(translation, translationStyle);
+      }
+      offsets.add(offsets.last + extent);
+    }
+    painter.dispose();
+    _lineOffsets = offsets;
+  }
+
+  void _followAfterLayout() {
+    if (!_browsing) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_browsing) _follow(jump: true);
+      });
+    }
+  }
+
+  Size? _viewport;
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final height = constraints.maxHeight;
+        if (_synced) {
+          final previous = _layout;
+          _measureLines(context, constraints.maxWidth);
+          if (previous != _layout || _viewport != constraints.biggest) {
+            _viewport = constraints.biggest;
+            _followAfterLayout();
+          }
+        }
         final tappable =
             _synced && (widget.calibrating || widget.onSeek != null);
 
@@ -217,29 +289,27 @@ class _LyricsViewState extends State<LyricsView> {
               ).createShader(rect),
               child: NotificationListener<ScrollNotification>(
                 onNotification: _onScroll,
-                child: SingleChildScrollView(
+                child: ListView.builder(
                   controller: _scroll,
+                  itemCount: _lines.length,
+                  itemExtentBuilder: _synced
+                      ? (index, _) => index >= _lines.length
+                          ? null
+                          : _lineOffsets[index + 1] - _lineOffsets[index]
+                      : null,
                   padding: EdgeInsets.only(
                     top: height * (_synced ? _restAt : 0.12),
                     bottom: height * (_synced ? 0.6 : 0.2),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (var i = 0; i < _lines.length; i++)
-                        _Line(
-                          key: _keys[i],
-                          line: _lines[i],
-                          synced: _synced,
-                          // Before the first line everything is "ahead".
-                          distance: _synced ? (i - _active).abs() : 1,
-                          active: i == _active,
-                          position: widget.position,
-                          playing: widget.playing,
-                          offset: widget.lyrics.offset,
-                          onTap: tappable ? () => _tap(i) : null,
-                        ),
-                    ],
+                  itemBuilder: (context, index) => _Line(
+                    line: _lines[index],
+                    synced: _synced,
+                    distance: _synced ? (index - _active).abs() : 1,
+                    active: index == _active,
+                    position: widget.position,
+                    playing: widget.playing,
+                    offset: widget.lyrics.offset,
+                    onTap: tappable ? () => _tap(index) : null,
                   ),
                 ),
               ),
@@ -273,7 +343,6 @@ class _Line extends StatelessWidget {
   final double offset;
 
   const _Line({
-    super.key,
     required this.line,
     required this.synced,
     required this.active,
@@ -283,6 +352,21 @@ class _Line extends StatelessWidget {
     required this.playing,
     required this.offset,
   });
+
+  static double paddingFor(bool synced) => synced ? 11 : 6;
+
+  static TextStyle lineStyle(bool synced) => TextStyle(
+        fontSize: synced ? 24 : 18,
+        height: 1.3,
+        fontWeight: synced ? FontWeight.w700 : FontWeight.w500,
+        letterSpacing: synced ? -0.3 : 0,
+      );
+
+  static const translationStyle = TextStyle(
+    fontSize: 15,
+    height: 1.35,
+    fontWeight: FontWeight.w500,
+  );
 
   /// The line as text; while it is sung and its words are timed, it fills
   /// left to right as the song moves, KTV-style ([KaraokeText]).
@@ -316,20 +400,14 @@ class _Line extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: Padding(
-        padding: EdgeInsets.symmetric(vertical: synced ? 11 : 6),
+        padding: EdgeInsets.symmetric(vertical: paddingFor(synced)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AnimatedDefaultTextStyle(
               duration: AppMotion.base,
               curve: AppMotion.standard,
-              style: TextStyle(
-                color: color,
-                fontSize: synced ? 24 : 18,
-                height: 1.3,
-                fontWeight: synced ? FontWeight.w700 : FontWeight.w500,
-                letterSpacing: synced ? -0.3 : 0,
-              ),
+              style: lineStyle(synced).copyWith(color: color),
               child: _text(),
             ),
             if (translation != null && translation.isNotEmpty) ...[
@@ -337,11 +415,8 @@ class _Line extends StatelessWidget {
               AnimatedDefaultTextStyle(
                 duration: AppMotion.base,
                 curve: AppMotion.standard,
-                style: TextStyle(
+                style: translationStyle.copyWith(
                   color: active ? AppColors.textSecondary : AppColors.white30,
-                  fontSize: 15,
-                  height: 1.35,
-                  fontWeight: FontWeight.w500,
                 ),
                 child: Text(translation),
               ),
@@ -401,9 +476,9 @@ class KaraokeTextState extends State<KaraokeText>
   final ValueNotifier<double> now = ValueNotifier(0);
 
   /// The last reported position and when (ticker time) it arrived.
-  int _reportedMs = -1;
   Duration _reportedAt = Duration.zero;
   Duration _elapsed = Duration.zero;
+  double _runBaseMs = 0;
 
   /// Never run ahead of the last report by more than this: if the reports
   /// stop (a stall the playing flag has not caught up with), so does the fill.
@@ -412,23 +487,65 @@ class KaraokeTextState extends State<KaraokeText>
   @override
   void initState() {
     super.initState();
-    _reportedMs = widget.position.value.inMilliseconds;
-    now.value = _reportedMs / 1000 - widget.offset;
+    widget.position.addListener(_onReport);
+    widget.playing?.addListener(_syncTicker);
+    _onReport();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(covariant KaraokeText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.position != widget.position) {
+      oldWidget.position.removeListener(_onReport);
+      widget.position.addListener(_onReport);
+    }
+    if (oldWidget.playing != widget.playing) {
+      oldWidget.playing?.removeListener(_syncTicker);
+      widget.playing?.addListener(_syncTicker);
+    }
+    if (oldWidget.position != widget.position ||
+        oldWidget.offset != widget.offset) {
+      _onReport();
+      now.value = _runBaseMs / 1000 - widget.offset;
+    }
+    if (oldWidget.playing != widget.playing) _syncTicker();
+  }
+
+  void _onReport() {
+    _reportedAt = _elapsed;
+    _runBaseMs = widget.position.value.inMilliseconds.toDouble();
+    if (!_ticker.isActive) now.value = _runBaseMs / 1000 - widget.offset;
+  }
+
+  void _syncTicker() {
+    final moving = widget.playing?.value ?? true;
+    if (!moving) {
+      _ticker.stop();
+      final position =
+          widget.position.value.inMilliseconds / 1000 - widget.offset;
+      // Keep a small interpolation lead on pause to avoid a backwards flash.
+      if (now.value - position >= 0.35 || now.value <= position) {
+        now.value = position;
+      }
+      return;
+    }
+    if (_ticker.isActive) return;
+    final displayed = (now.value + widget.offset) * 1000;
+    final reported = widget.position.value.inMilliseconds.toDouble();
+    final lead = displayed - reported;
+    _runBaseMs = lead > 0 && lead < 350 ? displayed : reported;
+    _elapsed = _reportedAt = Duration.zero;
+    now.value = _runBaseMs / 1000 - widget.offset;
     _ticker.start();
   }
 
   void _tick(Duration elapsed) {
     _elapsed = elapsed;
     final reported = widget.position.value.inMilliseconds;
-    if (reported != _reportedMs) {
-      _reportedMs = reported;
-      _reportedAt = elapsed;
-    }
-    final moving = widget.playing?.value ?? true;
-    final lead = moving
-        ? (elapsed - _reportedAt).inMilliseconds.clamp(0, _maxLeadMs)
-        : 0;
-    final next = (_reportedMs + lead) / 1000 - widget.offset;
+    final lead = (elapsed - _reportedAt).inMilliseconds.clamp(0, _maxLeadMs);
+    final next = (_runBaseMs + lead).clamp(0, reported + _maxLeadMs) / 1000 -
+        widget.offset;
     // A report slightly behind what was already drawn is jitter, not the
     // song going back: hold rather than let the fill flicker backwards.
     // A real jump back (a seek) is larger and is followed.
@@ -442,33 +559,45 @@ class KaraokeTextState extends State<KaraokeText>
 
   @override
   void dispose() {
+    widget.position.removeListener(_onReport);
+    widget.playing?.removeListener(_syncTicker);
     _ticker.dispose();
+    _sung.dispose();
+    _ahead.dispose();
     now.dispose();
     super.dispose();
   }
+
+  final _sung = TextPainter();
+  final _ahead = TextPainter();
 
   @override
   Widget build(BuildContext context) {
     final style = DefaultTextStyle.of(context).style;
     final scaler = MediaQuery.textScalerOf(context);
     final direction = Directionality.of(context);
+    final locale = Localizations.maybeLocaleOf(context);
     return Semantics(
       label: widget.text,
       excludeSemantics: true,
       child: LayoutBuilder(builder: (context, constraints) {
-        TextPainter painter(Color? color) => TextPainter(
-              text: TextSpan(
-                  text: widget.text, style: style.copyWith(color: color)),
-              textDirection: direction,
-              textScaler: scaler,
-            )..layout(maxWidth: constraints.maxWidth);
-        final sung = painter(style.color);
-        final ahead = painter(AppColors.white45);
+        void layout(TextPainter painter, Color? color) {
+          painter
+            ..text =
+                TextSpan(text: widget.text, style: style.copyWith(color: color))
+            ..textDirection = direction
+            ..textScaler = scaler
+            ..locale = locale
+            ..layout(maxWidth: constraints.maxWidth);
+        }
+
+        layout(_sung, style.color);
+        layout(_ahead, AppColors.white45);
         return CustomPaint(
-          size: sung.size,
+          size: _sung.size,
           painter: _KaraokePainter(
-            sung: sung,
-            ahead: ahead,
+            sung: _sung,
+            ahead: _ahead,
             words: widget.words,
             now: now,
           ),
@@ -483,6 +612,7 @@ class _KaraokePainter extends CustomPainter {
   final TextPainter ahead;
   final List<LyricWord> words;
   final ValueListenable<double> now;
+  late final _wordBoxes = _measureWords();
 
   _KaraokePainter({
     required this.sung,
@@ -491,22 +621,34 @@ class _KaraokePainter extends CustomPainter {
     required this.now,
   }) : super(repaint: now);
 
+  List<({List<ui.TextBox> boxes, double width})> _measureWords() {
+    final measured = <({List<ui.TextBox> boxes, double width})>[];
+    var from = 0;
+    for (final word in words) {
+      final to = from + word.text.length;
+      final boxes = sung.getBoxesForSelection(
+        TextSelection(baseOffset: from, extentOffset: to),
+        boxHeightStyle: ui.BoxHeightStyle.max,
+      );
+      measured.add((
+        boxes: boxes,
+        width: boxes.fold<double>(0, (sum, b) => sum + b.right - b.left),
+      ));
+      from = to;
+    }
+    return measured;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     ahead.paint(canvas, Offset.zero);
     final fractions = KaraokeText.progress(words, now.value);
     final clip = Path();
-    var from = 0;
     for (var i = 0; i < words.length; i++) {
-      final to = from + words[i].text.length;
       final f = fractions[i];
       if (f > 0) {
         // A word can wrap onto the next line: fill its pieces in order.
-        final boxes = sung.getBoxesForSelection(
-          TextSelection(baseOffset: from, extentOffset: to),
-          boxHeightStyle: ui.BoxHeightStyle.max,
-        );
-        final width = boxes.fold<double>(0, (sum, b) => sum + b.right - b.left);
+        final (:boxes, :width) = _wordBoxes[i];
         var left = width * f;
         for (final b in boxes) {
           if (left <= 0) break;
@@ -517,7 +659,6 @@ class _KaraokePainter extends CustomPainter {
           left -= w;
         }
       }
-      from = to;
     }
     canvas.save();
     canvas.clipPath(clip);
@@ -526,8 +667,7 @@ class _KaraokePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_KaraokePainter old) =>
-      old.sung != sung || old.ahead != ahead || old.words != words;
+  bool shouldRepaint(_KaraokePainter old) => true;
 }
 
 class _ResumeButton extends StatelessWidget {

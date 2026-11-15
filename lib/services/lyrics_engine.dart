@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -53,20 +52,14 @@ class LyricsEngine {
   static Future<String?> _fetch(String urlStr,
       {Map<String, String>? headers}) async {
     try {
-      final req = await _client.getUrl(Uri.parse(urlStr)).timeout(_timeout);
+      final req =
+          await openHttpRequest(_client.getUrl(Uri.parse(urlStr)), _timeout);
       headers?.forEach((k, v) => req.headers.set(k, v));
-      final res = await req.close().timeout(_timeout, onTimeout: () {
-        // Abandoned, it would keep its place in the connection pool.
-        req.abort();
-        throw TimeoutException('lyrics request timed out');
-      });
-      if (res.statusCode == 200) {
-        return await res.transform(utf8.decoder).join().timeout(_timeout);
+      final res = await closeHttpRequest(req, _timeout);
+      if (res.statusCode == HttpStatus.ok) {
+        return await readHttpBody(res, _timeout);
       }
-      // Drain non-200 bodies so the connection returns to the pool; with
-      // maxConnectionsPerHost = 4, a few un-drained 4xx/5xx responses would
-      // exhaust it and later requests would queue behind idleTimeout.
-      await res.drain<void>();
+      await discardHttpBody(res);
     } catch (e) {
       debugPrint('Lyrics HTTP error: $e');
     }
@@ -157,11 +150,17 @@ class LyricsEngine {
   /// gives the parser no structure to go by ("周深 大鱼 无损", or a name run
   /// into the words around it) is credited to them rather than the UP主.
   static set knownArtists(Iterable<String> names) {
-    _knownArtists = {
+    final next = {
       for (final name in names)
         if (_isLearnableName(name.trim())) _normalize(name): name.trim(),
     };
+    if (mapEquals(_knownArtists, next)) return;
+    _knownArtists = next;
+    _identityMemo.clear();
+    _artistRevision++;
   }
+
+  static int _artistRevision = 0;
 
   static bool _isLearnableName(String name) {
     final n = _normalize(name);
@@ -595,13 +594,27 @@ class LyricsEngine {
     const headers = {'Referer': 'https://music.163.com'};
     final body = await _httpGet(url, headers: headers) ??
         await _httpGet(url, headers: headers);
+    return _netEaseResults(body, 'songs');
+  }
+
+  static List<Map>? _netEaseResults(String? body, String field) {
     if (body == null) return null;
     try {
-      final songs = jsonDecode(body)['result']?['songs'] as List? ?? const [];
-      return songs.whereType<Map>().toList();
+      final json = jsonDecode(body);
+      if (json is Map) {
+        final code = json['code'];
+        final result = json['result'];
+        if ((code == null || code == 200) && result is Map) {
+          final values = result[field];
+          if (values is List) return values.whereType<Map>().toList();
+          if (values == null) return const <Map>[];
+        }
+      }
     } catch (_) {
-      return null;
+      // A malformed response is a failed lookup, just like an API error.
     }
+    _httpFailures++;
+    return null;
   }
 
   /// "不舍 (Cover 徐佳莹)", "大鱼-原唱:周深": a recording named after the one
@@ -673,11 +686,7 @@ class LyricsEngine {
   }
 
   static List<String> _artistsOf(Map song) {
-    final list = <String>[
-      for (final a in song['artists'] as List? ?? const [])
-        if (a is Map && a['name'] is String && (a['name'] as String).isNotEmpty)
-          a['name'] as String,
-    ];
+    final list = _songPerformers(song);
     final rawName = song['name'];
     if (rawName is String) {
       final coverMatch = _coverOf.firstMatch(rawName);
@@ -690,6 +699,17 @@ class LyricsEngine {
     }
     return list;
   }
+
+  static List<String> _songPerformers(Map song) => [
+        for (final a in song['artists'] as List? ?? const [])
+          if (a is Map &&
+              a['name'] is String &&
+              (a['name'] as String).isNotEmpty)
+            a['name'] as String,
+      ];
+
+  static String _cataloguePerformers(Map song) =>
+      _songPerformers(song).join(', ');
 
   /// Identifies the song behind a Bilibili video title against NetEase.
   ///
@@ -988,15 +1008,12 @@ class LyricsEngine {
     var bestApart = false;
     var bestCredited = const <String>[];
     var bestGap = double.infinity;
-    final seen = <Object?>{};
-
     void consider(Map<String, String> candidate, List<Map> songs) {
       final candNorm = _normalize(candidate['song']!);
       final bracketIdx = int.tryParse(candidate['bookIdx'] ?? '') ?? -1;
 
       for (var rank = 0; rank < songs.length; rank++) {
         final song = songs[rank];
-        if (!seen.add(song['id'])) continue;
         final name = ((song['name'] ?? '') as String).trim();
         final cleanName = name.replaceAll(parenSubtitle, '').trim();
         final nameNorm = _normalize(cleanName);
@@ -1143,7 +1160,9 @@ class LyricsEngine {
     if (best == null) {
       // Offline or blocked is not "unknown song": stay retryable.
       // Every search answered and none had it: that is an answer.
-      if (!incomplete) _remember(memoKey, null);
+      if (!incomplete && _artistLookupFailures == artistFailuresBefore) {
+        _remember(memoKey, null);
+      }
       return null;
     }
 
@@ -1570,18 +1589,13 @@ class LyricsEngine {
       '?s=${Uri.encodeComponent(name)}&type=100&limit=5',
       headers: {'Referer': 'https://music.163.com'},
     );
-    if (body == null) return null;
-    try {
-      final artists = jsonDecode(body)['result']?['artists'] as List? ?? [];
-      if (_artistsMemo.length > 300) _artistsMemo.clear();
-      return _artistsMemo[key] = [
-        for (final a in artists.whereType<Map>())
-          if (a['name'] is String && _normalize(a['name'] as String) == key) a,
-      ];
-    } catch (e) {
-      debugPrint('NetEase artist search error: $e');
-      return null;
-    }
+    final artists = _netEaseResults(body, 'artists');
+    if (artists == null) return null;
+    if (_artistsMemo.length > 300) _artistsMemo.clear();
+    return _artistsMemo[key] = [
+      for (final a in artists)
+        if (a['name'] is String && _normalize(a['name'] as String) == key) a,
+    ];
   }
 
   /// Whether [name] is a singer NetEase has music videos for. Nearly any
@@ -1623,7 +1637,7 @@ class LyricsEngine {
 
   static String _memoKey(String rawTitle, String uploader, int seconds,
           String context, VideoHints hints) =>
-      '$rawTitle\x00$uploader\x00$seconds\x00$context\x00${hints.key}';
+      '$_artistRevision\x00$rawTitle\x00$uploader\x00$seconds\x00$context\x00${hints.key}';
 
   /// Whether [identify] has already settled this question (found the song,
   /// or established that the databases do not know it). False after a lookup
@@ -1912,28 +1926,16 @@ class LyricsEngine {
         final body =
             await _httpGet(url, headers: {'User-Agent': 'bilibeats/1.0.0'});
         if (body != null) {
-          final items = jsonDecode(body) as List? ?? [];
-          for (final item in items) {
-            final trackName = (item['trackName'] ?? '') as String;
+          final items = jsonDecode(body);
+          if (items is! List) {
+            throw const FormatException('Invalid LRCLIB search');
+          }
+          for (final item in items.whereType<Map>()) {
+            final trackName = '${item['trackName'] ?? ''}';
             if (!isTitleMatching(trackName, title)) continue;
-            // Artist check when provided: prefer matching artist
+            final artistName = '${item['artistName'] ?? ''}';
             if (artist != null && artist.isNotEmpty) {
-              final artistName = (item['artistName'] ?? '') as String;
-              final normArtist = _normalize(artist);
-              final normItemArtist = _normalize(artistName);
-              // If artist mismatch strongly, skip this item unless title is exact
-              if (normArtist.isNotEmpty &&
-                  normItemArtist.isNotEmpty &&
-                  normArtist != normItemArtist) {
-                // Allow if title matches exactly, otherwise require artist contains
-                if (_normalize(trackName) != _normalize(title)) {
-                  // Check if item artist contains query artist or vice versa
-                  if (!normItemArtist.contains(normArtist) &&
-                      !normArtist.contains(normItemArtist)) {
-                    continue;
-                  }
-                }
-              }
+              if (!_samePerformers(artist, artistName)) continue;
             }
             final rawLrc =
                 (item['syncedLyrics'] ?? item['plainLyrics'] ?? '') as String;
@@ -1942,7 +1944,7 @@ class LyricsEngine {
               return Lyrics(
                 source: 'lrclib',
                 title: trackName.isNotEmpty ? trackName : title,
-                artist: (item['artistName'] as String?) ?? artist,
+                artist: artistName.isEmpty ? artist : artistName,
                 lines: lines,
               );
             } else if (rawLrc.isNotEmpty) {
@@ -1950,7 +1952,7 @@ class LyricsEngine {
               return Lyrics(
                 source: 'lrclib',
                 title: trackName.isNotEmpty ? trackName : title,
-                artist: (item['artistName'] as String?) ?? artist,
+                artist: artistName.isEmpty ? artist : artistName,
                 lines: plainLines(rawLrc),
               );
             }
@@ -1958,14 +1960,18 @@ class LyricsEngine {
         }
       } catch (e) {
         debugPrint('LRCLIB fetch error: $e');
+        _httpFailures++;
       }
     }
     return null;
   }
 
   // NetEase Cloud Music Provider (Best Chinese coverage)
-  static Future<Lyrics?> fetchFromNetEase(String title,
-      {String? artist}) async {
+  static Future<Lyrics?> fetchFromNetEase(String title, {String? artist}) =>
+      _fetchNetEaseLyrics(title, artist: artist);
+
+  static Future<Lyrics?> _fetchNetEaseLyrics(String title,
+      {String? artist, Lyrics? translate}) async {
     final queries = [
       if (artist != null && artist.isNotEmpty) '$artist $title',
       if (artist != null && artist.isNotEmpty) '$title $artist',
@@ -1973,14 +1979,9 @@ class LyricsEngine {
     ];
 
     for (final query in queries) {
-      final searchUrl =
-          'https://music.163.com/api/search/get?s=${Uri.encodeComponent(query)}&type=1&limit=5';
       try {
-        final searchBody = await _httpGet(searchUrl,
-            headers: {'Referer': 'https://music.163.com'});
-        if (searchBody != null) {
-          final json = jsonDecode(searchBody);
-          final songs = json['result']?['songs'] as List? ?? [];
+        final songs = await _netEaseSearch(query, limit: 5);
+        if (songs != null) {
           // Prefer the song whose artist appears in the query: "周深 不舍"
           // must yield 周深's 不舍, not the most popular 不舍 (a cover by
           // someone else) that happens to match the song name first.
@@ -1991,73 +1992,43 @@ class LyricsEngine {
           for (final song in songs) {
             final songName = (song['name'] ?? '') as String;
             if (!matchesSongQuery(songName, query)) continue;
+            final artists = _cataloguePerformers(song);
+            if (translate != null &&
+                (artist == null ||
+                    !_samePerformers(artist, artists) ||
+                    !_sameRecordingTitle(title, songName))) {
+              continue;
+            }
             final songId = song['id'];
             if (songId is! int || songId <= 0) continue;
-            final lyricUrl =
-                'https://music.163.com/api/song/lyric?id=$songId&lv=-1&tv=-1';
-
-            final lyricBody = await _httpGet(lyricUrl,
-                headers: {'Referer': 'https://music.163.com'});
-            if (lyricBody != null) {
-              final lyricJson = jsonDecode(lyricBody);
-              final rawLrc = (lyricJson['lrc']?['lyric'] ?? '') as String;
-              final rawTrans = (lyricJson['tlyric']?['lyric'] ?? '') as String;
-
-              // Unsynced text is still lyrics (shown as a plain page).
-              final lines = parseAny(rawLrc);
-              final transLines = parseLrc(rawTrans);
-
-              if (transLines.isNotEmpty) {
-                // Both lists are time-sorted, so a single advancing pointer
-                // keeps the merge O(n) instead of the previous O(n²)
-                // firstWhere-scan per line.
-                var ti = 0;
-                for (var i = 0; i < lines.length; i++) {
-                  final line = lines[i];
-                  // Skip translations that are too early for this line.
-                  while (ti < transLines.length &&
-                      transLines[ti].time < line.time - 0.5) {
-                    ti++;
-                  }
-                  // ti is now the first translation inside the window, if any.
-                  if (ti < transLines.length &&
-                      (transLines[ti].time - line.time).abs() < 0.5) {
-                    lines[i] = LyricLine(
-                      time: line.time,
-                      text: line.text,
-                      translation: transLines[ti].text,
-                    );
-                  }
-                }
+            final lines = await _netEaseLines(songId);
+            if (translate != null) {
+              final translated = _attachRecordingTranslation(translate, lines);
+              if (translated != null) return translated;
+              continue;
+            }
+            if (lines.isNotEmpty) {
+              // Search-farm uploads are titled exactly like the query
+              // ("遥遥 周深" for "周深 遥遥"): their title echoes BOTH the
+              // song term and the artist term. They outrank real songs in
+              // the result list, so rank them last — the real track (遥遥 by
+              // 张云雷, say) must win the match.
+              final songNameNorm = _normalize(songName);
+              final isEcho = artist != null &&
+                  artist.isNotEmpty &&
+                  songNameNorm.isNotEmpty &&
+                  songNameNorm.contains(_normalize(artist)) &&
+                  songNameNorm.contains(_normalize(title));
+              if (isEcho) {
+                echoMatch ??= (song, lines);
+                continue;
               }
-
-              if (lines.isNotEmpty) {
-                // Search-farm uploads are titled exactly like the query
-                // ("遥遥 周深" for "周深 遥遥"): their title echoes BOTH the
-                // song term and the artist term. They outrank real songs in
-                // the result list, so rank them last — the real track (遥遥 by
-                // 张云雷, say) must win the match.
-                final songNameNorm = _normalize(songName);
-                final isEcho = artist != null &&
-                    artist.isNotEmpty &&
-                    songNameNorm.isNotEmpty &&
-                    songNameNorm.contains(_normalize(artist)) &&
-                    songNameNorm.contains(_normalize(title));
-                if (isEcho) {
-                  echoMatch ??= (song, lines);
-                  continue;
-                }
-                bestMatch ??= (song, lines);
-                final artists = (song['artists'] as List? ?? [])
-                    .where((a) => a is Map && a['name'] is String)
-                    .map((a) => a['name'] as String)
-                    .join(', ');
-                if (queryNorm.isNotEmpty &&
-                    artists.isNotEmpty &&
-                    queryNorm.contains(_normalize(artists))) {
-                  queryArtistMatch = (song, lines);
-                  break;
-                }
+              bestMatch ??= (song, lines);
+              if (queryNorm.isNotEmpty &&
+                  artists.isNotEmpty &&
+                  queryNorm.contains(_normalize(artists))) {
+                queryArtistMatch = (song, lines);
+                break;
               }
             }
           }
@@ -2065,10 +2036,7 @@ class LyricsEngine {
           if (chosen != null) {
             final (chosenSong, lines) = chosen;
             final songName = (chosenSong['name'] ?? '') as String;
-            final artists = (chosenSong['artists'] as List? ?? [])
-                .where((a) => a is Map && a['name'] is String)
-                .map((a) => a['name'] as String)
-                .join(', ');
+            final artists = _cataloguePerformers(chosenSong);
             return Lyrics(
               source: 'netease',
               title: songName,
@@ -2079,6 +2047,7 @@ class LyricsEngine {
         }
       } catch (e) {
         debugPrint('NetEase lyrics fetch error: $e');
+        _httpFailures++;
       }
     }
 
@@ -2103,24 +2072,20 @@ class LyricsEngine {
       headers: {'Referer': 'https://music.163.com'},
     );
     if (body == null) return const [];
-    final json = jsonDecode(body);
-    final lines = parseAny((json['lrc']?['lyric'] ?? '') as String);
-    final trans = parseLrc((json['tlyric']?['lyric'] ?? '') as String);
-    var ti = 0;
-    for (var i = 0; i < lines.length && trans.isNotEmpty; i++) {
-      final line = lines[i];
-      while (ti < trans.length && trans[ti].time < line.time - 0.5) {
-        ti++;
+    try {
+      final json = jsonDecode(body);
+      if (json is Map && (json['code'] == null || json['code'] == 200)) {
+        final raw = (json['lrc']?['lyric'] ?? '') as String;
+        final timed = parseLrc(raw);
+        if (timed.isEmpty) return plainLines(raw);
+        final trans = parseLrc((json['tlyric']?['lyric'] ?? '') as String);
+        return LyricLibrary.withTranslation(timed, trans);
       }
-      if (ti < trans.length && (trans[ti].time - line.time).abs() < 0.5) {
-        lines[i] = LyricLine(
-          time: line.time,
-          text: line.text,
-          translation: trans[ti].text,
-        );
-      }
+    } catch (e) {
+      debugPrint('NetEase lyric response unreadable: $e');
     }
-    return lines;
+    _httpFailures++;
+    return const [];
   }
 
   /// How long the recording of [title] (by [artist]) is, in seconds; of
@@ -2269,6 +2234,29 @@ class LyricsEngine {
     ];
   }
 
+  static Set<String> _performerKeys(Iterable<String> names) => {
+        for (final name in names)
+          for (final part in name.split(RegExp(r'[,，、/&／]')))
+            if (_looseKey(part).isNotEmpty) _looseKey(part),
+      };
+
+  static bool _samePerformers(String wanted, String offered) {
+    final expected = _performerKeys([wanted]);
+    return expected.isNotEmpty &&
+        setEquals(expected, _performerKeys([offered]));
+  }
+
+  static bool _sameRecordingTitle(String expected, String offered) {
+    String normalize(String value) {
+      final bare = value.replaceAll(parenSubtitle, '');
+      final key = _normalize(bare);
+      return key.isNotEmpty ? key : _looseKey(bare);
+    }
+
+    final wanted = normalize(expected);
+    return wanted.isNotEmpty && wanted == normalize(offered);
+  }
+
   /// [title] by [artist] as Kugou or QQ Music has it: the recording whose
   /// name and singer both fit, the one nearest [durationSeconds] where
   /// several do. Null when the service lists no such recording.
@@ -2278,24 +2266,16 @@ class LyricsEngine {
     required String artist,
     int durationSeconds = 0,
   }) async {
-    final singers = [
-      for (final name in artist.split(RegExp(r'[,，、/&]')))
-        if (_normalize(name).isNotEmpty) _normalize(name),
-    ];
+    final singers = _performerKeys([artist]);
     if (singers.isEmpty) return null;
     final found = await LyricLibrary.search(source, '$artist $title');
     if (found == null) return null;
     // The name itself, a version note aside ("大鱼 (Live)" is 大鱼): a
     // search also returns whatever merely contains it (大鱼海棠).
-    String bare(String name) => _normalize(name.replaceAll(parenSubtitle, ''));
-    final wanted = bare(title);
-    bool sameSong(String name) => wanted.isNotEmpty && bare(name) == wanted;
     final fits = [
       for (final song in found)
-        if (sameSong(song.title) &&
-            song.artists.map(_normalize).any((a) =>
-                a.isNotEmpty &&
-                singers.any((s) => a == s || a.contains(s) || s.contains(a))))
+        if (_sameRecordingTitle(title, song.title) &&
+            _performerKeys(song.artists).containsAll(singers))
           song,
     ];
     if (durationSeconds > 0) {
@@ -2335,6 +2315,42 @@ class LyricsEngine {
     return foreign * 2 > lines.length;
   }
 
+  /// Uses the other catalogue's translation only when its text and timing
+  /// line up. Keep the recording's word timings and source identity.
+  static Lyrics? _attachRecordingTranslation(
+      Lyrics recording, List<LyricLine> candidate) {
+    final replacements = List<LyricLine>.of(recording.lines);
+    var matched = 0;
+    var index = 0;
+    for (var i = 0; i < replacements.length; i++) {
+      final line = replacements[i];
+      final key = _looseKey(line.text);
+      if (key.isEmpty) continue;
+      while (
+          index < candidate.length && candidate[index].time < line.time - 1.5) {
+        index++;
+      }
+      for (var j = index;
+          j < candidate.length && candidate[j].time <= line.time + 1.5;
+          j++) {
+        final other = candidate[j];
+        if (other.translation == null || _looseKey(other.text) != key) continue;
+        replacements[i] = LyricLine(
+          time: line.time,
+          text: line.text,
+          words: line.words,
+          translation: other.translation,
+        );
+        matched++;
+        index = j + 1;
+        break;
+      }
+    }
+    return matched >= 2 && matched * 2 >= recording.lines.length
+        ? recording.copyWith(lines: replacements)
+        : null;
+  }
+
   /// The song's lyrics from the first source that has them.
   ///
   /// [song] / [artist] override the title parse — used when the song has
@@ -2363,20 +2379,18 @@ class LyricsEngine {
       }
     }
 
-    // A song in another language is better read with its translation than
-    // followed word by word: where Kugou has none, NetEase is asked too.
+    // NetEase can supply translations for the word-timed recording.
     final timed = await library('kugou');
     if (timed != null && timed.isNotEmpty) {
       if (!_wantsTranslation(timed)) return timed;
-      Lyrics? netEase;
       try {
-        netEase = await fetchFromNetEase(title, artist: artist);
+        return await _fetchNetEaseLyrics(timed.title ?? title,
+                artist: timed.artist ?? artist, translate: timed) ??
+            timed;
       } catch (e) {
         debugPrint('NetEase lyrics error: $e');
+        return timed;
       }
-      final translated =
-          netEase != null && netEase.lines.any((l) => l.translation != null);
-      return translated ? netEase : timed;
     }
 
     final sources = <Future<Lyrics?> Function()>[

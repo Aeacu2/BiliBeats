@@ -1,11 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:bilibeats/models/lyrics.dart';
 import 'package:bilibeats/models/subtitles.dart';
 import 'package:bilibeats/models/track.dart';
 import 'package:bilibeats/services/audio_download_service.dart';
 import 'package:bilibeats/services/audio_player_handler.dart';
 import 'package:bilibeats/services/bili_account.dart';
 import 'package:bilibeats/services/lyrics_engine.dart';
+import 'package:bilibeats/services/lyrics_store.dart';
 import 'package:bilibeats/state/lyrics_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -208,5 +211,112 @@ void main() {
     controller.dispose();
     await BiliAccountStore.logOut();
     await handler.dispose();
+  });
+
+  test('rematch keeps pinned lyrics when playback moved and lookup is empty',
+      () async {
+    catalogue(null);
+    final track = await downloaded('ls-rematch-old');
+    final other = await downloaded('ls-rematch-current');
+    final handler = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(), manageAudioSession: false);
+    final controller =
+        LyricsController(handler, subtitles: (_, {cid = 0}) async => null);
+    addTearDown(() async {
+      controller.dispose();
+      await handler.dispose();
+    });
+    const pinned =
+        Lyrics(source: 'user', lines: [LyricLine(time: 0, text: '保留')]);
+    await controller.choose(track, pinned);
+    await handler.playTrack(other, queue: [track, other]);
+    await controller.rematch(track);
+
+    final saved = await LyricsStore.get(track.id);
+    expect(saved?.pinned, isTrue);
+    expect(saved?.lines.single.text, '保留');
+  });
+
+  test('an off-current rematch saves a successful replacement', () async {
+    catalogue(daYu);
+    final track = await downloaded('ls-rematch-success');
+    final handler = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(), manageAudioSession: false);
+    final controller =
+        LyricsController(handler, subtitles: (_, {cid = 0}) async => null);
+    addTearDown(() async {
+      controller.dispose();
+      await handler.dispose();
+    });
+    const pinned =
+        Lyrics(source: 'user', lines: [LyricLine(time: 0, text: '旧')]);
+    await controller.choose(track, pinned);
+    await controller.rematch(track);
+
+    final saved = await LyricsStore.get(track.id);
+    expect(saved?.pinned, isFalse);
+    expect(saved?.lines.first.text, daYu.first);
+  });
+
+  test('a lyric saved during a rematch wins over the automatic match',
+      () async {
+    catalogue(daYu);
+    final track = await downloaded('ls-rematch-newer-choice');
+    final handler = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(), manageAudioSession: false);
+    final started = Completer<void>();
+    final subtitles = Completer<Subtitles?>();
+    final controller = LyricsController(handler, subtitles: (_, {cid = 0}) {
+      started.complete();
+      return subtitles.future;
+    });
+    addTearDown(() async {
+      controller.dispose();
+      if (!subtitles.isCompleted) subtitles.complete();
+      await handler.dispose();
+    });
+    const newer =
+        Lyrics(source: 'user', lines: [LyricLine(time: 0, text: '我的歌词')]);
+
+    final rematch = controller.rematch(track);
+    await started.future.timeout(const Duration(seconds: 5));
+    await controller.choose(track, newer);
+    subtitles.complete();
+    await rematch;
+
+    final saved = await LyricsStore.get(track.id);
+    expect(saved?.pinned, isTrue);
+    expect(saved?.lines.single.text, '我的歌词');
+  });
+
+  test('logging out while subtitles load leaves the lyrics loader', () async {
+    catalogue(null);
+    await BiliAccountStore.save(
+        const BiliAccount(cookies: 'SESSDATA=fixture', mid: 11, name: 'test'));
+    final track = await downloaded('ls-logout-loading');
+    final started = Completer<void>();
+    final oldAnswer = Completer<Subtitles?>();
+    final handler = BiliBeatsAudioHandler(
+        player: FakeAudioPlayer(), manageAudioSession: false);
+    final controller =
+        LyricsController(handler, subtitles: (_, {cid = 0}) async {
+      if (BiliAccountStore.current.value == null) return null;
+      if (!started.isCompleted) started.complete();
+      return oldAnswer.future;
+    });
+    addTearDown(() async {
+      controller.dispose();
+      if (!oldAnswer.isCompleted) oldAnswer.complete();
+      await BiliAccountStore.logOut();
+      await handler.dispose();
+    });
+    await handler.playTrack(track, queue: [track]);
+    await started.future.timeout(const Duration(seconds: 5));
+    expect(controller.state.value.status, LyricsStatus.loading);
+    await BiliAccountStore.logOut();
+    await settled(controller, (state) => state.status == LyricsStatus.empty);
+    oldAnswer.complete(heard([...daYu, ...daYu.take(4)]));
+    await pumpEventQueue();
+    expect(controller.state.value.status, LyricsStatus.empty);
   });
 }

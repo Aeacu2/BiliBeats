@@ -117,6 +117,52 @@ void main() {
     expect(back.tracks.single.coverUrl, isEmpty);
   });
 
+  test('invalid download identities are skipped in tracks and playlists', () {
+    final good = song('Safe');
+    final body = base64Url.encode(gzip.encode(utf8.encode(jsonEncode({
+      't': [
+        {...good.toMap(), 'id': '../escape'},
+        {...good.toMap(), 'bvid': '${good.bvid}&other=1'},
+        {...good.toMap(), 'id': 'BVdifferent_p1'},
+        good.toMap(),
+        {...good.toMap(), 'title': 'duplicate'},
+      ],
+      'p': [
+        {
+          'n': 'test',
+          'i': [0, 1, 2, 4]
+        }
+      ],
+    }))));
+    final seal = sha256.convert(ascii.encode(body)).toString().substring(0, 8);
+
+    final snapshot =
+        LibraryTransfer.decode('${LibraryTransfer.prefix}$body.$seal')!;
+    expect(snapshot.tracks.single.id, good.id);
+    expect(
+        snapshot.playlists.single.tracks.single, same(snapshot.tracks.single));
+  });
+
+  test('a snapshot counts only tracks that can be downloaded on another device',
+      () async {
+    const local = Track(
+      id: 'local_only',
+      bvid: '',
+      cid: 0,
+      title: 'Local audio',
+      rawTitle: 'Local audio',
+      uploader: 'Artist',
+      coverUrl: '',
+      duration: 200,
+    );
+    final playlist = await DatabaseService.createPlaylist('Local files');
+    await DatabaseService.addTrackToPlaylist(playlist.id, local);
+    final snapshot = await LibraryTransfer.snapshot();
+    expect(snapshot.tracks, isNot(contains(local)));
+    expect(
+        snapshot.playlists.map((p) => p.name), isNot(contains(playlist.name)));
+  });
+
   test('text that is not a library is not one', () {
     expect(LibraryTransfer.decode(''), isNull);
     expect(LibraryTransfer.decode('https://b23.tv/abc'), isNull);

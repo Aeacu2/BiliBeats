@@ -61,6 +61,33 @@ void main() {
         legacy);
   });
 
+  test('moving tracks uses ids after another track is prepended', () async {
+    final a = song('move-a_p1');
+    final b = song('move-b_p1');
+    final c = song('move-c_p1');
+    final prepended = song('move-new_p1');
+    final list = await DatabaseService.createPlaylist('move');
+    await DatabaseService.addTracksToPlaylist(list.id, [a, b, c]);
+    await DatabaseService.addTrackToPlaylist(list.id, prepended);
+
+    await DatabaseService.movePlaylistTrack(
+      list.id,
+      trackId: a.id,
+      targetId: c.id,
+      after: true,
+    );
+    expect(list.tracks, [prepended, b, c, a]);
+
+    await DatabaseService.removeTrackFromPlaylist(list.id, c.id);
+    await DatabaseService.movePlaylistTrack(
+      list.id,
+      trackId: b.id,
+      targetId: c.id,
+      after: true,
+    );
+    expect(list.tracks, [prepended, b, a]);
+  });
+
   test('a deleted download is written in full into its playlists', () async {
     await DatabaseService.removeDownloadedTrack(kept);
     final written = await stored(docs, 'bilibeat_playlists2.json') as List;

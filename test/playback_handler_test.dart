@@ -264,6 +264,25 @@ void main() {
     await handler.dispose();
   });
 
+  test('short forward seeks do not accumulate listening time', () async {
+    final t = await downloaded(['pb-count-short-seeks']);
+    final fake = FakeAudioPlayer()..durationValue = const Duration(seconds: 12);
+    final handler = handlerFor(fake);
+    await handler.playTrack(t[0], queue: t);
+    fake.emitPosition(Duration.zero);
+    await pumpEventQueue();
+
+    for (final second in [2, 4, 6, 8]) {
+      final position = Duration(seconds: second);
+      await handler.seek(position);
+      fake.emitPosition(position);
+      await pumpEventQueue();
+    }
+
+    expect((await DatabaseService.getPlayStats())[t[0].id], isNull);
+    await handler.dispose();
+  });
+
   test('a trimmed song starts and ends where it was cut', () async {
     final t = await downloaded(['pb-trim-a', 'pb-trim-b']);
     await TrimStore.set(t[0].id,
@@ -368,6 +387,29 @@ void main() {
     expect(handler.loopMode, LoopMode.all);
 
     await handler.dispose();
+  });
+
+  test('lyric editing repeats a trimmed song at its cut', () async {
+    final t = await downloaded(['pb-trim-edit-a', 'pb-trim-edit-b']);
+    const start = Duration(seconds: 12);
+    const end = Duration(seconds: 150);
+    await TrimStore.set(t[0].id, const Trim(start: start, end: end));
+    final fake = FakeAudioPlayer();
+    final handler = handlerFor(fake);
+    addTearDown(handler.dispose);
+    addTearDown(() => TrimStore.set(t[0].id, null));
+    await handler.playTrack(t[0], queue: t);
+
+    final release = handler.holdAutoAdvance();
+    fake.emitPosition(end);
+    await waitFor(() => fake.positionValue == start);
+    expect(handler.currentTrack, t[0]);
+
+    release();
+    fake.emitPosition(start);
+    await pumpEventQueue();
+    fake.emitPosition(end);
+    await waitFor(() => handler.currentTrack == t[1]);
   });
 
   test('end of a non-looping queue parks paused at the start', () async {
@@ -518,6 +560,7 @@ void main() {
     await handler.removeTracks({t[0].id});
     await pumpEventQueue();
     expect(handler.currentTrack, isNull);
+    expect(handler.mediaItem.value, isNull);
     expect(queueIds(handler), isEmpty);
 
     await handler.dispose();

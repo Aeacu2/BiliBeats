@@ -24,7 +24,7 @@ jobs:
           cache: true
 
       - name: Fetch dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       # Not in the repository (too large); with it the tests that read real
       # videos with the model run, instead of being skipped.
@@ -39,18 +39,16 @@ jobs:
       # analysis_options.yaml promotes unused members and dead code to errors,
       # so `flutter analyze` failing here means a real regression, not style.
       - name: Analyze
-        run: flutter analyze
+        run: flutter analyze --no-pub
 
       # Tests tagged `live` ask NetEase for real; they are run on a
       # developer's machine, where a failure can be looked into, and kept
       # from failing a build because a third party was slow.
       - name: Test
-        run: flutter test --exclude-tags live
+        run: flutter test --no-pub --exclude-tags live
 
-  # analyze+test never compiled a single platform — whole-plugin breakage (a
-  # bad SPM/CocoaPods file, a missing resource, a native API gone in a plugin
-  # update) only surfaced at release time. Debug builds are cheap and compile
-  # the real native trees.
+  # Compile and package through the shipping build path on each supported
+  # platform. CI builds use development symbols and an Android debug key.
   build:
     name: Build (${{ matrix.platform }})
     strategy:
@@ -59,19 +57,10 @@ jobs:
         include:
           - platform: android
             os: ubuntu-latest
-            command: flutter build apk --debug
           - platform: macos
             os: macos-latest
-            command: flutter build macos --debug
-          # What is actually shipped: a release-mode Android build (R8,
-          # obfuscation paths) and iOS, neither of which the debug builds
-          # above compile.
-          - platform: android-release
-            os: ubuntu-latest
-            command: flutter build apk --release
           - platform: ios
             os: macos-latest
-            command: flutter build ios --debug --no-codesign
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -79,7 +68,7 @@ jobs:
       # AGP's lint crashes on the runner's JDK 17 (NoSuchMethodError in its
       # Javadoc parser); release builds run it. Same floor as the README's.
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        if: startsWith(matrix.platform, 'android')
+        if: matrix.platform == 'android'
         with:
           distribution: temurin
           java-version: 21
@@ -91,12 +80,13 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Fetch dependencies
-        run: flutter pub get
+      - name: Select the Android JDK
+        if: matrix.platform == 'android'
+        run: flutter config --jdk-dir="$JAVA_HOME"
 
-      # So that what is compiled is what is shipped, model and all.
-      - name: Fetch the song model
-        run: tool/fetch_song_model.sh
-
-      - name: Compile
-        run: ${{ matrix.command }}
+      - name: Build obfuscated release
+        env:
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          ALLOW_UNTAGGED: "1"
+          ALLOW_DEBUG_SIGNING: "1"
+        run: tool/build_release.sh "$BUILD_PLATFORM"

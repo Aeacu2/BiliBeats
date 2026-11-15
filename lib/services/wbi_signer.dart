@@ -8,6 +8,7 @@ class WbiSigner {
   static final HttpClient _client = biliHttpClient();
 
   static final RegExp _stripChars = RegExp(r"[!'()*]");
+  static final RegExp _key = RegExp(r'^[a-fA-F0-9]{32}$');
 
   static const List<int> mixinKeyEncTab = [
     46,
@@ -154,20 +155,19 @@ class WbiSigner {
     }
 
     try {
-      final req = await _client
-          .getUrl(Uri.parse('https://api.bilibili.com/x/web-interface/nav'))
-          .timeout(const Duration(seconds: 10));
+      const timeout = Duration(seconds: 10);
+      final req = await openHttpRequest(
+          _client.getUrl(
+              Uri.parse('https://api.bilibili.com/x/web-interface/nav')),
+          timeout);
       req.headers.set('User-Agent', kBiliUserAgent);
       req.headers.set('Referer', 'https://www.bilibili.com/');
-      final res = await req.close().timeout(const Duration(seconds: 10));
-      if (res.statusCode != 200) {
-        await res.drain<void>();
+      final res = await closeHttpRequest(req, timeout);
+      if (res.statusCode != HttpStatus.ok) {
+        await discardHttpBody(res);
         throw Exception('WBI HTTP ${res.statusCode}');
       }
-      final body = await res
-          .transform(utf8.decoder)
-          .join()
-          .timeout(const Duration(seconds: 10));
+      final body = await readHttpBody(res, timeout);
       final json = jsonDecode(body);
       final wbiImg = json['data']?['wbi_img'];
       if (wbiImg != null) {
@@ -177,7 +177,7 @@ class WbiSigner {
         final imgKey = imgUrl.split('/').last.split('.').first;
         final subKey = subUrl.split('/').last.split('.').first;
         // An answer without usable keys is no answer.
-        if (imgKey.isNotEmpty && subKey.isNotEmpty) {
+        if (_key.hasMatch(imgKey) && _key.hasMatch(subKey)) {
           _cachedImgKey = imgKey;
           _cachedSubKey = subKey;
           _cacheTime = DateTime.now();

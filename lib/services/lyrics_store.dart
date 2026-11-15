@@ -143,6 +143,37 @@ class LyricsStore {
     return stands();
   }
 
+  /// An explicit rematch may replace a pinned entry. Keep it when the search
+  /// returns nothing, a newer edit wins, or the replacement cannot be saved.
+  static Future<bool> replaceAfterRematch(
+    String trackId,
+    Lyrics lyrics, {
+    required int expectedRevision,
+    required bool Function() isCurrent,
+  }) async {
+    await _ensureLoaded();
+    if (lyrics.isEmpty ||
+        revisionOf(trackId) != expectedRevision ||
+        !isCurrent()) {
+      return false;
+    }
+    final revision = _revisions[trackId] = ++_nextRevision;
+    final previous = _entries.remove(trackId);
+    _entries[trackId] = lyrics.copyWith(pinned: false);
+    try {
+      await _persist();
+    } catch (_) {
+      if (revisionOf(trackId) == revision) {
+        _entries.remove(trackId);
+        if (previous != null) _entries[trackId] = previous;
+      }
+      rethrow;
+    }
+    if (revisionOf(trackId) != revision) return false;
+    _evict();
+    return true;
+  }
+
   static void _evict() {
     var automatic = _entries.values.where((l) => !l.pinned).length;
     if (automatic <= _maxAutomatic) return;

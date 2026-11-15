@@ -1,6 +1,6 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder;
 
 import 'package:flutter/foundation.dart';
 
@@ -65,23 +65,19 @@ class LyricLibrary {
       {String? body, required Map<String, String> headers}) async {
     try {
       final uri = Uri.parse(url);
-      final req =
-          await (body == null ? _client.getUrl(uri) : _client.postUrl(uri))
-              .timeout(_timeout);
+      final req = await openHttpRequest(
+          body == null ? _client.getUrl(uri) : _client.postUrl(uri), _timeout);
       req.headers.set('User-Agent', kBiliUserAgent);
       headers.forEach(req.headers.set);
       if (body != null) {
         req.headers.contentType = ContentType.json;
         req.add(utf8.encode(body));
       }
-      final res = await req.close().timeout(_timeout, onTimeout: () {
-        req.abort();
-        throw TimeoutException('library request timed out');
-      });
-      if (res.statusCode == 200) {
-        return await res.transform(utf8.decoder).join().timeout(_timeout);
+      final res = await closeHttpRequest(req, _timeout);
+      if (res.statusCode == HttpStatus.ok) {
+        return await readHttpBody(res, _timeout);
       }
-      await res.drain<void>();
+      await discardHttpBody(res);
     } catch (e) {
       debugPrint('Library HTTP error: $e');
     }
@@ -230,21 +226,25 @@ class LyricLibrary {
   static Future<List<LyricLine>?> _kugouLines(LibrarySong song) async {
     final found = await _request(
         'https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword='
-        '&duration=${song.seconds * 1000}&hash=${song.key}&album_audio_id=');
+        '&duration=${song.seconds * 1000}'
+        '&hash=${Uri.encodeQueryComponent(song.key)}&album_audio_id=');
     if (found == null) return null;
     try {
       final candidates = jsonDecode(found)['candidates'];
       if (candidates is! List || candidates.isEmpty) return const [];
       final pick = candidates.first as Map;
+      final id = Uri.encodeQueryComponent('${pick['id']}');
+      final key = Uri.encodeQueryComponent('${pick['accesskey']}');
       final file = await _request('https://lyrics.kugou.com/download?ver=1'
-          '&client=pc&id=${pick['id']}&accesskey=${pick['accesskey']}'
+          '&client=pc&id=$id&accesskey=$key'
           '&fmt=krc&charset=utf8');
       if (file == null) return null;
       final content = jsonDecode(file)['content'];
       if (content is! String || content.isEmpty) return const [];
-      return parseKrc(decodeKrc(base64.decode(content)));
+      return await compute(_parsePackedKrc, content);
     } catch (e) {
       debugPrint('Kugou lyrics unreadable: $e');
+      failures++;
       return null;
     }
   }
@@ -253,7 +253,8 @@ class LyricLibrary {
       LibrarySong song, List<LyricLine> Function(String text) parseLrc) async {
     final body = await _request(
       'https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg'
-      '?songmid=${song.key}&format=json&nobase64=1&g_tk=5381',
+      '?songmid=${Uri.encodeQueryComponent(song.key)}'
+      '&format=json&nobase64=1&g_tk=5381',
       headers: const {'Referer': 'https://y.qq.com/'},
     );
     if (body == null) return null;
@@ -264,6 +265,7 @@ class LyricLibrary {
       return withTranslation(lines, trans);
     } catch (e) {
       debugPrint('QQ lyrics unreadable: $e');
+      failures++;
       return null;
     }
   }
@@ -271,16 +273,22 @@ class LyricLibrary {
   /// Pairs each line with the translated line timed with it.
   static List<LyricLine> withTranslation(
       List<LyricLine> lines, List<LyricLine> trans) {
-    if (trans.isEmpty) return lines;
+    if (trans.isEmpty || lines.isEmpty || lines.last.time == 0) return lines;
     final out = List<LyricLine>.of(lines);
     var ti = 0;
     for (var i = 0; i < out.length; i++) {
       final line = out[i];
-      while (ti < trans.length && trans[ti].time < line.time - 0.5) {
+      while (ti < trans.length && trans[ti].time <= line.time - 0.5) {
+        ti++;
+      }
+      // Pick the closest translation within the window, and use it once.
+      while (ti + 1 < trans.length &&
+          (trans[ti + 1].time - line.time).abs() <
+              (trans[ti].time - line.time).abs()) {
         ti++;
       }
       if (ti < trans.length && (trans[ti].time - line.time).abs() < 0.5) {
-        final text = trans[ti].text.trim();
+        final text = trans[ti++].text.trim();
         if (text.isEmpty || text == '//') continue;
         out[i] = LyricLine(
           time: line.time,
@@ -298,16 +306,32 @@ class LyricLibrary {
     0x51, 0x36, 0x31, 0x2d, 0xce, 0xd2, 0x6e, 0x69,
   ];
 
+  static const int _maxKrcBytes = 4 << 20;
+
+  static List<LyricLine> _parsePackedKrc(String content) =>
+      parseKrc(decodeKrc(base64.decode(content)));
+
   /// A `.krc` file as text: four bytes of magic, then the rest XORed with a
   /// fixed key and deflated.
   @visibleForTesting
   static String decodeKrc(List<int> file) {
     if (file.length < 5) return '';
+    if (file.length > _maxKrcBytes ||
+        file[0] != 0x6b ||
+        file[1] != 0x72 ||
+        file[2] != 0x63 ||
+        file[3] != 0x31) {
+      throw const FormatException('Invalid KRC file');
+    }
     final plain = Uint8List(file.length - 4);
     for (var i = 0; i < plain.length; i++) {
       plain[i] = file[i + 4] ^ _krcKey[i % _krcKey.length];
     }
-    return utf8.decode(zlib.decode(plain), allowMalformed: true);
+    final bounded = _KrcSink(_maxKrcBytes);
+    final decoder = zlib.decoder.startChunkedConversion(bounded);
+    decoder.add(plain);
+    decoder.close();
+    return utf8.decode(bounded.bytes.takeBytes(), allowMalformed: true);
   }
 
   static final RegExp _krcLine = RegExp(r'^\[(\d+),(\d+)\](.*)$');
@@ -349,7 +373,7 @@ class LyricLibrary {
         words: words.isEmpty ? null : words,
       ));
     }
-    final out = <LyricLine>[];
+    final out = <({LyricLine line, int index})>[];
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i];
       if (line.text.isEmpty) continue;
@@ -359,16 +383,23 @@ class LyricLibrary {
         final t = row is List && row.isNotEmpty ? '${row.first}'.trim() : '';
         if (t.isNotEmpty) translation = t;
       }
-      out.add(translation == null
-          ? line
-          : LyricLine(
-              time: line.time,
-              text: line.text,
-              translation: translation,
-              words: line.words,
-            ));
+      out.add((
+        index: i,
+        line: translation == null
+            ? line
+            : LyricLine(
+                time: line.time,
+                text: line.text,
+                translation: translation,
+                words: line.words,
+              ),
+      ));
     }
-    return out;
+    out.sort((a, b) {
+      final time = a.line.time.compareTo(b.line.time);
+      return time == 0 ? a.index.compareTo(b.index) : time;
+    });
+    return [for (final entry in out) entry.line];
   }
 
   /// The translated lines (type 1; type 0 is a romanisation) of a KRC
@@ -386,4 +417,22 @@ class LyricLibrary {
     }
     return null;
   }
+}
+
+class _KrcSink implements Sink<List<int>> {
+  _KrcSink(this.limit);
+
+  final int limit;
+  final BytesBuilder bytes = BytesBuilder(copy: false);
+
+  @override
+  void add(List<int> chunk) {
+    if (bytes.length + chunk.length > limit) {
+      throw const FormatException('KRC lyrics expand beyond the size limit');
+    }
+    bytes.add(chunk);
+  }
+
+  @override
+  void close() {}
 }

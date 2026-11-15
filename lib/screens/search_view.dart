@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
@@ -50,6 +52,7 @@ class _SearchViewState extends State<SearchView> {
   List<Track> _localCache = const [];
   String? _localCacheQuery;
   List<Track>? _localCacheSource;
+  bool _paginationScheduled = false;
 
   static const int _collapsedLocal = 3;
 
@@ -71,18 +74,27 @@ class _SearchViewState extends State<SearchView> {
 
   bool _onScroll(ScrollNotification notification) {
     final metrics = notification.metrics;
-    if (metrics.axis == Axis.vertical &&
-        metrics.maxScrollExtent > 0 &&
-        metrics.pixels >= metrics.maxScrollExtent - 320) {
-      if (widget.query.value.trim().isEmpty) {
-        _recs.loadMore();
-      } else if (_online.hasSearched &&
-          _online.results.isNotEmpty &&
-          // Only while those results are what is on screen.
-          _online.query == widget.query.value.trim()) {
-        _online.loadMore();
-      }
+    if (_paginationScheduled ||
+        notification.depth != 0 ||
+        metrics.axis != Axis.vertical ||
+        metrics.maxScrollExtent <= 0 ||
+        metrics.extentAfter > 320) {
+      return false;
     }
+
+    // Scroll notifications can be dispatched during layout. Controller
+    // notifications must wait until the widget tree can rebuild again.
+    final query = widget.query.value.trim();
+    _paginationScheduled = true;
+    scheduleMicrotask(() {
+      _paginationScheduled = false;
+      if (!mounted || query != widget.query.value.trim()) return;
+      if (query.isEmpty && _recs.tracks.isNotEmpty) {
+        unawaited(_recs.loadMore());
+      } else if (_online.query == query && _online.results.isNotEmpty) {
+        unawaited(_online.loadMore());
+      }
+    });
     return false;
   }
 
@@ -180,7 +192,10 @@ class _SearchViewState extends State<SearchView> {
     }
     return [
       _songs(_recs.tracks),
-      if (_recs.loadingMore) const SliverToBoxAdapter(child: _Spinner()),
+      if (_recs.loadingMore)
+        const SliverToBoxAdapter(child: _Spinner())
+      else if (!_recs.reachedEnd && !_recs.loading)
+        _pageAction(_recs.loadMoreFailed, () => _recs.loadMore(force: true)),
     ];
   }
 
@@ -255,9 +270,9 @@ class _SearchViewState extends State<SearchView> {
       _songs(_online.results),
       if (_online.loadingMore)
         const SliverToBoxAdapter(child: _Spinner())
-      else if (_online.loadMoreFailed)
-        SliverToBoxAdapter(
-            child: Center(child: _retry(() => _online.loadMore(force: true)))),
+      else if (!_online.reachedEnd)
+        _pageAction(
+            _online.loadMoreFailed, () => _online.loadMore(force: true)),
     ];
   }
 
@@ -265,7 +280,7 @@ class _SearchViewState extends State<SearchView> {
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
       sliver: SliverFixedExtentList.builder(
-        itemExtent: SongTile.extent,
+        itemExtent: SongTile.extentOf(context),
         itemCount: tracks.length,
         itemBuilder: (context, index) {
           final track = tracks[index];
@@ -282,6 +297,14 @@ class _SearchViewState extends State<SearchView> {
   Widget _retry(VoidCallback onPressed) => TextButton(
         onPressed: onPressed,
         child: const Text('重试', style: TextStyle(color: AppColors.accent)),
+      );
+
+  Widget _pageAction(bool failed, VoidCallback loadMore) => SliverToBoxAdapter(
+        child: Center(
+          child: failed
+              ? _retry(loadMore)
+              : TextButton(onPressed: loadMore, child: const Text('加载更多')),
+        ),
       );
 }
 
@@ -363,7 +386,7 @@ class _SearchPrompt extends StatelessWidget {
           borderRadius: BorderRadius.circular(AppRadius.md),
           onTap: onTap,
           child: SizedBox(
-            height: SongTile.extent,
+            height: SongTile.extentOf(context),
             child: Row(
               children: [
                 const SizedBox(width: 4),

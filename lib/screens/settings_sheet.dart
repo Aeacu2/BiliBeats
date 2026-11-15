@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -67,12 +68,15 @@ class _SettingsSheetState extends State<SettingsSheet>
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     final snapshot = await LibraryTransfer.snapshot();
+    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
     if (snapshot.tracks.isEmpty) {
-      showAppSnackBar(messenger, message: '资料库是空的');
+      showAppSnackBar(messenger, message: '没有可导出的在线歌曲');
       return;
     }
-    await Clipboard.setData(
-        ClipboardData(text: LibraryTransfer.encode(snapshot)));
+    final text = await compute(LibraryTransfer.encode, snapshot);
+    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
     navigator.pop();
     showAppSnackBar(messenger,
         message: '已复制 ${snapshot.tracks.length} 首，在另一台设备上导入');
@@ -82,7 +86,9 @@ class _SettingsSheetState extends State<SettingsSheet>
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     final pasted = await Clipboard.getData(Clipboard.kTextPlain);
-    final snapshot = LibraryTransfer.decode(pasted?.text ?? '');
+    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
+    final snapshot = await compute(LibraryTransfer.decode, pasted?.text ?? '');
+    if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
     if (snapshot == null) {
       showAppSnackBar(messenger, message: '先在另一台设备上导出并复制');
       return;
@@ -96,6 +102,7 @@ class _SettingsSheetState extends State<SettingsSheet>
     );
     if (confirmed != true) return;
     final result = await LibraryTransfer.import(snapshot);
+    if (!messenger.mounted) return;
     showAppSnackBar(messenger,
         message: result.queued == 0 ? '歌曲都已在资料库中' : '正在下载 ${result.queued} 首');
   }
@@ -262,10 +269,12 @@ class _SettingsSheetState extends State<SettingsSheet>
                   onTap: () async {
                     final messenger = ScaffoldMessenger.of(context);
                     Navigator.of(context).pop();
-                    await Clipboard.setData(
-                        ClipboardData(text: await ErrorLog.read()));
-                    await ErrorLog.clear();
-                    showAppSnackBar(messenger, message: '已复制，可粘贴到反馈中');
+                    await ErrorLog.copyAndClear(
+                      (text) => Clipboard.setData(ClipboardData(text: text)),
+                    );
+                    if (messenger.mounted) {
+                      showAppSnackBar(messenger, message: '已复制，可粘贴到反馈中');
+                    }
                   },
                 ),
         ),
@@ -395,21 +404,16 @@ class _Toggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SheetAction(
-      icon: icon,
-      label: label,
-      onTap: () => onChanged(!value),
-      trailing: IgnorePointer(
-        child: Switch(
-          value: value,
-          onChanged: (_) {},
-          activeThumbColor: Colors.white,
-          activeTrackColor: AppColors.accent,
-          inactiveThumbColor: AppColors.textMuted,
-          inactiveTrackColor: AppColors.white12,
-          trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
-        ),
-      ),
+    return SwitchListTile(
+      secondary: Icon(icon, color: AppColors.textSecondary),
+      title: Text(label, style: AppTypography.body),
+      value: value,
+      onChanged: onChanged,
+      activeThumbColor: Colors.white,
+      activeTrackColor: AppColors.accent,
+      inactiveThumbColor: AppColors.textMuted,
+      inactiveTrackColor: AppColors.white12,
+      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
     );
   }
 }

@@ -73,7 +73,6 @@ class _HomePageState extends State<HomePage> {
     return ListenableBuilder(
       listenable: _library,
       builder: (context, _) {
-        final songs = _library.sortedDownloaded;
         return CustomScrollView(
           slivers: [
             if (_showProtectionHint)
@@ -95,7 +94,7 @@ class _HomePageState extends State<HomePage> {
               pinned: true,
               delegate: _LensBar(lens: _lens, onSelect: _select),
             ),
-            ..._lensBody(songs),
+            ..._lensBody(context),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
           ],
         );
@@ -103,9 +102,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  List<Widget> _lensBody(List<Track> songs) {
+  List<Widget> _lensBody(BuildContext context) {
     switch (_lens) {
       case _Lens.songs:
+        final songs = _library.sortedDownloaded;
         if (songs.isEmpty) {
           return [
             SliverToBoxAdapter(
@@ -130,7 +130,7 @@ class _HomePageState extends State<HomePage> {
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
             sliver: SliverFixedExtentList.builder(
-              itemExtent: SongTile.extent,
+              itemExtent: SongTile.extentOf(context),
               itemCount: songs.length,
               itemBuilder: (context, index) {
                 final track = songs[index];
@@ -149,13 +149,13 @@ class _HomePageState extends State<HomePage> {
         return [
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
-            sliver: SliverGrid.builder(
-              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                maxCrossAxisExtent: 220,
-                mainAxisSpacing: 18,
-                crossAxisSpacing: 16,
-                childAspectRatio: 0.76,
-              ),
+            sliver: _collectionGrid(
+              maxWidth: 220,
+              gap: 16,
+              rowGap: 18,
+              aspectRatio: 0.76,
+              titleSize: 15,
+              titleHeight: 1.4,
               itemCount: playlists.length + 1,
               itemBuilder: (context, index) => index < playlists.length
                   ? _PlaylistCard(playlist: playlists[index])
@@ -179,13 +179,13 @@ class _HomePageState extends State<HomePage> {
         return [
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
-            sliver: SliverGrid.builder(
-              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                maxCrossAxisExtent: 130,
-                mainAxisSpacing: 14,
-                crossAxisSpacing: 14,
-                childAspectRatio: 0.68,
-              ),
+            sliver: _collectionGrid(
+              maxWidth: 130,
+              gap: 14,
+              rowGap: 14,
+              aspectRatio: 0.68,
+              titleSize: 14,
+              titleHeight: 1.35,
               itemCount: artists.length,
               itemBuilder: (context, index) =>
                   _ArtistCard(artist: artists[index]),
@@ -193,6 +193,38 @@ class _HomePageState extends State<HomePage> {
           ),
         ];
     }
+  }
+
+  Widget _collectionGrid({
+    required double maxWidth,
+    required double gap,
+    required double rowGap,
+    required double aspectRatio,
+    required double titleSize,
+    required double titleHeight,
+    required int itemCount,
+    required IndexedWidgetBuilder itemBuilder,
+  }) {
+    return SliverLayoutBuilder(builder: (context, constraints) {
+      final width = constraints.crossAxisExtent;
+      final columns = ((width + gap) / (maxWidth + gap)).ceil().clamp(1, 100);
+      final itemWidth = (width - gap * (columns - 1)) / columns;
+      final scale = MediaQuery.textScalerOf(context);
+      final labels =
+          8 + scale.scale(titleSize) * titleHeight + scale.scale(12) * 1.3;
+      final height = (itemWidth + labels + 4).ceilToDouble();
+      return SliverGrid.builder(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: columns,
+          mainAxisSpacing: rowGap,
+          crossAxisSpacing: gap,
+          mainAxisExtent:
+              height.clamp(itemWidth / aspectRatio, double.infinity),
+        ),
+        itemCount: itemCount,
+        itemBuilder: itemBuilder,
+      );
+    });
   }
 }
 
@@ -289,18 +321,20 @@ class _LensLabel extends StatelessWidget {
     return Semantics(
       button: true,
       selected: selected,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Center(
-          child: AnimatedDefaultTextStyle(
-            duration: AppMotion.fast,
-            curve: AppMotion.standard,
-            style: AppTypography.headline.copyWith(
-              fontSize: 16,
-              color: selected ? AppColors.textPrimary : AppColors.textMuted,
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: onTap,
+          child: Center(
+            child: AnimatedDefaultTextStyle(
+              duration: AppMotion.fast,
+              curve: AppMotion.standard,
+              style: AppTypography.headline.copyWith(
+                fontSize: 16,
+                color: selected ? AppColors.textPrimary : AppColors.textMuted,
+              ),
+              child: Text(label, maxLines: 1),
             ),
-            child: Text(label, maxLines: 1),
           ),
         ),
       ),
@@ -413,7 +447,7 @@ class _RecentRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final count = tracks.length > 12 ? 12 : tracks.length;
     return SizedBox(
-      height: _size + 44,
+      height: _size + 28 + MediaQuery.textScalerOf(context).scale(13) * 1.3,
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
         scrollDirection: Axis.horizontal,

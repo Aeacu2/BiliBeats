@@ -32,8 +32,7 @@ usage() {
 BUMP="$1"; shift
 case "$BUMP" in
   patch|minor|major) ;;
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) usage ;;
+  *) [[ "$BUMP" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || usage ;;
 esac
 NOTES=("$@")
 
@@ -52,16 +51,6 @@ if [ "$BRANCH" != "main" ] && [ "${ALLOW_BRANCH:-}" != "1" ]; then
   echo "       (set ALLOW_BRANCH=1 to release from here anyway)." >&2
   exit 1
 fi
-
-# A step failing after the version is bumped must not leave a tree that
-# says it is the new version without the commit and tag that make it one.
-restore_tree() {
-  git reset -q -- pubspec.yaml CHANGELOG.md 2>/dev/null || true
-  git checkout -- pubspec.yaml CHANGELOG.md 2>/dev/null || true
-  rm -f CHANGELOG.md.new /tmp/release_entry.md
-  echo "error: release aborted; pubspec.yaml and CHANGELOG.md restored" >&2
-}
-trap restore_tree ERR
 
 if ! git diff --quiet origin/main main 2>/dev/null; then
   echo "warning: local main differs from origin/main — did you forget to pull/push?" >&2
@@ -102,10 +91,34 @@ case "$BUMP" in
 esac
 NEW_VERSION="$NEW_SHORT+$NEW_BUILD"
 
-if git rev-parse "v$NEW_SHORT" >/dev/null 2>&1; then
+TAG="v$NEW_SHORT"
+if git show-ref --verify --quiet "refs/tags/$TAG"; then
   echo "error: tag v$NEW_SHORT already exists" >&2
   exit 1
 fi
+
+ORIGINAL_HEAD=$(git rev-parse HEAD)
+RELEASE_COMMIT=""
+RELEASE_DIR=$(mktemp -d .release.XXXXXX)
+cleanup() {
+  local status=$?
+  rm -rf -- "$RELEASE_DIR" || true
+  if [ "$status" -ne 0 ]; then
+    # Roll back our commit only while it is still the branch tip.
+    if [ -n "$RELEASE_COMMIT" ]; then
+      if ! git update-ref HEAD "$ORIGINAL_HEAD" "$RELEASE_COMMIT"; then
+        echo "error: could not roll back release commit $RELEASE_COMMIT" >&2
+        exit "$status"
+      fi
+    fi
+    if [ "$(git rev-parse HEAD)" = "$ORIGINAL_HEAD" ]; then
+      git restore --source="$ORIGINAL_HEAD" --staged --worktree -- pubspec.yaml CHANGELOG.md
+      echo "error: release aborted; version files restored" >&2
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
 
 # sed -i needs a different invocation on macOS; the release machine may be
 # either, so branch instead of assuming one platform.
@@ -114,7 +127,7 @@ if [ "$(uname)" = "Darwin" ]; then
 else
   sed -i "s/^version: .*$/version: $NEW_VERSION/" pubspec.yaml
 fi
-grep -q "^version: $NEW_VERSION$" pubspec.yaml || {
+grep -Fqx "version: $NEW_VERSION" pubspec.yaml || {
   echo "error: failed to update pubspec.yaml" >&2; exit 1; }
 
 # --- Changelog ---------------------------------------------------------------
@@ -126,35 +139,34 @@ TODAY=$(date +%F)
     printf -- '- %s\n' "$note"
   done
   printf '\n'
-} > /tmp/release_entry.md
+} > "$RELEASE_DIR/entry"
 
 # Insert the entry right above the first existing version heading. A
 # CHANGELOG.md with no heading is a broken repo state, not an empty one — the
 # entry would silently vanish, so fail loudly instead.
 awk '
-  BEGIN { done = 0 }
+  NR == FNR { entry[++count] = $0; next }
   !done && /^## \[/ {
-    while ((getline line < "/tmp/release_entry.md") > 0) print line
-    close("/tmp/release_entry.md")
+    for (i = 1; i <= count; i++) print entry[i]
     done = 1
   }
   { print }
   END { if (!done) exit 1 }
-' CHANGELOG.md > CHANGELOG.md.new || {
+' "$RELEASE_DIR/entry" CHANGELOG.md > "$RELEASE_DIR/changelog" || {
   echo "error: no version heading in CHANGELOG.md — cannot place the entry" >&2
-  rm -f CHANGELOG.md.new /tmp/release_entry.md
   exit 1
 }
-mv CHANGELOG.md.new CHANGELOG.md
-rm -f /tmp/release_entry.md
+mv "$RELEASE_DIR/changelog" CHANGELOG.md
 
 # --- Commit + tag ------------------------------------------------------------
 
 FIRST_NOTE="${NOTES[0]}"
 git add pubspec.yaml CHANGELOG.md
 git commit -m "feat(release): $NEW_SHORT - $FIRST_NOTE"
-git tag "v$NEW_SHORT"
-trap - ERR
+RELEASE_COMMIT=$(git rev-parse HEAD)
+git tag "$TAG" "$RELEASE_COMMIT"
+trap - EXIT
+rm -rf -- "$RELEASE_DIR"
 
 echo
 echo "==> Released $NEW_VERSION (tag v$NEW_SHORT)"

@@ -9,7 +9,9 @@ import 'package:bilibeats/services/audio_player_handler.dart';
 import 'package:bilibeats/services/database_service.dart';
 import 'package:bilibeats/state/library_controller.dart';
 import 'package:bilibeats/theme/app_theme.dart';
+import 'package:bilibeats/widgets/song_tile.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'audio_test_harness.dart';
@@ -53,8 +55,13 @@ void main() {
     await DatabaseService.getDownloadedTracks();
   });
 
-  Future<BiliBeatsAudioHandler> boot(WidgetTester tester, Widget home) async {
-    tester.view.physicalSize = const Size(1170, 2532);
+  Future<BiliBeatsAudioHandler> boot(
+    WidgetTester tester,
+    Widget home, {
+    double width = 390,
+    double textScale = 1,
+  }) async {
+    tester.view.physicalSize = Size(width * 3, 2532);
     tester.view.devicePixelRatio = 3;
     tester.view.padding = const FakeViewPadding(top: 141, bottom: 102);
     addTearDown(tester.view.reset);
@@ -65,7 +72,15 @@ void main() {
       await LibraryController.instance.reload();
       await handler.playTrack(tracks[0], queue: tracks);
     });
-    await tester.pumpWidget(MaterialApp(theme: AppTheme.darkTheme, home: home));
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.darkTheme,
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context)
+            .copyWith(textScaler: TextScaler.linear(textScale)),
+        child: child!,
+      ),
+      home: home,
+    ));
     for (var i = 0; i < 8; i++) {
       await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 20)));
@@ -122,6 +137,43 @@ void main() {
     final handler = await boot(tester, const NowPlayingPage());
     // 收起 · 歌词 · 更多 · 收藏 · play mode · 上一首 · 播放 · 下一首 · 播放队列
     expectCentredTargets(tester, atLeast: 9);
+    await finish(tester, handler);
+  });
+
+  testWidgets('player controls fit a 320-point window', (tester) async {
+    final handler = await boot(tester, const NowPlayingPage(), width: 320);
+    expectCentredTargets(tester, atLeast: 9);
+    expect(tester.takeException(), isNull);
+    await finish(tester, handler);
+  });
+
+  testWidgets('home rows and collection grids grow with system text size',
+      (tester) async {
+    final handler =
+        await boot(tester, const AppShell(), width: 320, textScale: 2);
+    expect(tester.getSize(find.byType(SongTile).first).height,
+        greaterThan(SongTile.extent));
+    await tester.tap(find.text('歌单'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('歌手'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(tester.takeException(), isNull);
+    await finish(tester, handler);
+  });
+
+  testWidgets('the settings switch responds to keyboard activation',
+      (tester) async {
+    final handler = await boot(tester, const AppShell());
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pump(const Duration(milliseconds: 500));
+    final normalise = find.widgetWithText(SwitchListTile, '音量均衡');
+    final initial = handler.normalizeVolume.value;
+    final focus = Focus.of(tester.element(find.text('音量均衡')));
+    focus.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(tester.widget<SwitchListTile>(normalise).value, !initial);
     await finish(tester, handler);
   });
 
