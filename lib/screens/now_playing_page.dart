@@ -171,12 +171,23 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
       release();
       return;
     }
+    _startCalibration(track, release);
+  }
+
+  void _startCalibration(Track track, VoidCallback release) {
     _releaseHold?.call();
     _releaseHold = release;
     setState(() {
       _showLyrics = true;
       _calibrating = track;
     });
+  }
+
+  void _calibrateFromLyrics() {
+    final track = _handler.currentTrack;
+    if (track == null) return;
+    Haptics.selection();
+    _startCalibration(track, _handler.holdAutoAdvance());
   }
 
   void _endCalibration() {
@@ -424,6 +435,7 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
               onSeek: _handler.seek,
               calibrating: _calibrating != null,
               onCalibrate: _calibrate,
+              onStartCalibration: _calibrateFromLyrics,
             );
             if (_calibrating == null) return view;
             return Column(

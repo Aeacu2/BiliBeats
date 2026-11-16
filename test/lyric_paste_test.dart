@@ -74,6 +74,37 @@ void main() {
     expect(AppServices.instance.lyrics.state.value.lyrics.isEmpty, isTrue);
   });
 
+  testWidgetsWithHttp('scrolling lyrics offers direct calibration',
+      (tester) async {
+    final fake = FakeAudioPlayer();
+    late BiliBeatsAudioHandler handler;
+    await tester.runAsync(() async {
+      handler = await startPlaying(server, fake, ['lw-shortcut-a']);
+    });
+    final track = handler.currentTrack!;
+    await pumpPlayer(tester);
+    await settle(tester);
+    AppServices.instance.lyrics
+        .choose(
+          track,
+          Lyrics(source: 'netease', lines: [
+            for (var i = 0; i < 30; i++)
+              LyricLine(time: i * 5.0, text: 'shortcut $i'),
+          ]),
+        )
+        .ignore();
+    await settle(tester);
+    await tester.tap(find.byTooltip('歌词'));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.drag(find.text('shortcut 1'), const Offset(0, -200));
+    await tester.pump();
+    expect(find.byTooltip('回到当前'), findsOneWidget);
+    await tester.tap(find.byTooltip('校准歌词'));
+    await tester.pump();
+    expect(find.text('听到哪句，就点哪句'), findsOneWidget);
+    expect(fake.nativeLoopMode.name, 'one');
+  });
+
   testWidgetsWithHttp('calibrating shifts the playing song and ends on skip',
       (tester) async {
     final fake = FakeAudioPlayer();

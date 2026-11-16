@@ -34,6 +34,7 @@ class LyricsView extends StatefulWidget {
   final ValueListenable<bool>? playing;
   final ValueChanged<Duration>? onSeek;
   final bool calibrating;
+  final VoidCallback? onStartCalibration;
 
   /// Receives the absolute offset (seconds) the tapped line implies.
   final ValueChanged<double>? onCalibrate;
@@ -46,6 +47,7 @@ class LyricsView extends StatefulWidget {
     this.onSeek,
     this.calibrating = false,
     this.onCalibrate,
+    this.onStartCalibration,
   });
 
   /// People tap a moment after they hear a line begin.
@@ -318,10 +320,27 @@ class _LyricsViewState extends State<LyricsView> {
               Positioned(
                 right: 0,
                 bottom: 10,
-                child: _ResumeButton(onPressed: () {
-                  Haptics.selection();
-                  _resume();
-                }),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_synced && widget.onStartCalibration != null) ...[
+                      _LyricsActionButton(
+                        tooltip: '校准歌词',
+                        icon: Icons.tune_rounded,
+                        onPressed: widget.onStartCalibration!,
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    _LyricsActionButton(
+                      tooltip: '回到当前',
+                      icon: Icons.vertical_align_center_rounded,
+                      onPressed: () {
+                        Haptics.selection();
+                        _resume();
+                      },
+                    ),
+                  ],
+                ),
               ),
           ],
         );
@@ -670,10 +689,13 @@ class _KaraokePainter extends CustomPainter {
   bool shouldRepaint(_KaraokePainter old) => true;
 }
 
-class _ResumeButton extends StatelessWidget {
+class _LyricsActionButton extends StatelessWidget {
   final VoidCallback onPressed;
+  final String tooltip;
+  final IconData icon;
 
-  const _ResumeButton({required this.onPressed});
+  const _LyricsActionButton(
+      {required this.onPressed, required this.tooltip, required this.icon});
 
   @override
   Widget build(BuildContext context) {
@@ -683,13 +705,12 @@ class _ResumeButton extends StatelessWidget {
       child: InkWell(
         customBorder: const CircleBorder(),
         onTap: onPressed,
-        child: const Tooltip(
-          message: '回到当前',
+        child: Tooltip(
+          message: tooltip,
           child: SizedBox(
             width: 48,
             height: 48,
-            child: Icon(Icons.vertical_align_center_rounded,
-                color: AppColors.textPrimary, size: 22),
+            child: Icon(icon, color: AppColors.textPrimary, size: 22),
           ),
         ),
       ),
